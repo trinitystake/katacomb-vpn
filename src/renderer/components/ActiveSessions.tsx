@@ -1,0 +1,299 @@
+import { useState } from 'react'
+import { useConnection } from '../hooks/useConnection'
+import { usePlans } from '../hooks/usePlans'
+import Spinner from './Spinner'
+import type { SessionInfo } from '../types'
+
+interface Props {
+  sessions: SessionInfo[]
+  loading: boolean
+  refreshing: boolean
+  refresh: () => Promise<void>
+}
+
+function formatBytes(bytes: string): string {
+  const n = parseInt(bytes, 10)
+  if (isNaN(n) || n === 0) return '0 B'
+  if (n < 1024) return `${n} B`
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`
+  return `${(n / 1073741824).toFixed(2)} GB`
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds === null || seconds <= 0) return '—'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+function timeAgo(isoString: string | null): string {
+  if (!isoString) return '—'
+  const diff = Date.now() - new Date(isoString).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
+}
+
+function usagePercent(downloaded: string, max: string): number {
+  const d = parseInt(downloaded, 10)
+  const m = parseInt(max, 10)
+  if (isNaN(d) || isNaN(m) || m === 0) return 0
+  return Math.min(100, (d / m) * 100)
+}
+
+export default function ActiveSessions({ sessions, loading, refreshing, refresh }: Props) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const { status, refresh: refreshConnection } = useConnection()
+  const { allocations } = usePlans()
+  const vpnConnected = status.state === 'connected'
+
+  async function handleReconnect(session: SessionInfo) {
+    setBusy(session.id)
+    setError(null)
+
+    try {
+      const res = await window.api.connectionReconnect({
+        sessionId: session.id,
+      })
+
+      await window.api.connectionConnect({
+        protocol: res.protocol as 'wireguard' | 'v2ray',
+        configString: res.configString,
+      })
+
+      await refreshConnection()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Reconnection failed'
+      if (msg.includes('No saved config')) {
+        setError(`Session #${session.id}: No saved tunnel config. You can end this session to free it, then create a new subscription.`)
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function handleEndSession(session: SessionInfo) {
+    const isThisSessionConnected = vpnConnected && status.sessionId === session.id
+    const vpnWarning = vpnConnected && !isThisSessionConnected
+      ? '\n\nNote: Your current VPN connection will be temporarily interrupted to reach the blockchain.'
+      : ''
+    if (!confirm(`End session #${session.id}? This will close the session on-chain. Remaining data/time will be forfeited.${vpnWarning}`)) {
+      return
+    }
+
+    setBusy(session.id)
+    setError(null)
+
+    try {
+      if (vpnConnected) {
+        await window.api.connectionDisconnect()
+        await refreshConnection()
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+
+      await window.api.walletEndSession(session.id)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to end session')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <p className="text-text-secondary text-sm flex items-center gap-2">
+          <Spinner />
+          Loading sessions...
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
+        <h3 className="text-text-secondary text-xs font-medium uppercase tracking-wide">
+          Active Sessions ({sessions.length})
+        </h3>
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className="text-text-secondary text-xs hover:text-accent transition-colors flex items-center gap-1"
+        >
+          {refreshing ? <Spinner className="text-accent" /> : 'Refresh'}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mx-5 mt-3 bg-danger-subtle border border-danger p-2 rounded-md shrink-0">
+          <p className="text-danger text-sm">{error}</p>
+        </div>
+      )}
+
+      {sessions.length === 0 && allocations.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center">
+          <p className="text-text-secondary text-sm">No active sessions</p>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-5 space-y-2">
+          {allocations.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-text-tertiary text-[10px] font-medium uppercase tracking-wide px-1">
+                Plan Allocations ({allocations.length})
+              </div>
+              {allocations.map((a) => (
+                <div
+                  key={a.subscriptionId}
+                  className="bg-bg-tertiary border border-border px-4 py-2 rounded-md"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-accent text-xs font-mono font-semibold">
+                      sub #{a.subscriptionId}
+                    </span>
+                    <span className="text-text-secondary text-xs font-mono">
+                      plan #{a.planId}
+                    </span>
+                  </div>
+                  <div className="text-text-secondary text-xs mt-1">
+                    {formatBytes(a.planBytes)} · {formatDuration(a.planDurationSeconds)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {sessions.length > 0 && allocations.length > 0 && (
+            <div className="text-text-tertiary text-[10px] font-medium uppercase tracking-wide px-1 pt-2">
+              Sessions ({sessions.length})
+            </div>
+          )}
+          {sessions.map((session) => {
+            const isBusy = busy === session.id
+            const isConnectedSession = vpnConnected && status.sessionId === session.id
+            const pct = usagePercent(session.downloadBytes, session.maxBytes)
+            const hasTimeSub = session.maxDurationSeconds !== null && session.maxDurationSeconds > 0
+
+            return (
+              <div
+                key={session.id}
+                className={`bg-bg-tertiary border px-4 py-3 rounded-md ${
+                  isConnectedSession ? 'border-success bg-success-subtle' : 'border-border'
+                }`}
+              >
+                {/* Row 1: Session ID + Status + Actions */}
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-3">
+                    <span className={`text-sm font-semibold font-mono ${isConnectedSession ? 'text-success' : 'text-accent'}`}>
+                      #{session.id}
+                    </span>
+                    {isConnectedSession && (
+                      <span className="text-success text-xs border border-success px-1.5 py-0.5 rounded-sm font-medium">
+                        Connected
+                      </span>
+                    )}
+                    {session.subscriptionId && (
+                      <span className="text-text-secondary text-xs font-mono">
+                        sub #{session.subscriptionId}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {!isConnectedSession && (
+                      <button
+                        onClick={() => handleReconnect(session)}
+                        disabled={isBusy || busy !== null || vpnConnected}
+                        className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                        title={vpnConnected ? 'Disconnect current VPN first' : undefined}
+                      >
+                        {isBusy ? <Spinner className="text-white" /> : 'Connect'}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleEndSession(session)}
+                      disabled={isBusy || busy !== null}
+                      className="btn btn-danger text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      {isBusy ? <Spinner className="text-white" /> : 'End'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Row 2: Node info */}
+                <div className="flex items-center gap-3 mb-2 text-sm">
+                  {session.nodeMoniker && (
+                    <span className="text-text-primary font-medium">{session.nodeMoniker}</span>
+                  )}
+                  {session.nodeCountry && (
+                    <span className="text-text-secondary">{session.nodeCountry}</span>
+                  )}
+                  <span
+                    className="text-text-tertiary truncate cursor-pointer hover:text-accent transition-colors font-mono text-xs"
+                    title={`Click to copy: ${session.nodeAddress}`}
+                    onClick={() => navigator.clipboard.writeText(session.nodeAddress)}
+                  >
+                    {session.nodeAddress.slice(0, 16)}...{session.nodeAddress.slice(-6)}
+                  </span>
+                </div>
+
+                {/* Row 3: Data usage bar */}
+                <div className="mb-2">
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-text-secondary">
+                      Data: {formatBytes(session.downloadBytes)} / {formatBytes(session.maxBytes)}
+                    </span>
+                    <span className={`font-mono ${pct > 90 ? 'text-danger' : pct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
+                      {pct.toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
+                    <div
+                      className={`h-full transition-all rounded-full ${
+                        pct > 90 ? 'bg-danger' : pct > 70 ? 'bg-warning' : 'bg-info'
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Row 4: Time info (if hourly sub) */}
+                {hasTimeSub && (
+                  <div className="flex items-center gap-4 text-xs mb-2">
+                    <span className="text-text-secondary">
+                      Time: {formatDuration(session.durationSeconds)} / {formatDuration(session.maxDurationSeconds)}
+                    </span>
+                  </div>
+                )}
+
+                {/* Row 5: Meta info */}
+                <div className="flex items-center gap-4 text-xs text-text-tertiary">
+                  {session.startAt && (
+                    <span>Started {timeAgo(session.startAt)}</span>
+                  )}
+                  {session.priceDenom && session.priceValue && (
+                    <span>
+                      Price: <span className="font-mono">{(parseInt(session.priceValue, 10) / 1e6).toFixed(2)}</span> P2P
+                    </span>
+                  )}
+                  <span>
+                    Up: <span className="font-mono">{formatBytes(session.uploadBytes)}</span>
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}

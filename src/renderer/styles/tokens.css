@@ -1,0 +1,135 @@
+/* ============================================================
+   Design Tokens — Single Source of Truth
+
+   Naming convention:
+     --color-{category}-{variant}
+     --shadow-{size}
+     --radius-{size}
+     --font-{family}
+
+   Categories: bg, text, border, accent, success, danger, warning, info
+   Components reference ONLY semantic tokens (never primitives).
+   ============================================================ */
+
+:root {
+  /* ---- Primitive palette (mode-independent) ---- */
+  --color-slate-50:  #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+
+  --color-blue-50:  #eff6ff;
+  --color-blue-400: #60a5fa;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+
+  --color-teal-50:  #f0fdfa;
+  --color-teal-400: #2dd4bf;
+  --color-teal-500: #14b8a6;
+  --color-teal-600: #0d9488;
+
+  --color-green-50:  #f0fdf4;
+  --color-green-400: #4ade80;
+  --color-green-500: #22c55e;
+  --color-green-600: #16a34a;
+
+  --color-red-50:  #fef2f2;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #dc2626;
+
+  --color-amber-50:  #fffbeb;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+
+  /* ---- Semantic tokens: LIGHT mode (default) ---- */
+  --color-bg-primary:    var(--color-slate-50);
+  --color-bg-secondary:  #ffffff;
+  --color-bg-tertiary:   var(--color-slate-100);
+  --color-bg-hover:      var(--color-slate-100);
+
+  --color-text-primary:   var(--color-slate-900);
+  --color-text-secondary: var(--color-slate-500);
+  --color-text-tertiary:  var(--color-slate-400);
+
+  --color-border:        var(--color-slate-200);
+  --color-border-focus:  var(--color-blue-500);
+
+  --color-accent:        var(--color-blue-500);
+  --color-accent-hover:  var(--color-blue-600);
+  --color-accent-subtle: var(--color-blue-50);
+
+  --color-success:        var(--color-green-600);
+  --color-success-subtle: var(--color-green-50);
+  --color-danger:         var(--color-red-500);
+  --color-danger-subtle:  var(--color-red-50);
+  --color-warning:        var(--color-amber-500);
+  --color-warning-subtle: var(--color-amber-50);
+  --color-info:           var(--color-teal-500);
+  --color-info-subtle:    var(--color-teal-50);
+
+  /* ---- Shadows ---- */
+  --shadow-sm:      0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md:      0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg:      0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
+  --shadow-overlay: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
+
+  /* ---- Border radius ---- */
+  --radius-sm:   6px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-full: 9999px;
+
+  /* ---- Typography ---- */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+/* ---- Semantic tokens: DARK mode ---- */
+.dark {
+  --color-bg-primary:    var(--color-slate-900);
+  --color-bg-secondary:  var(--color-slate-800);
+  --color-bg-tertiary:   var(--color-slate-700);
+  --color-bg-hover:      var(--color-slate-700);
+
+  --color-text-primary:   var(--color-slate-100);
+  --color-text-secondary: var(--color-slate-400);
+  --color-text-tertiary:  var(--color-slate-500);
+
+  --color-border:        var(--color-slate-700);
+  --color-border-focus:  var(--color-blue-400);
+
+  --color-accent:        var(--color-blue-400);
+  --color-accent-hover:  var(--color-blue-500);
+  --color-accent-subtle: rgba(59, 130, 246, 0.1);
+
+  --color-success:        var(--color-green-400);
+  --color-success-subtle: rgba(34, 197, 94, 0.1);
+  --color-danger:         var(--color-red-400);
+  --color-danger-subtle:  rgba(239, 68, 68, 0.1);
+  --color-warning:        var(--color-amber-400);
+  --color-warning-subtle: rgba(245, 158, 11, 0.1);
+  --color-info:           var(--color-teal-400);
+  --color-info-subtle:    rgba(20, 184, 166, 0.1);
+
+  --shadow-sm:      0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md:      0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
+  --shadow-lg:      0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
+  --shadow-overlay: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+}
+
+/* ---- Smooth theme transitions ---- */
+html.transitioning,
+html.transitioning *,
+html.transitioning *::before,
+html.transitioning *::after {
+  transition: background-color 200ms ease, color 200ms ease, border-color 200ms ease, box-shadow 200ms ease, fill 200ms ease !important;
+}

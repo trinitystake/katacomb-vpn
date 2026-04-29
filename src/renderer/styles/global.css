@@ -1,0 +1,107 @@
+@import 'flag-icons/css/flag-icons.min.css';
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    @apply h-full w-full m-0 p-0;
+    background-color: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    font-family: var(--font-sans);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-text-tertiary) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-text-tertiary);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-text-secondary);
+  }
+
+  ::selection {
+    background-color: rgba(59, 130, 246, 0.2);
+    color: var(--color-accent);
+  }
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 text-sm font-medium rounded-sm border transition-colors duration-150;
+  }
+
+  .btn-primary {
+    @apply bg-accent border-accent text-white;
+  }
+
+  .btn-primary:hover {
+    @apply bg-accent-hover border-accent-hover;
+  }
+
+  .btn-secondary {
+    @apply border-border text-text-primary bg-transparent;
+  }
+
+  .btn-secondary:hover {
+    @apply bg-bg-hover;
+  }
+
+  .btn-danger {
+    @apply bg-danger border-danger text-white;
+  }
+
+  .btn-danger:hover {
+    opacity: 0.9;
+  }
+
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+  }
+
+  .status-dot-active {
+    background-color: var(--color-success);
+    animation: pulse-subtle 2s ease-in-out infinite;
+  }
+
+  .status-dot-inactive {
+    background-color: var(--color-text-tertiary);
+  }
+
+  .status-dot-pending {
+    background-color: var(--color-warning);
+    animation: pulse-subtle 1.5s ease-in-out infinite;
+  }
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 200ms ease-out;
+}

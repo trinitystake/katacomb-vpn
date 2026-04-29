@@ -1,0 +1,34 @@
+appId: com.sentinel.dvpn
+productName: Sentinel dVPN
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+extraResources:
+  - from: resources/linux/
+    to: linux/
+    filter:
+      - "**/*"
+      - "!v2ray/"
+  - from: resources/linux/v2ray/
+    to: linux/v2ray/
+    filter:
+      - "**/*"
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Network
+  icon: build/icons
+  desktop:
+    Name: Sentinel dVPN
+    Comment: Decentralized VPN Client
+    Categories: Network;VPN;Security;
+deb:
+  depends:
+    - wireguard-tools
+    - policykit-1
+  afterInstall: resources/linux/postinstall.sh
+appImage:
+  artifactName: sentinel-dvpn-${version}.AppImage

@@ -1,0 +1,64 @@
+import { app } from 'electron'
+import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { join } from 'path'
+
+export interface CachedPlan {
+  id: string
+  provAddress: string
+  bytes: string
+  durationSeconds: number | null
+  prices: { denom: string; baseValue: string; quoteValue: string }[]
+  private: boolean
+  status: number
+}
+
+interface CacheFile {
+  plans: CachedPlan[]
+  fetchedAt: number
+}
+
+const TTL_MS = 10 * 60 * 1000
+
+let memCache: CacheFile | null = null
+
+function cachePath(): string {
+  return join(app.getPath('userData'), 'plan-cache.json')
+}
+
+function loadFromDisk(): CacheFile | null {
+  const path = cachePath()
+  if (!existsSync(path)) return null
+  try {
+    const raw = readFileSync(path, 'utf-8')
+    const parsed = JSON.parse(raw) as CacheFile
+    if (!Array.isArray(parsed.plans) || typeof parsed.fetchedAt !== 'number') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function saveToDisk(cache: CacheFile): void {
+  try {
+    writeFileSync(cachePath(), JSON.stringify(cache), { mode: 0o600 })
+  } catch {
+    // best-effort
+  }
+}
+
+export function getCachedPlans(): { plans: CachedPlan[]; fetchedAt: number | null } {
+  if (!memCache) memCache = loadFromDisk()
+  if (!memCache) return { plans: [], fetchedAt: null }
+  return { plans: memCache.plans, fetchedAt: memCache.fetchedAt }
+}
+
+export function isCacheFresh(): boolean {
+  if (!memCache) memCache = loadFromDisk()
+  if (!memCache) return false
+  return Date.now() - memCache.fetchedAt < TTL_MS
+}
+
+export function setCachedPlans(plans: CachedPlan[]): void {
+  memCache = { plans, fetchedAt: Date.now() }
+  saveToDisk(memCache)
+}

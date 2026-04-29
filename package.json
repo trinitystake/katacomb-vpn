@@ -1,0 +1,43 @@
+{
+  "name": "sentinel-dvpn-app",
+  "version": "0.1.0",
+  "description": "Sentinel dVPN Desktop Client",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "dist": "electron-vite build && electron-builder --linux",
+    "dist:deb": "electron-vite build && electron-builder --linux deb",
+    "dist:appimage": "electron-vite build && electron-builder --linux AppImage"
+  },
+  "dependencies": {
+    "@cosmjs/proto-signing": "^0.38.1",
+    "@cosmjs/stargate": "^0.38.1",
+    "@electron-toolkit/utils": "^4.0.0",
+    "@sentinel-official/sentinel-js-sdk": "^2.0.4",
+    "@tanstack/react-virtual": "^3.13.0",
+    "bip39": "^3.1.0",
+    "flag-icons": "^7.3.2",
+    "long": "^5.2.3",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.0.0",
+    "postcss": "^8.4.49",
+    "sharp": "^0.34.5",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.0"
+  }
+}

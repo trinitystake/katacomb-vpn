@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('api', {
   planAllocations: () => ipcRenderer.invoke(IPC.PLAN_ALLOCATIONS),
   planSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SUBSCRIBE, params),
   planNodes: (planId: string) => ipcRenderer.invoke(IPC.PLAN_NODES, { planId }),
+  planListForNode: (nodeAddress: string) => ipcRenderer.invoke(IPC.PLAN_LIST_FOR_NODE, { nodeAddress }),
 
   providerGet: (address: string) => ipcRenderer.invoke(IPC.PROVIDER_GET, { address }),
   providerList: () => ipcRenderer.invoke(IPC.PROVIDER_LIST),

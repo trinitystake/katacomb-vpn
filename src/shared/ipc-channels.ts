@@ -57,6 +57,7 @@ export const IPC = {
   PLAN_ALLOCATIONS: 'plan:allocations',
   PLAN_SUBSCRIBE: 'plan:subscribe',
   PLAN_NODES: 'plan:nodes',
+  PLAN_LIST_FOR_NODE: 'plan:list-for-node',
 
   // Providers
   PROVIDER_GET: 'provider:get',

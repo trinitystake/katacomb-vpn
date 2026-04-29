@@ -166,7 +166,7 @@ export async function subscribeToNode(params: {
     msgArgs.hours = Long.fromNumber(amount, true)
   }
 
-  const msg = nodeStartSession(msgArgs as Parameters<typeof nodeStartSession>[0])
+  const msg = nodeStartSession(msgArgs as unknown as Parameters<typeof nodeStartSession>[0])
   const tx = await client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app')
 
   if (tx.code !== 0) {

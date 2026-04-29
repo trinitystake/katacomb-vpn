@@ -217,8 +217,11 @@ export async function getActiveSessions(): Promise<SessionInfo[]> {
   try {
     const client = await SentinelClient.connect(getRpcEndpoint())
     const result = await client.sentinelQuery?.session.sessionsForAccount(state.address, {
+      key: new Uint8Array(),
+      offset: Long.fromNumber(0, true),
       limit: Long.fromNumber(20, true),
       countTotal: true,
+      reverse: false,
     })
     client.disconnect()
 

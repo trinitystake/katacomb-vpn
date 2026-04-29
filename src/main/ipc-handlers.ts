@@ -14,7 +14,7 @@ import {
   logout,
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, deleteSessionConfig, endSession } from './sentinel-service'
-import { discoverPlans, listCachedPlans, listNodesForPlan, queryPlanAllocations, subscribeToPlan } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet } from './settings'
@@ -494,7 +494,6 @@ export function registerIpcHandlers(): void {
       sessionId,
       protocol: result.protocol,
       configString: result.configString,
-      proxyDetails: result.proxyDetails,
     }
   })
 
@@ -828,6 +827,16 @@ export function registerIpcHandlers(): void {
     if (isVpnActive()) return []
     try {
       return await listNodesForPlan(params.planId)
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle(IPC.PLAN_LIST_FOR_NODE, async (_event, params: { nodeAddress: string }) => {
+    assertString(params?.nodeAddress, 'nodeAddress')
+    if (isVpnActive()) return []
+    try {
+      return await listPlansForNode(params.nodeAddress)
     } catch {
       return []
     }

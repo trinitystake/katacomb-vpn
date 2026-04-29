@@ -15,6 +15,19 @@ import { getRpcEndpoint } from './settings'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, isCacheFresh, type CachedPlan } from './plan-cache'
+import { getCachedProviders } from './provider-cache'
+import type { ProviderInfo } from './provider-service'
+import { isTestPlan } from '../shared/test-plan'
+
+export type EnrichedPlan = CachedPlan & { isTest: boolean }
+
+function enrichPlans(plans: CachedPlan[], providers: ProviderInfo[]): EnrichedPlan[] {
+  const byAddr = new Map<string, ProviderInfo>(providers.map((p) => [p.address, p]))
+  return plans.map((p) => ({
+    ...p,
+    isTest: isTestPlan(p.private, byAddr.get(p.provAddress)?.name),
+  }))
+}
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 const PAGE_SIZE = 50
@@ -60,7 +73,7 @@ function sendDiscoverProgress(done: number, total: number, phase: 'connecting' |
   }
 }
 
-export async function discoverPlans(maxCount: number): Promise<CachedPlan[]> {
+export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
   sendDiscoverProgress(0, maxCount, 'connecting')
   const client = await SentinelClient.connect(getRpcEndpoint())
   try {
@@ -98,14 +111,17 @@ export async function discoverPlans(maxCount: number): Promise<CachedPlan[]> {
 
     setCachedPlans(results)
     sendDiscoverProgress(results.length, results.length, 'done')
-    return results
+    const { providers } = getCachedProviders()
+    return enrichPlans(results, providers)
   } finally {
     client.disconnect()
   }
 }
 
-export function listCachedPlans(): { plans: CachedPlan[]; fetchedAt: number | null } {
-  return getCachedPlans()
+export function listCachedPlans(): { plans: EnrichedPlan[]; fetchedAt: number | null } {
+  const cache = getCachedPlans()
+  const { providers } = getCachedProviders()
+  return { plans: enrichPlans(cache.plans, providers), fetchedAt: cache.fetchedAt }
 }
 
 export function cachedPlansAreFresh(): boolean {
@@ -162,6 +178,34 @@ export async function listNodesForPlan(planId: string): Promise<string[]> {
   } finally {
     client.disconnect()
   }
+}
+
+export async function listPlansForNode(nodeAddress: string): Promise<EnrichedPlan[]> {
+  const cache = getCachedPlans()
+  if (cache.plans.length === 0) return []
+
+  const compatibleIds = new Set<string>()
+  const queue = cache.plans.map((p) => p.id)
+  const CONCURRENCY = 4
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const id = queue.shift()
+      if (!id) return
+      try {
+        const addresses = await listNodesForPlan(id)
+        if (addresses.includes(nodeAddress)) compatibleIds.add(id)
+      } catch {
+        // skip individual failures; partial result is better than none
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()))
+
+  const compatible = cache.plans.filter((p) => compatibleIds.has(p.id))
+  const { providers } = getCachedProviders()
+  return enrichPlans(compatible, providers)
 }
 
 export interface PlanAllocationInfo {

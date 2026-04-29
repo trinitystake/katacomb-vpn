@@ -147,6 +147,7 @@ export interface PlanInfo {
   prices: { denom: string; baseValue: string; quoteValue: string }[]
   private: boolean
   status: number
+  isTest: boolean
 }
 
 export interface ProviderInfo {
@@ -249,6 +250,7 @@ export interface ElectronAPI {
     apiField: string
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planNodes: (planId: string) => Promise<string[]>
+  planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
   onPlanDiscoverProgress: (callback: (progress: DiscoverProgress) => void) => () => void
 
   providerGet: (address: string) => Promise<ProviderInfo | null>

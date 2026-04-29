@@ -3,7 +3,6 @@ import type { SentNode, NodeProbeResult, PlanInfo } from '../types'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useSettings } from '../contexts/SettingsContext'
-import { usePlans } from '../hooks/usePlans'
 
 function formatBytes(bytes: string): string {
   const n = parseInt(bytes, 10)
@@ -25,18 +24,26 @@ function formatDuration(seconds: number | null): string {
 }
 
 interface PlanPickerProps {
-  plans: PlanInfo[]
+  plans: PlanInfo[] | null // null = loading
   selectedPlanId: string | null
   onSelect: (id: string) => void
   balance: string | null
 }
 
 function PlanPicker({ plans, selectedPlanId, onSelect, balance }: PlanPickerProps) {
+  if (plans === null) {
+    return (
+      <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center">
+        <Spinner />
+        <p className="text-text-secondary text-sm mt-2">Loading compatible plans for this node…</p>
+      </div>
+    )
+  }
   if (plans.length === 0) {
     return (
       <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center">
-        <p className="text-text-secondary text-sm mb-1">No plans discovered yet</p>
-        <p className="text-text-tertiary text-xs">Open Settings → Plans and run Discover Plans</p>
+        <p className="text-text-secondary text-sm mb-1">No plans available for this node</p>
+        <p className="text-text-tertiary text-xs">No discovered plan currently lists this node as compatible.</p>
       </div>
     )
   }
@@ -78,9 +85,6 @@ function PlanPicker({ plans, selectedPlanId, onSelect, balance }: PlanPickerProp
           Wallet balance: <span className="text-success font-mono">{balance} P2P</span>
         </div>
       )}
-      <p className="text-text-tertiary text-xs">
-        Plans pre-pay a bundle across the provider's nodes. If the selected plan isn't linked to this node, the subscription will be rejected.
-      </p>
     </div>
   )
 }
@@ -115,7 +119,8 @@ function hourlyIsCheaper(
 export default function ConnectionModal({ node, onClose }: Props) {
   const active = node.isActive && node.isHealthy
   const { settings } = useSettings()
-  const { plans } = usePlans()
+  // Plans compatible with THIS node. null = still loading.
+  const [compatiblePlans, setCompatiblePlans] = useState<PlanInfo[] | null>(null)
   const gbPriceInit = getUdvpnPrice(node.gigabytePrices)
   const hrPriceInit = getUdvpnPrice(node.hourlyPrices)
   const preferHourly = settings?.preferHourlyWhenCheaper ?? false
@@ -147,6 +152,21 @@ export default function ConnectionModal({ node, onClose }: Props) {
       setBalance(udvpn ? (parseInt(udvpn.amount, 10) / 1e6).toFixed(2) : '0.00')
     })
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .planListForNode(node.address)
+      .then((plans) => {
+        if (!cancelled) setCompatiblePlans(plans)
+      })
+      .catch(() => {
+        if (!cancelled) setCompatiblePlans([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [node.address])
 
   useEffect(() => {
     const unsub = window.api.onConnectionProgress((step, _detail) => {
@@ -365,7 +385,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
         {/* Subscription form */}
         {!tunnelConnected && !connecting && !error && !vpnWarning && (
           <>
-            {plans.length > 0 && (
+            {compatiblePlans !== null && compatiblePlans.length > 0 && (
               <div className="flex gap-2 border border-border rounded-md p-0.5 bg-bg-tertiary">
                 <button
                   onClick={() => setMode('node')}
@@ -436,7 +456,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             {mode === 'plan' && (
               <PlanPicker
-                plans={plans}
+                plans={compatiblePlans}
                 selectedPlanId={selectedPlanId}
                 onSelect={setSelectedPlanId}
                 balance={balance}

@@ -79,7 +79,6 @@ function pricePerDay(plan: PlanInfo): number | null {
 
 type ProviderState = ProviderInfo | null | 'loading'
 type NodeListState = { addresses: string[] } | 'loading' | 'error'
-type Visibility = 'all' | 'public' | 'private'
 type SortBy = 'price' | 'data' | 'duration' | 'provider'
 type SortDir = 'asc' | 'desc'
 
@@ -97,6 +96,14 @@ function providerDisplayName(state: ProviderState | undefined, address: string):
 
 function hasResolvedNodes(state: NodeListState | undefined): state is { addresses: string[] } {
   return !!state && state !== 'loading' && state !== 'error' && state.addresses.length > 0
+}
+
+// Loose check used by the "Has nodes" filter: a plan is hidden only when we
+// know with certainty that it has zero nodes. Loading/error/unknown plans stay
+// visible so the list isn't empty while the bulk fetch is in flight.
+function isKnownEmptyNodes(state: NodeListState | undefined): boolean {
+  if (state === undefined || state === 'loading' || state === 'error') return false
+  return state.addresses.length === 0
 }
 
 // Icons
@@ -196,7 +203,7 @@ function IconNode({ className = '' }: { className?: string }) {
 
 export default function PlanDiscovery() {
   const { settings } = useSettings()
-  const { plans, fetchedAt, allocations, discovering, progress, discover } = usePlans()
+  const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached } = usePlans()
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [providers, setProviders] = useState<Record<string, ProviderState>>({})
@@ -205,13 +212,13 @@ export default function PlanDiscovery() {
   const fetchedProviderAddrs = useRef<Set<string>>(new Set())
 
   // Filter state
-  const [visibility, setVisibility] = useState<Visibility>('all')
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<SortBy>('price')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
   const [freeOnly, setFreeOnly] = useState(false)
-  const [hasNodesOnly, setHasNodesOnly] = useState(false)
+  const [hasNodesOnly, setHasNodesOnly] = useState(true)
   const [subscribedOnly, setSubscribedOnly] = useState(false)
+  const [showTests, setShowTests] = useState(false)
 
   // Sidebar provider group collapse state. Absent key = collapsed.
   const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({})
@@ -291,6 +298,10 @@ export default function PlanDiscovery() {
           }
           return next
         })
+        // Provider cache in main is now warm — refresh plans so `isTest` is
+        // recomputed against the freshly-cached provider names. No-op if
+        // nothing changed; idempotent.
+        refreshCached()
       } catch {
         setProviders((prev) => {
           const next = { ...prev }
@@ -300,7 +311,7 @@ export default function PlanDiscovery() {
       }
     }
     run()
-  }, [plans])
+  }, [plans, refreshCached])
 
   // Load node directory once when plans are available
   useEffect(() => {
@@ -326,6 +337,45 @@ export default function PlanDiscovery() {
       .catch(() => setPlanNodes((prev) => ({ ...prev, [selectedId]: 'error' })))
   }, [selectedId, planNodes])
 
+  // Bulk-fetch node lists for all plans when the "Has nodes" filter is active.
+  // Throttled to keep the RPC from being thundering-herded; main-process cache
+  // makes repeats free. We track started ids in a ref so the effect doesn't
+  // re-cancel itself on every per-plan state update.
+  const bulkStarted = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!hasNodesOnly || plans.length === 0) return
+    const todo: string[] = []
+    for (const p of plans) {
+      if (!bulkStarted.current.has(p.id)) {
+        bulkStarted.current.add(p.id)
+        todo.push(p.id)
+      }
+    }
+    if (todo.length === 0) return
+
+    setPlanNodes((prev) => {
+      const next = { ...prev }
+      for (const id of todo) if (!(id in next)) next[id] = 'loading'
+      return next
+    })
+
+    const CONCURRENCY = 4
+    const queue = [...todo]
+    async function worker() {
+      while (true) {
+        const id = queue.shift()
+        if (!id) return
+        try {
+          const addresses = await window.api.planNodes(id)
+          setPlanNodes((prev) => ({ ...prev, [id]: { addresses } }))
+        } catch {
+          setPlanNodes((prev) => ({ ...prev, [id]: 'error' }))
+        }
+      }
+    }
+    Promise.all(Array.from({ length: CONCURRENCY }, worker)).catch(() => {})
+  }, [hasNodesOnly, plans])
+
   function retryPlanNodes(planId: string) {
     setPlanNodes((prev) => {
       const next = { ...prev }
@@ -334,17 +384,6 @@ export default function PlanDiscovery() {
     })
   }
 
-  // Counts for the visibility pills
-  const counts = useMemo(() => {
-    let pub = 0
-    let priv = 0
-    for (const p of plans) {
-      if (p.private) priv++
-      else pub++
-    }
-    return { all: plans.length, public: pub, private: priv }
-  }, [plans])
-
   const hasNodesKnownCount = useMemo(() => {
     let n = 0
     for (const p of plans) if (hasResolvedNodes(planNodes[p.id])) n++
@@ -352,19 +391,19 @@ export default function PlanDiscovery() {
   }, [plans, planNodes])
 
   const anyFilterActive =
-    visibility !== 'all' ||
+    showTests ||
     search.trim() !== '' ||
     freeOnly ||
-    hasNodesOnly ||
+    !hasNodesOnly ||
     subscribedOnly ||
     sortBy !== 'price' ||
     sortDir !== 'asc'
 
   function clearAllFilters() {
-    setVisibility('all')
+    setShowTests(false)
     setSearch('')
     setFreeOnly(false)
-    setHasNodesOnly(false)
+    setHasNodesOnly(true)
     setSubscribedOnly(false)
     setSortBy('price')
     setSortDir('asc')
@@ -373,11 +412,10 @@ export default function PlanDiscovery() {
   // Filter
   const filtered = useMemo(() => {
     let list = plans
-    if (visibility === 'public') list = list.filter((p) => !p.private)
-    else if (visibility === 'private') list = list.filter((p) => p.private)
+    if (!showTests) list = list.filter((p) => !p.isTest)
     if (subscribedOnly) list = list.filter((p) => allocByPlanId.has(p.id))
     if (freeOnly) list = list.filter((p) => priceUdvpn(p) === 0)
-    if (hasNodesOnly) list = list.filter((p) => hasResolvedNodes(planNodes[p.id]))
+    if (hasNodesOnly) list = list.filter((p) => !isKnownEmptyNodes(planNodes[p.id]))
     const q = search.trim().toLowerCase()
     if (q) {
       list = list.filter((p) => {
@@ -394,7 +432,7 @@ export default function PlanDiscovery() {
       })
     }
     return list
-  }, [plans, visibility, subscribedOnly, freeOnly, hasNodesOnly, planNodes, allocByPlanId, search, providers])
+  }, [plans, showTests, subscribedOnly, freeOnly, hasNodesOnly, planNodes, allocByPlanId, search, providers])
 
   // Group by provider, sort within, then sort groups
   const grouped = useMemo(() => {
@@ -501,32 +539,12 @@ export default function PlanDiscovery() {
 
             <div className="h-7 w-px bg-border mx-1 shrink-0" aria-hidden="true" />
 
-            <div
-              role="tablist"
-              aria-label="Visibility filter"
-              className="flex items-center bg-bg-tertiary border border-border rounded-md overflow-hidden"
-            >
-              {(['all', 'public', 'private'] as const).map((v) => {
-                const active = visibility === v
-                return (
-                  <button
-                    key={v}
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => setVisibility(v)}
-                    className={`relative px-3 py-2 text-xs capitalize transition-colors flex items-center gap-1.5 border-l border-border first:border-l-0 ${
-                      active
-                        ? 'bg-accent/15 text-accent after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-accent'
-                        : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
-                    }`}
-                  >
-                    {v}
-                    <span className="font-mono text-[10px] opacity-60">{counts[v]}</span>
-                  </button>
-                )
-              })}
-            </div>
-
+            <FilterChip
+              label="Show tests"
+              active={showTests}
+              onClick={() => setShowTests((v) => !v)}
+              title={'Include test plans (private flag, or provider names containing "test", "staging", "demo", "do not use")'}
+            />
             <FilterChip
               label="Free"
               active={freeOnly}
@@ -537,11 +555,7 @@ export default function PlanDiscovery() {
               count={hasNodesKnownCount}
               active={hasNodesOnly}
               onClick={() => setHasNodesOnly((v) => !v)}
-              title={
-                hasNodesKnownCount === 0
-                  ? 'Open plans to load their node counts first'
-                  : undefined
-              }
+              title="Hide plans known to have zero compatible nodes (loading plans stay visible)"
             />
             <FilterChip
               label="Subscribed"

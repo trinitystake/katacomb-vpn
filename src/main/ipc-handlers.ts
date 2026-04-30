@@ -14,7 +14,7 @@ import {
   logout,
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, deleteSessionConfig, endSession } from './sentinel-service'
-import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet } from './settings'
@@ -788,6 +788,64 @@ export function registerIpcHandlers(): void {
       address,
       planId: params.planId,
       denom: params.denom,
+      nodeAddress: params.nodeAddress,
+    })
+
+    const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
+
+    const result = await performHandshake({
+      sessionId,
+      nodeAddress: params.nodeAddress,
+      nodeType: params.nodeType,
+      remoteUrl,
+      privKey,
+      nodeMoniker: params.nodeMoniker,
+      nodeCountry: params.nodeCountry,
+    })
+
+    activeSessionId = sessionId
+    activeNodeInfo = {
+      address: params.nodeAddress,
+      moniker: params.nodeMoniker,
+      country: params.nodeCountry,
+      type: params.nodeType,
+    }
+    activeWg = result.wgInstance
+    activeV2ray = result.v2rayInstance
+
+    return {
+      sessionId,
+      subscriptionId,
+      protocol: result.protocol,
+      configString: result.configString,
+    }
+  })
+
+  ipcMain.handle(IPC.PLAN_START_SESSION_FROM_SUB, async (_event, params: {
+    subscriptionId: string
+    nodeAddress: string
+    nodeMoniker: string
+    nodeCountry: string
+    nodeType: 1 | 2
+    apiField: string
+  }) => {
+    assertString(params.subscriptionId, 'subscriptionId')
+    if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    assertSentAddress(params.nodeAddress, 'nodeAddress')
+    assertString(params.nodeMoniker, 'nodeMoniker')
+    assertString(params.nodeCountry, 'nodeCountry')
+    if (params.nodeType !== 1 && params.nodeType !== 2) throw new Error('Invalid nodeType')
+    assertString(params.apiField, 'apiField')
+
+    const wallet = getWallet()
+    const address = getAddress()
+    const privKey = getPrivKey()
+    if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
+
+    const { sessionId, subscriptionId } = await startSessionWithExistingSubscription({
+      wallet,
+      address,
+      subscriptionId: params.subscriptionId,
       nodeAddress: params.nodeAddress,
     })
 

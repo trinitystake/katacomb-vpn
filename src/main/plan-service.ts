@@ -25,7 +25,7 @@ function enrichPlans(plans: CachedPlan[], providers: ProviderInfo[]): EnrichedPl
   const byAddr = new Map<string, ProviderInfo>(providers.map((p) => [p.address, p]))
   return plans.map((p) => ({
     ...p,
-    isTest: isTestPlan(p.private, byAddr.get(p.provAddress)?.name),
+    isTest: isTestPlan(byAddr.get(p.provAddress)?.name),
   }))
 }
 
@@ -269,6 +269,45 @@ export async function queryPlanAllocations(walletAddress: string): Promise<PlanA
         status: s.status,
       }
     })
+  } finally {
+    client.disconnect()
+  }
+}
+
+export async function startSessionWithExistingSubscription(params: {
+  wallet: DirectSecp256k1HdWallet
+  address: string
+  subscriptionId: string
+  nodeAddress: string
+}): Promise<{ sessionId: string; subscriptionId: string }> {
+  const { wallet, address, subscriptionId, nodeAddress } = params
+  const client = await SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, {
+    gasPrice: GAS_PRICE,
+  })
+  try {
+    const tx = await client.subscriptionStartSession({
+      from: address,
+      id: Long.fromString(subscriptionId, true),
+      nodeAddress,
+      memo: 'sentinel-dvpn-app: subscription start session',
+    } as Parameters<typeof client.subscriptionStartSession>[0])
+
+    if (tx.code !== 0) {
+      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
+    }
+
+    const sessionEvent = searchEvent(SubscriptionEventCreateSession.type, tx.events)
+    if (!sessionEvent) {
+      throw new Error('Could not find session creation event in subscription transaction')
+    }
+    const parsed = SubscriptionEventCreateSession.parse(sessionEvent)
+    const sessionId = parsed.value.sessionId
+    if (!sessionId) throw new Error('Session ID missing from subscription event')
+
+    return {
+      sessionId: sessionId.toString(),
+      subscriptionId: parsed.value.subscriptionId?.toString() || subscriptionId,
+    }
   } finally {
     client.disconnect()
   }

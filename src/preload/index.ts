@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld('api', {
   planListCached: () => ipcRenderer.invoke(IPC.PLAN_LIST_CACHED),
   planAllocations: () => ipcRenderer.invoke(IPC.PLAN_ALLOCATIONS),
   planSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SUBSCRIBE, params),
+  planStartSessionFromSub: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_START_SESSION_FROM_SUB, params),
   planNodes: (planId: string) => ipcRenderer.invoke(IPC.PLAN_NODES, { planId }),
   planListForNode: (nodeAddress: string) => ipcRenderer.invoke(IPC.PLAN_LIST_FOR_NODE, { nodeAddress }),
 

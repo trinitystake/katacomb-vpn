@@ -1,93 +1,9 @@
 import { useState, useEffect } from 'react'
-import type { SentNode, NodeProbeResult, PlanInfo } from '../types'
+import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../types'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useSettings } from '../contexts/SettingsContext'
-
-function formatBytes(bytes: string): string {
-  const n = parseInt(bytes, 10)
-  if (!Number.isFinite(n) || n === 0) return '—'
-  if (n < 1024) return `${n} B`
-  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`
-  return `${(n / 1073741824).toFixed(2)} GB`
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds === null || seconds <= 0) return '—'
-  const days = Math.floor(seconds / 86400)
-  if (days > 0) return `${days}d`
-  const hours = Math.floor(seconds / 3600)
-  if (hours > 0) return `${hours}h`
-  const mins = Math.floor(seconds / 60)
-  return `${mins}m`
-}
-
-interface PlanPickerProps {
-  plans: PlanInfo[] | null // null = loading
-  selectedPlanId: string | null
-  onSelect: (id: string) => void
-  balance: string | null
-}
-
-function PlanPicker({ plans, selectedPlanId, onSelect, balance }: PlanPickerProps) {
-  if (plans === null) {
-    return (
-      <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center">
-        <Spinner />
-        <p className="text-text-secondary text-sm mt-2">Loading compatible plans for this node…</p>
-      </div>
-    )
-  }
-  if (plans.length === 0) {
-    return (
-      <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center">
-        <p className="text-text-secondary text-sm mb-1">No plans available for this node</p>
-        <p className="text-text-tertiary text-xs">No discovered plan currently lists this node as compatible.</p>
-      </div>
-    )
-  }
-  return (
-    <div className="space-y-2">
-      <div className="border border-border bg-bg-tertiary rounded-md max-h-[240px] overflow-y-auto divide-y divide-border">
-        {plans.map((plan) => {
-          const udvpn = plan.prices.find((p) => p.denom === 'udvpn')
-          const priceDisplay = udvpn ? (parseInt(udvpn.quoteValue, 10) / 1e6).toFixed(2) : '—'
-          const active = selectedPlanId === plan.id
-          return (
-            <button
-              key={plan.id}
-              type="button"
-              onClick={() => onSelect(plan.id)}
-              className={`w-full text-left px-4 py-2.5 text-sm transition-colors ${
-                active ? 'bg-accent/10' : 'hover:bg-bg-hover'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className={`font-mono font-semibold ${active ? 'text-accent' : 'text-text-primary'}`}>
-                  #{plan.id}
-                </span>
-                <span className="text-text-primary font-mono">{priceDisplay} P2P</span>
-              </div>
-              <div className="flex items-center justify-between text-xs text-text-secondary">
-                <span>{formatBytes(plan.bytes)} · {formatDuration(plan.durationSeconds)}</span>
-                {active && <span className="text-accent">Selected</span>}
-              </div>
-              <div className="text-text-tertiary text-xs font-mono mt-1 truncate" title={plan.provAddress}>
-                {plan.provAddress.slice(0, 20)}...{plan.provAddress.slice(-8)}
-              </div>
-            </button>
-          )
-        })}
-      </div>
-      {balance !== null && (
-        <div className="text-sm text-text-secondary">
-          Wallet balance: <span className="text-success font-mono">{balance} P2P</span>
-        </div>
-      )}
-    </div>
-  )
-}
+import { useNavigation } from '../contexts/NavigationContext'
 
 interface Props {
   node: SentNode
@@ -119,17 +35,18 @@ function hourlyIsCheaper(
 export default function ConnectionModal({ node, onClose }: Props) {
   const active = node.isActive && node.isHealthy
   const { settings } = useSettings()
+  const { goToPlansForNode } = useNavigation()
   // Plans compatible with THIS node. null = still loading.
   const [compatiblePlans, setCompatiblePlans] = useState<PlanInfo[] | null>(null)
+  // User's existing plan allocations (subscriptions). Used to detect reuse vs. fresh subscribe.
+  const [allocations, setAllocations] = useState<PlanAllocation[]>([])
   const gbPriceInit = getUdvpnPrice(node.gigabytePrices)
   const hrPriceInit = getUdvpnPrice(node.hourlyPrices)
   const preferHourly = settings?.preferHourlyWhenCheaper ?? false
   const defaultSubType: 'gigabytes' | 'hours' =
     preferHourly && hourlyIsCheaper(gbPriceInit, hrPriceInit) ? 'hours' : 'gigabytes'
-  const [mode, setMode] = useState<'node' | 'plan'>('node')
   const [subType, setSubType] = useState<'gigabytes' | 'hours'>(defaultSubType)
   const [amount, setAmount] = useState(1)
-  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null)
   const [balance, setBalance] = useState<string | null>(null)
   const [connecting, setConnecting] = useState(false)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
@@ -169,28 +86,67 @@ export default function ConnectionModal({ node, onClose }: Props) {
   }, [node.address])
 
   useEffect(() => {
+    let cancelled = false
+    window.api
+      .planAllocations()
+      .then((allocs) => {
+        if (!cancelled) setAllocations(allocs)
+      })
+      .catch(() => {
+        if (!cancelled) setAllocations([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Active allocation whose plan covers this node. When present we silently
+  // reuse it instead of charging the user per-GB or creating a new subscription.
+  const matchingAllocation = (() => {
+    if (!compatiblePlans || compatiblePlans.length === 0) return null
+    const compatibleIds = new Set(compatiblePlans.map((p) => p.id))
+    return allocations.find((a) => a.status === 1 && compatibleIds.has(a.planId)) ?? null
+  })()
+
+  useEffect(() => {
     const unsub = window.api.onConnectionProgress((step, _detail) => {
       setCurrentStep(step)
     })
     return unsub
   }, [])
 
-  async function handleProbe() {
+  // Auto-probe latency as soon as the modal opens — saves the user a click and
+  // surfaces reachability inline with the rest of the node details.
+  useEffect(() => {
+    let cancelled = false
     setProbing(true)
     setProbeResult(null)
-    try {
-      const result = await window.api.nodeTestProbe({ nodeAddress: node.address, remoteUrl: node.api })
-      setProbeResult(result)
-    } catch {
-      setProbeResult({ nodeAddress: node.address, timestamp: Date.now(), reachable: false, latencyMs: null, error: 'Probe failed' })
-    } finally {
-      setProbing(false)
+    window.api
+      .nodeTestProbe({ nodeAddress: node.address, remoteUrl: node.api })
+      .then((result) => {
+        if (!cancelled) setProbeResult(result)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProbeResult({
+            nodeAddress: node.address,
+            timestamp: Date.now(),
+            reachable: false,
+            latencyMs: null,
+            error: 'Probe failed',
+          })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setProbing(false)
+      })
+    return () => {
+      cancelled = true
     }
-  }
+  }, [node.address, node.api])
 
   async function handleSubscribe() {
-    if (mode === 'node' && !selectedPrice) return
-    if (mode === 'plan' && !selectedPlanId) return
+    if (!matchingAllocation && !selectedPrice) return
 
     if (!vpnWarning) {
       try {
@@ -210,10 +166,11 @@ export default function ConnectionModal({ node, onClose }: Props) {
     try {
       let protocol: string
 
-      if (mode === 'plan' && selectedPlanId) {
-        const res = await window.api.planSubscribe({
-          planId: selectedPlanId,
-          denom: 'udvpn',
+      if (matchingAllocation) {
+        // Reuse existing on-chain subscription — single MsgStartSession in
+        // sentinel.subscription.v3, no new subscription is created.
+        const res = await window.api.planStartSessionFromSub({
+          subscriptionId: matchingAllocation.subscriptionId,
           nodeAddress: node.address,
           nodeMoniker: node.moniker,
           nodeCountry: node.country,
@@ -251,6 +208,11 @@ export default function ConnectionModal({ node, onClose }: Props) {
     } finally {
       setConnecting(false)
     }
+  }
+
+  function handleSeePlansForNode() {
+    goToPlansForNode(node.address)
+    onClose()
   }
 
   async function handleDisconnect() {
@@ -321,28 +283,23 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </span>
             </span>
           </div>
-        </div>
-
-        {/* Node probe test */}
-        {!tunnelConnected && !connecting && !error && !vpnWarning && (
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleProbe}
-              disabled={probing}
-              className="text-sm text-text-secondary hover:text-accent transition-colors flex items-center gap-1.5 disabled:opacity-50"
-            >
-              {probing ? <><Spinner className="text-accent" /> Testing...</> : 'Test Node'}
-            </button>
-            {probeResult && (
-              <span className={`text-sm font-mono ${probeResult.reachable ? 'text-success' : 'text-danger'}`}>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">Latency</span>
+            {probing ? (
+              <span className="flex items-center gap-2 text-text-tertiary">
+                <Spinner className="text-accent" /> Measuring…
+              </span>
+            ) : probeResult ? (
+              <span className={`font-mono ${probeResult.reachable ? 'text-success' : 'text-danger'}`}>
                 {probeResult.reachable
                   ? `${probeResult.latencyMs}ms — Reachable`
-                  : `Unreachable${probeResult.error ? ` — ${probeResult.error}` : ''}`
-                }
+                  : `Unreachable${probeResult.error ? ` — ${probeResult.error}` : ''}`}
               </span>
+            ) : (
+              <span className="text-text-tertiary">—</span>
             )}
           </div>
-        )}
+        </div>
 
         {/* VPN conflict warning */}
         {vpnWarning && !connecting && (
@@ -385,28 +342,17 @@ export default function ConnectionModal({ node, onClose }: Props) {
         {/* Subscription form */}
         {!tunnelConnected && !connecting && !error && !vpnWarning && (
           <>
-            {compatiblePlans !== null && compatiblePlans.length > 0 && (
-              <div className="flex gap-2 border border-border rounded-md p-0.5 bg-bg-tertiary">
-                <button
-                  onClick={() => setMode('node')}
-                  className={`flex-1 text-xs py-1.5 rounded-sm transition-colors ${
-                    mode === 'node' ? 'bg-accent text-bg-primary font-medium' : 'text-text-secondary hover:text-text-primary'
-                  }`}
-                >
-                  Node Subscription
-                </button>
-                <button
-                  onClick={() => setMode('plan')}
-                  className={`flex-1 text-xs py-1.5 rounded-sm transition-colors ${
-                    mode === 'plan' ? 'bg-accent text-bg-primary font-medium' : 'text-text-secondary hover:text-text-primary'
-                  }`}
-                >
-                  Plan Subscription
-                </button>
+            {matchingAllocation ? (
+              <div className="bg-success/10 border border-success/40 rounded-md px-4 py-3 text-sm space-y-1">
+                <div className="text-success font-medium">
+                  Connecting via plan #{matchingAllocation.planId} · no new charge
+                </div>
+                <div className="text-text-secondary text-xs">
+                  Reusing your existing allocation <span className="font-mono text-text-primary">#{matchingAllocation.subscriptionId}</span>.
+                  Bytes will be deducted from this plan.
+                </div>
               </div>
-            )}
-
-            {mode === 'node' && (
+            ) : (
               <div className="space-y-3">
                 <div className="flex gap-4">
                   {(['gigabytes', 'hours'] as const).map((t) => (
@@ -454,26 +400,26 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
             )}
 
-            {mode === 'plan' && (
-              <PlanPicker
-                plans={compatiblePlans}
-                selectedPlanId={selectedPlanId}
-                onSelect={setSelectedPlanId}
-                balance={balance}
-              />
-            )}
-
             <button
               onClick={handleSubscribe}
-              disabled={
-                !active ||
-                (mode === 'node' && !selectedPrice) ||
-                (mode === 'plan' && !selectedPlanId)
-              }
+              disabled={!active || (!matchingAllocation && !selectedPrice)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              Subscribe & Connect
+              {matchingAllocation ? 'Connect via Plan' : 'Subscribe & Connect'}
             </button>
+
+            {!matchingAllocation && compatiblePlans && compatiblePlans.length > 0 && (
+              <div className="text-xs text-text-tertiary text-center pt-1">
+                This node is part of {compatiblePlans.length} plan{compatiblePlans.length === 1 ? '' : 's'} ·{' '}
+                <button
+                  type="button"
+                  onClick={handleSeePlansForNode}
+                  className="text-accent hover:underline"
+                >
+                  See Plans tab
+                </button>
+              </div>
+            )}
           </>
         )}
 

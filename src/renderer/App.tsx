@@ -14,17 +14,16 @@ import BinarySetup from './components/BinarySetup'
 import ThemeToggle from './components/ThemeToggle'
 import { ToastProvider } from './components/Toast'
 import { SettingsProvider } from './contexts/SettingsContext'
+import { NavigationProvider, useNavigation } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
 import appIcon from './assets/icon.png'
-
-type MainTab = 'nodes' | 'plans' | 'sessions'
 
 function AppInner() {
   const wallet = useWallet()
   const { status: connStatus } = useConnection()
   const isConnected = connStatus.state === 'connected' || connStatus.state === 'reconnecting'
   const [showSettings, setShowSettings] = useState(false)
-  const [mainTab, setMainTab] = useState<MainTab>('nodes')
+  const { mainTab, setMainTab } = useNavigation()
   const [showBinarySetup, setShowBinarySetup] = useState(true)
   const sessionsState = useSessions()
   const sessionCount = sessionsState.sessions.length
@@ -133,9 +132,11 @@ function AppInner() {
 export default function App() {
   return (
     <SettingsProvider>
-      <ToastProvider>
-        <AppInner />
-      </ToastProvider>
+      <NavigationProvider>
+        <ToastProvider>
+          <AppInner />
+        </ToastProvider>
+      </NavigationProvider>
     </SettingsProvider>
   )
 }

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePlans } from '../hooks/usePlans'
 import { useSettings } from '../contexts/SettingsContext'
-import type { PlanInfo, ProviderInfo, SentNode } from '../types'
+import { useNavigation } from '../contexts/NavigationContext'
+import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode } from '../types'
 import Spinner from './Spinner'
+import ProgressSteps from './ProgressSteps'
 
 const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited sentinel set by the provider
 
@@ -94,16 +96,11 @@ function providerDisplayName(state: ProviderState | undefined, address: string):
   return `${address.slice(0, 12)}…${address.slice(-6)}`
 }
 
-function hasResolvedNodes(state: NodeListState | undefined): state is { addresses: string[] } {
+// "Has nodes" filter: only show plans we've confirmed have ≥1 linked node.
+// Unresolved plans (undefined / loading / error) are hidden so the list grows
+// from empty as the bulk fetch resolves, rather than starting full and shrinking.
+function isKnownToHaveNodes(state: NodeListState | undefined): state is { addresses: string[] } {
   return !!state && state !== 'loading' && state !== 'error' && state.addresses.length > 0
-}
-
-// Loose check used by the "Has nodes" filter: a plan is hidden only when we
-// know with certainty that it has zero nodes. Loading/error/unknown plans stay
-// visible so the list isn't empty while the bulk fetch is in flight.
-function isKnownEmptyNodes(state: NodeListState | undefined): boolean {
-  if (state === undefined || state === 'loading' || state === 'error') return false
-  return state.addresses.length === 0
 }
 
 // Icons
@@ -203,6 +200,7 @@ function IconNode({ className = '' }: { className?: string }) {
 
 export default function PlanDiscovery() {
   const { settings } = useSettings()
+  const { plansNodeFilter, clearPlansNodeFilter } = useNavigation()
   const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached } = usePlans()
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -215,13 +213,18 @@ export default function PlanDiscovery() {
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<SortBy>('price')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
-  const [freeOnly, setFreeOnly] = useState(false)
   const [hasNodesOnly, setHasNodesOnly] = useState(true)
   const [subscribedOnly, setSubscribedOnly] = useState(false)
+  const [publicOnly, setPublicOnly] = useState(true)
   const [showTests, setShowTests] = useState(false)
 
   // Sidebar provider group collapse state. Absent key = collapsed.
   const [expandedProviders, setExpandedProviders] = useState<Record<string, boolean>>({})
+
+  // Allocation the user is connecting through (drives the node-picker modal).
+  const [connectingAllocation, setConnectingAllocation] = useState<PlanAllocation | null>(null)
+  // Plan the user is subscribing to from the Plans tab (no existing allocation).
+  const [subscribingPlan, setSubscribingPlan] = useState<PlanInfo | null>(null)
 
   // Sort dropdown
   const [sortOpen, setSortOpen] = useState(false)
@@ -343,7 +346,7 @@ export default function PlanDiscovery() {
   // re-cancel itself on every per-plan state update.
   const bulkStarted = useRef<Set<string>>(new Set())
   useEffect(() => {
-    if (!hasNodesOnly || plans.length === 0) return
+    if ((!hasNodesOnly && !plansNodeFilter) || plans.length === 0) return
     const todo: string[] = []
     for (const p of plans) {
       if (!bulkStarted.current.has(p.id)) {
@@ -374,7 +377,7 @@ export default function PlanDiscovery() {
       }
     }
     Promise.all(Array.from({ length: CONCURRENCY }, worker)).catch(() => {})
-  }, [hasNodesOnly, plans])
+  }, [hasNodesOnly, plansNodeFilter, plans])
 
   function retryPlanNodes(planId: string) {
     setPlanNodes((prev) => {
@@ -384,38 +387,52 @@ export default function PlanDiscovery() {
     })
   }
 
-  const hasNodesKnownCount = useMemo(() => {
-    let n = 0
-    for (const p of plans) if (hasResolvedNodes(planNodes[p.id])) n++
-    return n
-  }, [plans, planNodes])
+  // True while the "Has nodes" bulk fetch is still resolving plans. Drives the
+  // loading state in the sidebar so the list doesn't appear "empty" before the
+  // first plans are confirmed to have nodes.
+  const hasNodesBulkLoading = useMemo(() => {
+    if (!hasNodesOnly || plans.length === 0) return false
+    for (const p of plans) {
+      const s = planNodes[p.id]
+      if (s === undefined || s === 'loading') return true
+    }
+    return false
+  }, [hasNodesOnly, plans, planNodes])
 
   const anyFilterActive =
     showTests ||
     search.trim() !== '' ||
-    freeOnly ||
     !hasNodesOnly ||
+    !publicOnly ||
     subscribedOnly ||
+    plansNodeFilter !== null ||
     sortBy !== 'price' ||
     sortDir !== 'asc'
 
   function clearAllFilters() {
     setShowTests(false)
     setSearch('')
-    setFreeOnly(false)
     setHasNodesOnly(true)
+    setPublicOnly(true)
     setSubscribedOnly(false)
     setSortBy('price')
     setSortDir('asc')
+    clearPlansNodeFilter()
   }
 
   // Filter
   const filtered = useMemo(() => {
     let list = plans
     if (!showTests) list = list.filter((p) => !p.isTest)
+    if (publicOnly) list = list.filter((p) => !p.private)
     if (subscribedOnly) list = list.filter((p) => allocByPlanId.has(p.id))
-    if (freeOnly) list = list.filter((p) => priceUdvpn(p) === 0)
-    if (hasNodesOnly) list = list.filter((p) => !isKnownEmptyNodes(planNodes[p.id]))
+    if (hasNodesOnly) list = list.filter((p) => isKnownToHaveNodes(planNodes[p.id]))
+    if (plansNodeFilter) {
+      list = list.filter((p) => {
+        const s = planNodes[p.id]
+        return isKnownToHaveNodes(s) && s.addresses.includes(plansNodeFilter)
+      })
+    }
     const q = search.trim().toLowerCase()
     if (q) {
       list = list.filter((p) => {
@@ -428,11 +445,22 @@ export default function PlanDiscovery() {
           if (prov.website && prov.website.toLowerCase().includes(q)) return true
           if (prov.description && prov.description.toLowerCase().includes(q)) return true
         }
+        // Match against linked nodes (moniker or address). Only plans whose
+        // node list is already resolved participate — typing a moniker before
+        // the bulk fetch completes will surface plans as they resolve.
+        const nodes = planNodes[p.id]
+        if (isKnownToHaveNodes(nodes)) {
+          for (const addr of nodes.addresses) {
+            if (addr.toLowerCase().includes(q)) return true
+            const moniker = nodeIndex?.get(addr)?.moniker
+            if (moniker && moniker.toLowerCase().includes(q)) return true
+          }
+        }
         return false
       })
     }
     return list
-  }, [plans, showTests, subscribedOnly, freeOnly, hasNodesOnly, planNodes, allocByPlanId, search, providers])
+  }, [plans, showTests, publicOnly, subscribedOnly, hasNodesOnly, planNodes, allocByPlanId, search, providers, plansNodeFilter, nodeIndex])
 
   // Group by provider, sort within, then sort groups
   const grouped = useMemo(() => {
@@ -501,6 +529,25 @@ export default function PlanDiscovery() {
         </div>
       )}
 
+      {plansNodeFilter && (
+        <div className="mx-5 mt-3 bg-accent/10 border border-accent/40 px-3 py-2 rounded-md shrink-0 flex items-center justify-between gap-3">
+          <div className="text-xs text-text-primary truncate">
+            Showing plans covering node{' '}
+            <span className="font-medium text-accent">
+              {nodeIndex?.get(plansNodeFilter)?.moniker ||
+                `${plansNodeFilter.slice(0, 12)}…${plansNodeFilter.slice(-6)}`}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={clearPlansNodeFilter}
+            className="text-xs text-accent hover:underline shrink-0"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* Filter bar — two clusters: [search + filters] | [count + sort + clear] */}
       <div className="px-5 pt-3 pb-3 border-b border-border shrink-0">
         <div className="flex items-center gap-4">
@@ -515,7 +562,7 @@ export default function PlanDiscovery() {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search plans, providers…"
+                placeholder="Search plans, providers, nodes…"
                 className="w-full bg-bg-tertiary border border-border text-text-primary text-sm pl-9 pr-10 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition-all placeholder:text-text-tertiary"
               />
               {search ? (
@@ -540,19 +587,13 @@ export default function PlanDiscovery() {
             <div className="h-7 w-px bg-border mx-1 shrink-0" aria-hidden="true" />
 
             <FilterChip
-              label="Show tests"
-              active={showTests}
-              onClick={() => setShowTests((v) => !v)}
-              title={'Include test plans (private flag, or provider names containing "test", "staging", "demo", "do not use")'}
-            />
-            <FilterChip
-              label="Free"
-              active={freeOnly}
-              onClick={() => setFreeOnly((v) => !v)}
+              label="Public only"
+              active={publicOnly}
+              onClick={() => setPublicOnly((v) => !v)}
+              title="Hide plans flagged private on-chain. Uncheck to inspect private plans (often invite-only or test fixtures)"
             />
             <FilterChip
               label="Has nodes"
-              count={hasNodesKnownCount}
               active={hasNodesOnly}
               onClick={() => setHasNodesOnly((v) => !v)}
               title="Hide plans known to have zero compatible nodes (loading plans stay visible)"
@@ -562,6 +603,12 @@ export default function PlanDiscovery() {
               count={allocations.length}
               active={subscribedOnly}
               onClick={() => setSubscribedOnly((v) => !v)}
+            />
+            <FilterChip
+              label="Show test providers"
+              active={showTests}
+              onClick={() => setShowTests((v) => !v)}
+              title='Include plans whose provider name contains "test", "staging", "demo", or "do not use"'
             />
           </div>
 
@@ -679,7 +726,15 @@ export default function PlanDiscovery() {
               </p>
             </div>
           )}
-          {plans.length > 0 && filtered.length === 0 && (
+          {plans.length > 0 && filtered.length === 0 && hasNodesBulkLoading && (
+            <div className="px-5 py-12 text-center flex flex-col items-center gap-3">
+              <Spinner className="text-accent" />
+              <p className="text-text-tertiary text-xs">
+                Checking which plans have linked nodes…
+              </p>
+            </div>
+          )}
+          {plans.length > 0 && filtered.length === 0 && !hasNodesBulkLoading && (
             <div className="px-5 py-12 text-center">
               <p className="text-text-tertiary text-xs">No plans match the current filter</p>
               {anyFilterActive && (
@@ -805,42 +860,82 @@ export default function PlanDiscovery() {
               <p className="text-text-tertiary text-sm">Select a plan to see details</p>
             </div>
           ) : (
-            <PlanDetail
-              plan={selectedPlan}
-              provider={providers[selectedPlan.provAddress]}
-              nodesState={planNodes[selectedPlan.id]}
-              nodeIndex={nodeIndex}
-              subscribedCount={allocByPlanId.get(selectedPlan.id) || 0}
-              onRetryNodes={() => retryPlanNodes(selectedPlan.id)}
-            />
+            (() => {
+              const existing = allocations.find(
+                (a) => a.planId === selectedPlan.id && a.status === 1
+              ) ?? null
+              return (
+                <PlanDetail
+                  plan={selectedPlan}
+                  provider={providers[selectedPlan.provAddress]}
+                  nodesState={planNodes[selectedPlan.id]}
+                  nodeIndex={nodeIndex}
+                  subscribedCount={allocByPlanId.get(selectedPlan.id) || 0}
+                  existingAllocation={existing}
+                  onAction={() => {
+                    if (existing) setConnectingAllocation(existing)
+                    else setSubscribingPlan(selectedPlan)
+                  }}
+                  onRetryNodes={() => retryPlanNodes(selectedPlan.id)}
+                />
+              )
+            })()
           )}
         </div>
       </div>
 
       {/* Allocations footer */}
       {allocations.length > 0 && (
-        <details className="border-t border-border shrink-0 bg-bg-secondary">
+        <details className="border-t border-border shrink-0 bg-bg-secondary" open>
           <summary className="px-5 py-2 cursor-pointer text-text-secondary text-xs font-medium uppercase tracking-wide hover:text-text-primary list-none flex items-center justify-between">
             <span>Your Plan Subscriptions ({allocations.length})</span>
             <span className="text-text-tertiary text-[10px]">▼</span>
           </summary>
-          <div className="max-h-[180px] overflow-y-auto px-5 pb-3 space-y-1.5">
+          <div className="max-h-[220px] overflow-y-auto px-5 pb-3 space-y-1.5">
             {allocations.map((a) => (
               <div
                 key={a.subscriptionId}
-                className="border border-border bg-bg-tertiary rounded-md px-3 py-2 text-xs"
+                className="border border-border bg-bg-tertiary rounded-md px-3 py-2 text-xs flex items-center gap-3"
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-accent font-mono">sub #{a.subscriptionId}</span>
-                  <span className="text-text-secondary font-mono">plan #{a.planId}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3">
+                    <span className="text-accent font-mono">sub #{a.subscriptionId}</span>
+                    <span className="text-text-secondary font-mono">plan #{a.planId}</span>
+                  </div>
+                  <div className="text-text-secondary text-xs mt-1">
+                    {formatBytes(a.planBytes)} · {formatDuration(a.planDurationSeconds)}
+                  </div>
                 </div>
-                <div className="text-text-secondary text-xs mt-1">
-                  {formatBytes(a.planBytes)} · {formatDuration(a.planDurationSeconds)}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setConnectingAllocation(a)}
+                  disabled={a.status !== 1}
+                  className="btn btn-primary text-xs py-1.5 px-3 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+                  title={a.status === 1 ? 'Connect to a node using this allocation' : 'Allocation is not active'}
+                >
+                  Connect
+                </button>
               </div>
             ))}
           </div>
         </details>
+      )}
+
+      {connectingAllocation && (
+        <AllocationConnectModal
+          allocation={connectingAllocation}
+          nodeIndex={nodeIndex}
+          onClose={() => setConnectingAllocation(null)}
+        />
+      )}
+
+      {subscribingPlan && (
+        <PlanSubscribeModal
+          plan={subscribingPlan}
+          nodeIndex={nodeIndex}
+          provider={providers[subscribingPlan.provAddress]}
+          onClose={() => setSubscribingPlan(null)}
+        />
       )}
     </div>
   )
@@ -891,6 +986,8 @@ interface PlanDetailProps {
   nodesState: NodeListState | undefined
   nodeIndex: Map<string, SentNode> | null
   subscribedCount: number
+  existingAllocation: PlanAllocation | null
+  onAction: () => void
   onRetryNodes: () => void
 }
 
@@ -900,6 +997,8 @@ function PlanDetail({
   nodesState,
   nodeIndex,
   subscribedCount,
+  existingAllocation,
+  onAction,
   onRetryNodes,
 }: PlanDetailProps) {
   const [copied, setCopied] = useState(false)
@@ -1010,6 +1109,22 @@ function PlanDetail({
           {subscribedCount > 0 && (
             <span className="text-[10px] uppercase font-medium text-success border border-success/40 bg-success/10 px-2 py-0.5 rounded-sm">
               Subscribed
+            </span>
+          )}
+        </div>
+
+        <div className="pt-1">
+          <button
+            type="button"
+            onClick={onAction}
+            disabled={plan.status !== 1}
+            className="btn btn-primary text-sm py-2 px-4 disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            {existingAllocation ? 'Connect via Existing Plan' : 'Subscribe & Connect'}
+          </button>
+          {existingAllocation && (
+            <span className="ml-3 text-xs text-text-secondary">
+              Reusing allocation <span className="font-mono text-accent">#{existingAllocation.subscriptionId}</span>
             </span>
           )}
         </div>
@@ -1234,10 +1349,11 @@ function PlanDetail({
       {/* How to use */}
       <div className="bg-info-subtle border border-info rounded-md p-3 text-xs text-text-secondary leading-relaxed">
         <div className="text-info font-medium mb-1">How to use this plan</div>
-        Plans pre-pay a data bundle, but each VPN session still binds to one node at a time. Go to
-        the <span className="text-text-primary">Nodes</span> tab, find one of the compatible nodes
-        above (search by moniker or address), click Connect, and choose{' '}
-        <span className="text-text-primary">Plan Subscription</span> in the dialog.
+        Plans pre-pay a data bundle. Subscribe once, then connect to any compatible node using
+        that single allocation — no extra fees per node. After subscribing, your plan appears in{' '}
+        <span className="text-text-primary">Your Plan Subscriptions</span> below; click{' '}
+        <span className="text-text-primary">Connect</span> there to pick a node, or use the Nodes
+        tab and the app will reuse this allocation automatically.
       </div>
     </div>
   )
@@ -1276,5 +1392,564 @@ function KpiCard({ icon, label, value, subtext, tone = 'accent', onClick }: KpiC
       <div className={`text-lg font-semibold ${toneClass} leading-tight`}>{value}</div>
       <div className="text-text-tertiary text-[10px] mt-0.5 truncate">{subtext}</div>
     </button>
+  )
+}
+
+interface AllocationConnectModalProps {
+  allocation: PlanAllocation
+  nodeIndex: Map<string, SentNode> | null
+  onClose: () => void
+}
+
+function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationConnectModalProps) {
+  const [addresses, setAddresses] = useState<string[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [selectedAddr, setSelectedAddr] = useState<string | null>(null)
+  const [connecting, setConnecting] = useState(false)
+  const [currentStep, setCurrentStep] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [tunnelConnected, setTunnelConnected] = useState(false)
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .planNodes(allocation.planId)
+      .then((addrs) => {
+        if (!cancelled) setAddresses(addrs)
+      })
+      .catch((e) => {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load nodes')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [allocation.planId])
+
+  useEffect(() => {
+    const unsub = window.api.onConnectionProgress((step) => setCurrentStep(step))
+    return unsub
+  }, [])
+
+  // Resolve nodes (the chain returns addresses; we look up moniker/country/type
+  // from the node directory, which the parent already loaded).
+  const candidates = useMemo(() => {
+    if (!addresses) return null
+    const list: { addr: string; node: SentNode | null }[] = []
+    for (const addr of addresses) {
+      list.push({ addr, node: nodeIndex?.get(addr) ?? null })
+    }
+    // Surface healthy active nodes first; unknown last.
+    list.sort((a, b) => {
+      const ah = a.node?.isActive && a.node?.isHealthy ? 0 : a.node ? 1 : 2
+      const bh = b.node?.isActive && b.node?.isHealthy ? 0 : b.node ? 1 : 2
+      return ah - bh
+    })
+    return list
+  }, [addresses, nodeIndex])
+
+  const selected = selectedAddr ? candidates?.find((c) => c.addr === selectedAddr) ?? null : null
+
+  async function handleConnect() {
+    if (!selected || !selected.node) return
+    setConnecting(true)
+    setError(null)
+    setCurrentStep('1/5')
+    try {
+      const res = await window.api.planStartSessionFromSub({
+        subscriptionId: allocation.subscriptionId,
+        nodeAddress: selected.node.address,
+        nodeMoniker: selected.node.moniker,
+        nodeCountry: selected.node.country,
+        nodeType: selected.node.type,
+        apiField: selected.node.api,
+      })
+      setSessionId(res.sessionId)
+      setCurrentStep('5/5')
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' })
+      setTunnelConnected(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true)
+    try {
+      await window.api.connectionDisconnect()
+      setTunnelConnected(false)
+      setSessionId(null)
+      setCurrentStep(null)
+      onClose()
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
+  const title = tunnelConnected ? 'VPN Active' : connecting ? 'Connecting…' : `Connect via Plan #${allocation.planId}`
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={connecting ? undefined : onClose}
+    >
+      <div
+        className="bg-bg-secondary border border-border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto rounded-lg shadow-overlay"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-text-primary text-base font-semibold">{title}</h2>
+          {!connecting && (
+            <button
+              onClick={onClose}
+              className="text-text-secondary hover:text-text-primary text-lg transition-colors"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        <div className="bg-accent/10 border border-accent/30 rounded-md px-3 py-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-accent font-mono">sub #{allocation.subscriptionId}</span>
+            <span className="text-text-secondary font-mono">plan #{allocation.planId}</span>
+          </div>
+          <div className="text-text-secondary mt-1">
+            Reusing this allocation — no new on-chain subscription will be created.
+          </div>
+        </div>
+
+        {!tunnelConnected && !connecting && !error && (
+          <>
+            <div className="text-xs text-text-secondary">
+              Pick a node linked to this plan:
+            </div>
+            {loadError ? (
+              <div className="bg-danger-subtle border border-danger p-3 rounded-md text-danger text-sm">
+                {loadError}
+              </div>
+            ) : candidates === null ? (
+              <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center">
+                <Spinner />
+                <p className="text-text-secondary text-sm mt-2">Loading linked nodes…</p>
+              </div>
+            ) : candidates.length === 0 ? (
+              <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center text-text-secondary text-sm">
+                No nodes are currently linked to this plan.
+              </div>
+            ) : (
+              <div className="border border-border bg-bg-tertiary rounded-md max-h-[260px] overflow-y-auto divide-y divide-border">
+                {candidates.map(({ addr, node }) => {
+                  const active = selectedAddr === addr
+                  const reachable = node?.isActive && node?.isHealthy
+                  return (
+                    <button
+                      key={addr}
+                      type="button"
+                      onClick={() => node && setSelectedAddr(addr)}
+                      disabled={!node}
+                      className={`w-full text-left px-4 py-2.5 text-sm transition-colors ${
+                        active
+                          ? 'bg-accent/10'
+                          : node
+                          ? 'hover:bg-bg-hover'
+                          : 'opacity-40 cursor-not-allowed'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`font-medium ${active ? 'text-accent' : 'text-text-primary'}`}>
+                          {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
+                        </span>
+                        {node && (
+                          <span
+                            className={`text-[10px] font-medium ${
+                              node.type === 1 ? 'text-info' : 'text-warning'
+                            }`}
+                          >
+                            {node.type === 1 ? 'WireGuard' : 'V2Ray'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
+                        <span>
+                          {node ? (
+                            <>
+                              {node.country}
+                              {node.city ? `, ${node.city}` : ''}
+                            </>
+                          ) : (
+                            'Not in node directory — refresh Nodes tab'
+                          )}
+                        </span>
+                        {node && (
+                          <span className={reachable ? 'text-success' : 'text-text-tertiary'}>
+                            {reachable ? 'Active' : 'Inactive'}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
+            <button
+              onClick={handleConnect}
+              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy)}
+              className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Connect via Existing Plan
+            </button>
+          </>
+        )}
+
+        {connecting && <ProgressSteps currentStep={currentStep} error={error} />}
+
+        {error && !connecting && (
+          <div className="space-y-3">
+            <div className="bg-danger-subtle border border-danger p-3 rounded-md">
+              <p className="text-danger text-sm">{error}</p>
+            </div>
+            <button
+              onClick={() => {
+                setError(null)
+                setCurrentStep(null)
+                setSessionId(null)
+              }}
+              className="btn btn-primary w-full"
+            >
+              Try Again
+            </button>
+          </div>
+        )}
+
+        {tunnelConnected && sessionId && selected?.node && (
+          <div className="space-y-3">
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Session ID</span>
+                <span className="text-success font-mono">{sessionId}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Node</span>
+                <span className="text-text-primary">{selected.node.moniker}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="status-dot status-dot-active" />
+              <span className="text-success font-medium">VPN tunnel active</span>
+            </div>
+            <button
+              onClick={handleDisconnect}
+              disabled={disconnecting}
+              className="btn btn-danger w-full flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {disconnecting ? (
+                <>
+                  <Spinner className="text-white" /> Disconnecting…
+                </>
+              ) : (
+                'Disconnect'
+              )}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+interface PlanSubscribeModalProps {
+  plan: PlanInfo
+  nodeIndex: Map<string, SentNode> | null
+  provider: ProviderState | undefined
+  onClose: () => void
+}
+
+function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscribeModalProps) {
+  const [addresses, setAddresses] = useState<string[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [selectedAddr, setSelectedAddr] = useState<string | null>(null)
+  const [balance, setBalance] = useState<string | null>(null)
+  const [connecting, setConnecting] = useState(false)
+  const [currentStep, setCurrentStep] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [tunnelConnected, setTunnelConnected] = useState(false)
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .planNodes(plan.id)
+      .then((addrs) => {
+        if (!cancelled) setAddresses(addrs)
+      })
+      .catch((e) => {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : 'Failed to load nodes')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [plan.id])
+
+  useEffect(() => {
+    window.api.walletGetBalance().then((balances) => {
+      const udvpn = balances.find((b: { denom: string }) => b.denom === 'udvpn')
+      setBalance(udvpn ? (parseInt(udvpn.amount, 10) / 1e6).toFixed(2) : '0.00')
+    })
+  }, [])
+
+  useEffect(() => {
+    const unsub = window.api.onConnectionProgress((step) => setCurrentStep(step))
+    return unsub
+  }, [])
+
+  const candidates = useMemo(() => {
+    if (!addresses) return null
+    const list: { addr: string; node: SentNode | null }[] = []
+    for (const addr of addresses) {
+      list.push({ addr, node: nodeIndex?.get(addr) ?? null })
+    }
+    list.sort((a, b) => {
+      const ah = a.node?.isActive && a.node?.isHealthy ? 0 : a.node ? 1 : 2
+      const bh = b.node?.isActive && b.node?.isHealthy ? 0 : b.node ? 1 : 2
+      return ah - bh
+    })
+    return list
+  }, [addresses, nodeIndex])
+
+  const selected = selectedAddr ? candidates?.find((c) => c.addr === selectedAddr) ?? null : null
+  const priceLabel = priceDisplay(plan)
+  const providerName =
+    provider && typeof provider === 'object' && provider !== null && provider.name
+      ? provider.name
+      : `${plan.provAddress.slice(0, 12)}…${plan.provAddress.slice(-6)}`
+
+  async function handleConnect() {
+    if (!selected || !selected.node) return
+    setConnecting(true)
+    setError(null)
+    setCurrentStep('1/5')
+    try {
+      const res = await window.api.planSubscribe({
+        planId: plan.id,
+        denom: 'udvpn',
+        nodeAddress: selected.node.address,
+        nodeMoniker: selected.node.moniker,
+        nodeCountry: selected.node.country,
+        nodeType: selected.node.type,
+        apiField: selected.node.api,
+      })
+      setSessionId(res.sessionId)
+      setCurrentStep('5/5')
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' })
+      setTunnelConnected(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true)
+    try {
+      await window.api.connectionDisconnect()
+      setTunnelConnected(false)
+      setSessionId(null)
+      setCurrentStep(null)
+      onClose()
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
+  const title = tunnelConnected ? 'VPN Active' : connecting ? 'Connecting…' : `Subscribe to Plan #${plan.id}`
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+      onClick={connecting ? undefined : onClose}
+    >
+      <div
+        className="bg-bg-secondary border border-border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto rounded-lg shadow-overlay"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-text-primary text-base font-semibold">{title}</h2>
+          {!connecting && (
+            <button
+              onClick={onClose}
+              className="text-text-secondary hover:text-text-primary text-lg transition-colors"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-2 text-sm border-b border-border pb-4">
+          <div className="flex justify-between">
+            <span className="text-text-secondary">Provider</span>
+            <span className="text-text-primary truncate ml-4">{providerName}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">Data</span>
+            <span className="text-text-primary">{formatBytes(plan.bytes)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">Duration</span>
+            <span className="text-text-primary">{formatDuration(plan.durationSeconds)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-text-secondary">Price</span>
+            <span className="text-accent font-mono font-semibold">{priceLabel}</span>
+          </div>
+          {balance !== null && (
+            <div className="flex justify-between">
+              <span className="text-text-secondary">Wallet balance</span>
+              <span className="text-success font-mono">{balance} P2P</span>
+            </div>
+          )}
+        </div>
+
+        {!tunnelConnected && !connecting && !error && (
+          <>
+            <div className="text-xs text-text-secondary">Pick a node to connect to:</div>
+            {loadError ? (
+              <div className="bg-danger-subtle border border-danger p-3 rounded-md text-danger text-sm">
+                {loadError}
+              </div>
+            ) : candidates === null ? (
+              <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center">
+                <Spinner />
+                <p className="text-text-secondary text-sm mt-2">Loading linked nodes…</p>
+              </div>
+            ) : candidates.length === 0 ? (
+              <div className="border border-border bg-bg-tertiary rounded-md px-4 py-6 text-center text-text-secondary text-sm">
+                No nodes are currently linked to this plan.
+              </div>
+            ) : (
+              <div className="border border-border bg-bg-tertiary rounded-md max-h-[260px] overflow-y-auto divide-y divide-border">
+                {candidates.map(({ addr, node }) => {
+                  const active = selectedAddr === addr
+                  const reachable = node?.isActive && node?.isHealthy
+                  return (
+                    <button
+                      key={addr}
+                      type="button"
+                      onClick={() => node && setSelectedAddr(addr)}
+                      disabled={!node}
+                      className={`w-full text-left px-4 py-2.5 text-sm transition-colors ${
+                        active
+                          ? 'bg-accent/10'
+                          : node
+                          ? 'hover:bg-bg-hover'
+                          : 'opacity-40 cursor-not-allowed'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className={`font-medium ${active ? 'text-accent' : 'text-text-primary'}`}>
+                          {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
+                        </span>
+                        {node && (
+                          <span
+                            className={`text-[10px] font-medium ${
+                              node.type === 1 ? 'text-info' : 'text-warning'
+                            }`}
+                          >
+                            {node.type === 1 ? 'WireGuard' : 'V2Ray'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-text-secondary mt-0.5">
+                        <span>
+                          {node ? (
+                            <>
+                              {node.country}
+                              {node.city ? `, ${node.city}` : ''}
+                            </>
+                          ) : (
+                            'Not in node directory — refresh Nodes tab'
+                          )}
+                        </span>
+                        {node && (
+                          <span className={reachable ? 'text-success' : 'text-text-tertiary'}>
+                            {reachable ? 'Active' : 'Inactive'}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
+            <button
+              onClick={handleConnect}
+              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy)}
+              className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Subscribe & Connect
+            </button>
+          </>
+        )}
+
+        {connecting && <ProgressSteps currentStep={currentStep} error={error} />}
+
+        {error && !connecting && (
+          <div className="space-y-3">
+            <div className="bg-danger-subtle border border-danger p-3 rounded-md">
+              <p className="text-danger text-sm">{error}</p>
+            </div>
+            <button
+              onClick={() => {
+                setError(null)
+                setCurrentStep(null)
+                setSessionId(null)
+              }}
+              className="btn btn-primary w-full"
+            >
+              Try Again
+            </button>
+          </div>
+        )}
+
+        {tunnelConnected && sessionId && selected?.node && (
+          <div className="space-y-3">
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Session ID</span>
+                <span className="text-success font-mono">{sessionId}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Node</span>
+                <span className="text-text-primary">{selected.node.moniker}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="status-dot status-dot-active" />
+              <span className="text-success font-medium">VPN tunnel active</span>
+            </div>
+            <button
+              onClick={handleDisconnect}
+              disabled={disconnecting}
+              className="btn btn-danger w-full flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {disconnecting ? (
+                <>
+                  <Spinner className="text-white" /> Disconnecting…
+                </>
+              ) : (
+                'Disconnect'
+              )}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }

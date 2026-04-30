@@ -249,6 +249,14 @@ export interface ElectronAPI {
     nodeType: 1 | 2
     apiField: string
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
+  planStartSessionFromSub: (params: {
+    subscriptionId: string
+    nodeAddress: string
+    nodeMoniker: string
+    nodeCountry: string
+    nodeType: 1 | 2
+    apiField: string
+  }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planNodes: (planId: string) => Promise<string[]>
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
   onPlanDiscoverProgress: (callback: (progress: DiscoverProgress) => void) => () => void

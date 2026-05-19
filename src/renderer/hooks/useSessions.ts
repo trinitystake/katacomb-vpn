@@ -1,15 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { SessionInfo } from '../types'
 import { useConnection } from './useConnection'
-import { useSettings } from '../contexts/SettingsContext'
+
+const POLL_SESSIONS_MS = 120_000
 
 export function useSessions() {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const { status } = useConnection()
-  const { settings } = useSettings()
-  const pollSec = settings?.pollAllocationSec ?? 60
   const vpnConnected = status.state === 'connected'
 
   const refresh = useCallback(async () => {
@@ -34,9 +33,9 @@ export function useSessions() {
   }, [vpnConnected, refresh])
 
   useEffect(() => {
-    const interval = setInterval(refresh, pollSec * 1000)
+    const interval = setInterval(refresh, POLL_SESSIONS_MS)
     return () => clearInterval(interval)
-  }, [refresh, pollSec])
+  }, [refresh])
 
   return { sessions, loading, refreshing, refresh }
 }

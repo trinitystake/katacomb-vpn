@@ -4,54 +4,6 @@ import Toggle from './Toggle'
 import { useSettings } from '../contexts/SettingsContext'
 import { CHAIN_ID, DENOM, GAS_PRICE_STR } from '../../shared/chain-constants'
 
-interface PendingNumbers {
-  pollStatusSec: number
-  pollIpSec: number
-  pollBalanceSec: number
-  pollAllocationSec: number
-  planDiscoveryMaxId: number
-}
-
-function clamp(n: number, min: number, max: number): number {
-  if (!Number.isFinite(n)) return min
-  return Math.min(max, Math.max(min, Math.round(n)))
-}
-
-interface NumberFieldProps {
-  label: string
-  unit: string
-  min: number
-  max: number
-  value: number
-  onChange: (value: number) => void
-  onBlur: (value: number) => void
-  help?: string
-}
-
-function NumberField({ label, unit, min, max, value, onChange, onBlur, help }: NumberFieldProps) {
-  return (
-    <div className="bg-bg-tertiary border border-border rounded-md px-3 py-2">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-text-primary text-xs">{label}</span>
-        <span className="text-text-tertiary text-xs">{min}–{max}{unit ? ` ${unit}` : ''}</span>
-      </div>
-      <div className="flex items-center gap-1">
-        <input
-          type="number"
-          min={min}
-          max={max}
-          value={Number.isFinite(value) ? value : ''}
-          onChange={(e) => onChange(parseInt(e.target.value, 10))}
-          onBlur={(e) => onBlur(parseInt(e.target.value, 10))}
-          className="flex-1 bg-bg-primary border border-border text-text-primary text-sm font-mono px-2 py-1 rounded-sm focus:outline-none focus:border-border-focus"
-        />
-        {unit && <span className="text-text-tertiary text-xs">{unit}</span>}
-      </div>
-      {help && <p className="text-text-tertiary text-xs mt-1">{help}</p>}
-    </div>
-  )
-}
-
 interface Props {
   currentAddress: string | null
   onClose: () => void
@@ -94,14 +46,12 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
   const [wallets, setWallets] = useState<WalletEntry[]>([])
   const [rpcInput, setRpcInput] = useState('')
   const [saving, setSaving] = useState(false)
-  const [savingAdvanced, setSavingAdvanced] = useState(false)
   const [editingName, setEditingName] = useState<string | null>(null)
   const [nameInput, setNameInput] = useState('')
   const [tab, setTab] = useState<'general' | 'wallets'>('general')
   const [rpcChecking, setRpcChecking] = useState<string | null>(null)
   const [rpcLatency, setRpcLatency] = useState<Record<string, number>>({})
   const [splitTunnelInput, setSplitTunnelInput] = useState('')
-  const [pending, setPending] = useState<PendingNumbers | null>(null)
 
   const load = useCallback(async () => {
     const [s, w] = await Promise.all([
@@ -112,13 +62,6 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
     setRpcInput(s.rpcEndpoint)
     setSplitTunnelInput((s.splitTunnelRoutes || []).join('\n'))
     setWallets(w)
-    setPending({
-      pollStatusSec: s.pollStatusSec,
-      pollIpSec: s.pollIpSec,
-      pollBalanceSec: s.pollBalanceSec,
-      pollAllocationSec: s.pollAllocationSec,
-      planDiscoveryMaxId: s.planDiscoveryMaxId,
-    })
   }, [])
 
   useEffect(() => {
@@ -135,42 +78,6 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
     } finally {
       setSaving(false)
     }
-  }
-
-  async function saveAdvanced() {
-    if (!pending) return
-    setSavingAdvanced(true)
-    try {
-      const updated = await window.api.settingsSet({
-        pollStatusSec: clamp(pending.pollStatusSec, 1, 30),
-        pollIpSec: clamp(pending.pollIpSec, 30, 300),
-        pollBalanceSec: clamp(pending.pollBalanceSec, 60, 600),
-        pollAllocationSec: clamp(pending.pollAllocationSec, 30, 600),
-        planDiscoveryMaxId: clamp(pending.planDiscoveryMaxId, 100, 1000),
-      })
-      setSettings(updated)
-      setPending({
-        pollStatusSec: updated.pollStatusSec,
-        pollIpSec: updated.pollIpSec,
-        pollBalanceSec: updated.pollBalanceSec,
-        pollAllocationSec: updated.pollAllocationSec,
-        planDiscoveryMaxId: updated.planDiscoveryMaxId,
-      })
-      await reloadGlobalSettings()
-    } finally {
-      setSavingAdvanced(false)
-    }
-  }
-
-  function hasAdvancedChanges(): boolean {
-    if (!settings || !pending) return false
-    return (
-      pending.pollStatusSec !== settings.pollStatusSec ||
-      pending.pollIpSec !== settings.pollIpSec ||
-      pending.pollBalanceSec !== settings.pollBalanceSec ||
-      pending.pollAllocationSec !== settings.pollAllocationSec ||
-      pending.planDiscoveryMaxId !== settings.planDiscoveryMaxId
-    )
   }
 
   async function handleSwitch(walletId: string) {
@@ -393,119 +300,6 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
                   </p>
                 )}
               </div>
-
-              {/* Pricing Preference */}
-              <div className="space-y-3">
-                <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
-                  Pricing Preference
-                </label>
-                <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
-                  <div>
-                    <span className="text-text-primary text-sm">Prefer hourly pricing when cheaper</span>
-                    <p className="text-text-tertiary text-xs mt-0.5">When opening a node, default to hourly if it costs less per equivalent usage</p>
-                  </div>
-                  <Toggle
-                    checked={settings.preferHourlyWhenCheaper}
-                    onChange={async (checked) => {
-                      const updated = await window.api.settingsSet({ preferHourlyWhenCheaper: checked })
-                      setSettings(updated)
-                      await reloadGlobalSettings()
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Polling Intervals */}
-              {pending && (
-                <div className="space-y-3">
-                  <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
-                    Polling Intervals
-                  </label>
-                  <p className="text-text-tertiary text-xs leading-relaxed">
-                    How often the app re-queries live data. Lower values mean fresher numbers but more network activity.
-                    Changes apply immediately — no restart needed. Defaults are fine for most users.
-                  </p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <NumberField
-                      label="Status check"
-                      unit="sec"
-                      min={1}
-                      max={30}
-                      value={pending.pollStatusSec}
-                      onChange={(v) => setPending({ ...pending, pollStatusSec: v })}
-                      onBlur={(v) => setPending({ ...pending, pollStatusSec: clamp(v, 1, 30) })}
-                      help="How often the VPN tunnel state is re-queried. Drives the connection indicator in the top bar and the reconnect UI."
-                    />
-                    <NumberField
-                      label="IP check"
-                      unit="sec"
-                      min={30}
-                      max={300}
-                      value={pending.pollIpSec}
-                      onChange={(v) => setPending({ ...pending, pollIpSec: v })}
-                      onBlur={(v) => setPending({ ...pending, pollIpSec: clamp(v, 30, 300) })}
-                      help="How often your public IP and geolocation refresh in the header. Paused while VPN is connected or the window is hidden."
-                    />
-                    <NumberField
-                      label="Balance check"
-                      unit="sec"
-                      min={60}
-                      max={600}
-                      value={pending.pollBalanceSec}
-                      onChange={(v) => setPending({ ...pending, pollBalanceSec: v })}
-                      onBlur={(v) => setPending({ ...pending, pollBalanceSec: clamp(v, 60, 600) })}
-                      help="How often your wallet balance is re-read from the chain. Shown in the wallet panel."
-                    />
-                    <NumberField
-                      label="Allocation check"
-                      unit="sec"
-                      min={30}
-                      max={600}
-                      value={pending.pollAllocationSec}
-                      onChange={(v) => setPending({ ...pending, pollAllocationSec: v })}
-                      onBlur={(v) => setPending({ ...pending, pollAllocationSec: clamp(v, 30, 600) })}
-                      help="How often active sessions and plan subscriptions refresh. Drives the Active Sessions panel and the Plans tab."
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Plan Discovery */}
-              {pending && (
-                <div className="space-y-3">
-                  <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
-                    Plan Discovery
-                  </label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <NumberField
-                      label="Max plan ID to probe"
-                      unit=""
-                      min={100}
-                      max={1000}
-                      value={pending.planDiscoveryMaxId}
-                      onChange={(v) => setPending({ ...pending, planDiscoveryMaxId: v })}
-                      onBlur={(v) => setPending({ ...pending, planDiscoveryMaxId: clamp(v, 100, 1000) })}
-                      help="Ceiling for plan scan"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Advanced Save button */}
-              {pending && (
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={saveAdvanced}
-                    disabled={savingAdvanced || !hasAdvancedChanges()}
-                    className="btn btn-primary text-sm px-4 disabled:opacity-30"
-                  >
-                    {savingAdvanced ? 'Saving...' : 'Save Settings'}
-                  </button>
-                  {hasAdvancedChanges() && (
-                    <span className="text-warning text-xs">Unsaved changes</span>
-                  )}
-                </div>
-              )}
 
               {/* Chain */}
               <div className="space-y-3">

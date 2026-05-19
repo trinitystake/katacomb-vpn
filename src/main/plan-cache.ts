@@ -17,8 +17,6 @@ interface CacheFile {
   fetchedAt: number
 }
 
-const TTL_MS = 10 * 60 * 1000
-
 let memCache: CacheFile | null = null
 
 function cachePath(): string {
@@ -50,12 +48,6 @@ export function getCachedPlans(): { plans: CachedPlan[]; fetchedAt: number | nul
   if (!memCache) memCache = loadFromDisk()
   if (!memCache) return { plans: [], fetchedAt: null }
   return { plans: memCache.plans, fetchedAt: memCache.fetchedAt }
-}
-
-export function isCacheFresh(): boolean {
-  if (!memCache) memCache = loadFromDisk()
-  if (!memCache) return false
-  return Date.now() - memCache.fetchedAt < TTL_MS
 }
 
 export function setCachedPlans(plans: CachedPlan[]): void {

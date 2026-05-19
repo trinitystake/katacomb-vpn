@@ -13,7 +13,7 @@ import {
   getPrivKey,
   logout,
 } from './wallet'
-import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, deleteSessionConfig, endSession } from './sentinel-service'
+import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession } from './sentinel-service'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
@@ -29,10 +29,10 @@ import {
   detectOtherVpn,
   getV2RayError,
   bringUpV2RayTunnel,
-  getActiveProtocol,
   getV2RayRemoteHost,
   binaryExists,
   isBinaryAvailable,
+  runPrivileged,
 } from './vpn-manager'
 import { enableKillSwitch, disableKillSwitch } from './kill-switch'
 import { getTrafficStats } from './traffic-stats'
@@ -70,11 +70,18 @@ function sendReconnecting(attempt: number, maxAttempts: number): void {
   }
 }
 
-/** Run a privileged helper command (duplicated from vpn-manager for DNS/kill switch) */
-function runHelperPrivileged(args: string[]): void {
-  const { execSync } = require('child_process') as typeof import('child_process')
-  const escaped = args.map((a: string) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')
-  execSync(`pkexec /usr/local/bin/sentinel-vpn-helper ${escaped}`, { stdio: 'pipe', timeout: 60000 })
+function applySession(
+  sessionId: string,
+  nodeAddress: string,
+  nodeMoniker: string,
+  nodeCountry: string,
+  nodeType: 1 | 2,
+  result: { wgInstance: Wireguard | null; v2rayInstance: V2Ray | null },
+): void {
+  activeSessionId = sessionId
+  activeNodeInfo = { address: nodeAddress, moniker: nodeMoniker, country: nodeCountry, type: nodeType }
+  activeWg = result.wgInstance
+  activeV2ray = result.v2rayInstance
 }
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
@@ -84,7 +91,7 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   // Apply custom DNS
   if (settings.dnsResolver !== 'system') {
     try {
-      runHelperPrivileged(['dns-set', settings.dnsResolver])
+      runPrivileged(['dns-set', settings.dnsResolver])
     } catch (err) {
       console.error('Failed to set DNS:', err)
     }
@@ -117,7 +124,7 @@ function revertPostConnectSettings(): void {
   // Restore DNS
   if (settings.dnsResolver !== 'system') {
     try {
-      runHelperPrivileged(['dns-restore'])
+      runPrivileged(['dns-restore'])
     } catch { /* best-effort */ }
   }
 }
@@ -160,7 +167,7 @@ async function attemptReconnect(): Promise<void> {
       } else {
         connectV2RayFromConfig(saved.configString)
         await new Promise((r) => setTimeout(r, 1500))
-        const status = getConnectionStatus(null, null)
+        const status = getConnectionStatus()
         if (!status.connected) {
           throw new Error('V2Ray failed to start on reconnect')
         }
@@ -348,9 +355,6 @@ export function registerIpcHandlers(): void {
     const allowed = new Set([
       'rpcEndpoint', 'activeWalletId', 'killSwitch', 'dnsResolver', 'autoReconnect',
       'bookmarkedNodes', 'splitTunnelRoutes',
-      'preferHourlyWhenCheaper',
-      'pollStatusSec', 'pollIpSec', 'pollBalanceSec', 'pollAllocationSec',
-      'planDiscoveryMaxId',
     ])
     const filtered: Record<string, unknown> = {}
     for (const key of Object.keys(settings)) {
@@ -387,14 +391,6 @@ export function registerIpcHandlers(): void {
         }
       }
     }
-    if (filtered.preferHourlyWhenCheaper !== undefined && typeof filtered.preferHourlyWhenCheaper !== 'boolean') {
-      throw new Error('Invalid preferHourlyWhenCheaper: expected boolean')
-    }
-    if (filtered.pollStatusSec !== undefined) assertIntRange(filtered.pollStatusSec, 'pollStatusSec', 1, 30)
-    if (filtered.pollIpSec !== undefined) assertIntRange(filtered.pollIpSec, 'pollIpSec', 30, 300)
-    if (filtered.pollBalanceSec !== undefined) assertIntRange(filtered.pollBalanceSec, 'pollBalanceSec', 60, 600)
-    if (filtered.pollAllocationSec !== undefined) assertIntRange(filtered.pollAllocationSec, 'pollAllocationSec', 30, 600)
-    if (filtered.planDiscoveryMaxId !== undefined) assertIntRange(filtered.planDiscoveryMaxId, 'planDiscoveryMaxId', 100, 1000)
     return saveSettings(filtered as Parameters<typeof saveSettings>[0])
   })
 
@@ -470,15 +466,7 @@ export function registerIpcHandlers(): void {
       nodeCountry: params.nodeCountry,
     })
 
-    activeSessionId = sessionId
-    activeNodeInfo = {
-      address: params.nodeAddress,
-      moniker: params.nodeMoniker,
-      country: params.nodeCountry,
-      type: params.nodeType,
-    }
-    activeWg = result.wgInstance
-    activeV2ray = result.v2rayInstance
+    applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
     // Pre-cache sessions now (RPC is still reachable before tunnel goes up)
     try {
@@ -573,7 +561,7 @@ export function registerIpcHandlers(): void {
 
       // Wait briefly and verify the v2ray process didn't crash on startup
       await new Promise((r) => setTimeout(r, 1500))
-      const status = getConnectionStatus(activeV2ray, activeWg)
+      const status = getConnectionStatus()
       if (!status.connected) {
         const errMsg = getV2RayError()
         throw new Error(
@@ -605,7 +593,7 @@ export function registerIpcHandlers(): void {
     reconnectAttempt = 0
 
     revertPostConnectSettings()
-    disconnect(activeV2ray, activeWg)
+    disconnect()
     activeV2ray = null
     activeWg = null
     activeSessionId = null
@@ -616,7 +604,7 @@ export function registerIpcHandlers(): void {
 
   // Connection: Status
   ipcMain.handle(IPC.CONNECTION_STATUS, async () => {
-    const vpnStatus = getConnectionStatus(activeV2ray, activeWg)
+    const vpnStatus = getConnectionStatus()
     const state = reconnectAttempt > 0 ? 'reconnecting' : vpnStatus.connected ? 'connected' : 'idle'
     return {
       state,
@@ -803,15 +791,7 @@ export function registerIpcHandlers(): void {
       nodeCountry: params.nodeCountry,
     })
 
-    activeSessionId = sessionId
-    activeNodeInfo = {
-      address: params.nodeAddress,
-      moniker: params.nodeMoniker,
-      country: params.nodeCountry,
-      type: params.nodeType,
-    }
-    activeWg = result.wgInstance
-    activeV2ray = result.v2rayInstance
+    applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
     return {
       sessionId,
@@ -861,15 +841,7 @@ export function registerIpcHandlers(): void {
       nodeCountry: params.nodeCountry,
     })
 
-    activeSessionId = sessionId
-    activeNodeInfo = {
-      address: params.nodeAddress,
-      moniker: params.nodeMoniker,
-      country: params.nodeCountry,
-      type: params.nodeType,
-    }
-    activeWg = result.wgInstance
-    activeV2ray = result.v2rayInstance
+    applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
     return {
       sessionId,
@@ -934,5 +906,5 @@ export function cleanupOnQuit(): void {
     reconnectTimer = null
   }
   revertPostConnectSettings()
-  disconnect(activeV2ray, activeWg)
+  disconnect()
 }

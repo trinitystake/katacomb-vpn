@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { NodeProbeResult, SpeedTestResult, BatchProgress } from '../types'
 
 export function useNodeTest() {
@@ -7,7 +7,6 @@ export function useNodeTest() {
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null)
   const [speedResult, setSpeedResult] = useState<SpeedTestResult | null>(null)
   const [speedTesting, setSpeedTesting] = useState(false)
-  const unsubRef = useRef<(() => void) | null>(null)
 
   // Load cached results on mount
   useEffect(() => {
@@ -38,7 +37,6 @@ export function useNodeTest() {
         setBatchProgress(null)
       }
     })
-    unsubRef.current = unsub
     return () => { unsub() }
   }, [])
 

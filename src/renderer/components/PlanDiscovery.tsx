@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePlans } from '../hooks/usePlans'
-import { useSettings } from '../contexts/SettingsContext'
 import { useNavigation } from '../contexts/NavigationContext'
 import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode } from '../types'
 import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
 
 const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited sentinel set by the provider
+const PLAN_DISCOVERY_MAX = 500
 
 function formatBytes(bytes: string): string {
   const n = Number(bytes)
@@ -199,7 +199,6 @@ function IconNode({ className = '' }: { className?: string }) {
 }
 
 export default function PlanDiscovery() {
-  const { settings } = useSettings()
   const { plansNodeFilter, clearPlansNodeFilter } = useNavigation()
   const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached } = usePlans()
   const [error, setError] = useState<string | null>(null)
@@ -258,8 +257,7 @@ export default function PlanDiscovery() {
   async function handleRescan() {
     setError(null)
     try {
-      const max = settings?.planDiscoveryMaxId ?? 500
-      await discover(max)
+      await discover(PLAN_DISCOVERY_MAX)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Discovery failed')
     }

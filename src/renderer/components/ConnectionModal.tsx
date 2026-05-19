@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../types'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
-import { useSettings } from '../contexts/SettingsContext'
 import { useNavigation } from '../contexts/NavigationContext'
 
 interface Props {
@@ -17,35 +16,14 @@ function getUdvpnPrice(prices: { denom: string; value: string }[]): { raw: strin
   return { raw: p.value, display }
 }
 
-function hourlyIsCheaper(
-  gbPrice: { raw: string } | null,
-  hrPrice: { raw: string } | null
-): boolean {
-  if (!gbPrice || !hrPrice) return false
-  // Compare cost of 1 hour vs cost of ~1 GB.
-  // A reasonable usage baseline: if 1 hour of VPN costs less than 1 GB of VPN,
-  // hourly is cheaper for light users. Exact "equivalent" is subjective — we
-  // use this simple comparison as the heuristic the UI defaults off of.
-  const gb = parseInt(gbPrice.raw, 10)
-  const hr = parseInt(hrPrice.raw, 10)
-  if (!Number.isFinite(gb) || !Number.isFinite(hr)) return false
-  return hr < gb
-}
-
 export default function ConnectionModal({ node, onClose }: Props) {
   const active = node.isActive && node.isHealthy
-  const { settings } = useSettings()
   const { goToPlansForNode } = useNavigation()
   // Plans compatible with THIS node. null = still loading.
   const [compatiblePlans, setCompatiblePlans] = useState<PlanInfo[] | null>(null)
   // User's existing plan allocations (subscriptions). Used to detect reuse vs. fresh subscribe.
   const [allocations, setAllocations] = useState<PlanAllocation[]>([])
-  const gbPriceInit = getUdvpnPrice(node.gigabytePrices)
-  const hrPriceInit = getUdvpnPrice(node.hourlyPrices)
-  const preferHourly = settings?.preferHourlyWhenCheaper ?? false
-  const defaultSubType: 'gigabytes' | 'hours' =
-    preferHourly && hourlyIsCheaper(gbPriceInit, hrPriceInit) ? 'hours' : 'gigabytes'
-  const [subType, setSubType] = useState<'gigabytes' | 'hours'>(defaultSubType)
+  const [subType, setSubType] = useState<'gigabytes' | 'hours'>('gigabytes')
   const [amount, setAmount] = useState(1)
   const [balance, setBalance] = useState<string | null>(null)
   const [connecting, setConnecting] = useState(false)

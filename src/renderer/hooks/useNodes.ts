@@ -22,14 +22,11 @@ function getUdvpnPrice(prices: { denom: string; value: string }[]): number {
   return p ? parseInt(p.value, 10) / 1e6 : Infinity
 }
 
-// External latency results for sorting — set by NodeTable via setLatencyMap
-let latencyMap: Map<string, number | null> = new Map()
-
-export function setLatencyMap(map: Map<string, number | null>): void {
-  latencyMap = map
-}
-
-function compareNodes(a: SentNode, b: SentNode, key: SortKey, dir: SortDir): number {
+function compareNodes(
+  a: SentNode, b: SentNode,
+  key: SortKey, dir: SortDir,
+  latencyMap: Map<string, number | null>,
+): number {
   let cmp = 0
   switch (key) {
     case 'country':
@@ -72,7 +69,9 @@ function compareNodes(a: SentNode, b: SentNode, key: SortKey, dir: SortDir): num
   return dir === 'asc' ? cmp : -cmp
 }
 
-export function useNodes() {
+const EMPTY_LATENCY_MAP: Map<string, number | null> = new Map()
+
+export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_MAP) {
   const [allNodes, setAllNodes] = useState<SentNode[]>([])
   const [filter, setFilter] = useState<NodeFilter>(DEFAULT_FILTER)
   const [sortKey, setSortKey] = useState<SortKey>('country')
@@ -146,8 +145,8 @@ export function useNodes() {
       nodes = nodes.filter((n) => (n.moniker || '').toLowerCase().includes(q))
     }
 
-    return nodes.slice().sort((a, b) => compareNodes(a, b, sortKey, sortDir))
-  }, [allNodes, filter, sortKey, sortDir, bookmarks])
+    return nodes.slice().sort((a, b) => compareNodes(a, b, sortKey, sortDir, latencyMap))
+  }, [allNodes, filter, sortKey, sortDir, bookmarks, latencyMap])
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {

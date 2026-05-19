@@ -1,56 +1,47 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useNodes } from '../hooks/useNodes'
-import { setLatencyMap } from '../hooks/useNodes'
 import { useConnection } from '../hooks/useConnection'
 import { useNodeTest } from '../hooks/useNodeTest'
 import NodeFilters from './NodeFilters'
 import ConnectionModal from './ConnectionModal'
 import type { SentNode } from '../types'
 
-const COUNTRY_CODE_MAP: Record<string, string> = {}
-
-function countryToCode(country: string): string {
-  if (COUNTRY_CODE_MAP[country]) return COUNTRY_CODE_MAP[country]
-  const map: Record<string, string> = {
-    'Afghanistan': 'af', 'Albania': 'al', 'Algeria': 'dz', 'Argentina': 'ar',
-    'Armenia': 'am', 'Australia': 'au', 'Austria': 'at', 'Azerbaijan': 'az',
-    'Bahamas': 'bs', 'Bahrain': 'bh', 'Bangladesh': 'bd', 'Belarus': 'by',
-    'Belgium': 'be', 'Bolivia': 'bo', 'Bosnia and Herzegovina': 'ba',
-    'Brazil': 'br', 'Bulgaria': 'bg', 'Cambodia': 'kh', 'Canada': 'ca',
-    'Chile': 'cl',
-    'China': 'cn', 'Colombia': 'co', 'Costa Rica': 'cr', 'Croatia': 'hr',
-    'Cuba': 'cu', 'Cyprus': 'cy', 'Czech Republic': 'cz', 'Czechia': 'cz',
-    'Denmark': 'dk', 'Dominican Republic': 'do', 'DR Congo': 'cd',
-    'Ecuador': 'ec',
-    'Egypt': 'eg', 'El Salvador': 'sv', 'Estonia': 'ee', 'Ethiopia': 'et',
-    'Finland': 'fi', 'France': 'fr', 'Georgia': 'ge', 'Germany': 'de',
-    'Ghana': 'gh', 'Greece': 'gr', 'Guatemala': 'gt', 'Honduras': 'hn',
-    'Hong Kong': 'hk', 'Hungary': 'hu', 'Iceland': 'is', 'India': 'in',
-    'Indonesia': 'id', 'Iran': 'ir', 'Iraq': 'iq', 'Ireland': 'ie',
-    'Israel': 'il', 'Italy': 'it', 'Jamaica': 'jm', 'Japan': 'jp',
-    'Jordan': 'jo', 'Kazakhstan': 'kz', 'Kenya': 'ke', 'Kuwait': 'kw',
-    'Kyrgyzstan': 'kg', 'Latvia': 'lv', 'Lebanon': 'lb', 'Lithuania': 'lt',
-    'Luxembourg': 'lu',
-    'Malaysia': 'my', 'Malta': 'mt', 'Mexico': 'mx', 'Moldova': 'md',
-    'Mongolia': 'mn', 'Montenegro': 'me', 'Morocco': 'ma', 'Myanmar': 'mm',
-    'Nepal': 'np', 'Netherlands': 'nl', 'New Zealand': 'nz', 'Nigeria': 'ng',
-    'North Macedonia': 'mk', 'Norway': 'no', 'Pakistan': 'pk', 'Panama': 'pa',
-    'Paraguay': 'py', 'Peru': 'pe', 'Philippines': 'ph', 'Poland': 'pl',
-    'Portugal': 'pt', 'Puerto Rico': 'pr', 'Qatar': 'qa', 'Romania': 'ro',
-    'Russia': 'ru',
-    'Saudi Arabia': 'sa', 'Senegal': 'sn', 'Serbia': 'rs', 'Singapore': 'sg',
-    'Slovakia': 'sk', 'Slovenia': 'si', 'South Africa': 'za',
-    'South Korea': 'kr', 'Spain': 'es', 'Sri Lanka': 'lk', 'Sweden': 'se',
-    'Switzerland': 'ch', 'Taiwan': 'tw', 'Thailand': 'th', 'Tunisia': 'tn',
-    'Turkey': 'tr', 'Türkiye': 'tr', 'Ukraine': 'ua',
-    'United Arab Emirates': 'ae', 'United Kingdom': 'gb',
-    'United States': 'us', 'Uruguay': 'uy', 'Uzbekistan': 'uz',
-    'Venezuela': 've', 'Vietnam': 'vn',
-  }
-  const code = map[country] || ''
-  COUNTRY_CODE_MAP[country] = code
-  return code
+const COUNTRY_CODES: Record<string, string> = {
+  'Afghanistan': 'af', 'Albania': 'al', 'Algeria': 'dz', 'Argentina': 'ar',
+  'Armenia': 'am', 'Australia': 'au', 'Austria': 'at', 'Azerbaijan': 'az',
+  'Bahamas': 'bs', 'Bahrain': 'bh', 'Bangladesh': 'bd', 'Belarus': 'by',
+  'Belgium': 'be', 'Bolivia': 'bo', 'Bosnia and Herzegovina': 'ba',
+  'Brazil': 'br', 'Bulgaria': 'bg', 'Cambodia': 'kh', 'Canada': 'ca',
+  'Chile': 'cl',
+  'China': 'cn', 'Colombia': 'co', 'Costa Rica': 'cr', 'Croatia': 'hr',
+  'Cuba': 'cu', 'Cyprus': 'cy', 'Czech Republic': 'cz', 'Czechia': 'cz',
+  'Denmark': 'dk', 'Dominican Republic': 'do', 'DR Congo': 'cd',
+  'Ecuador': 'ec',
+  'Egypt': 'eg', 'El Salvador': 'sv', 'Estonia': 'ee', 'Ethiopia': 'et',
+  'Finland': 'fi', 'France': 'fr', 'Georgia': 'ge', 'Germany': 'de',
+  'Ghana': 'gh', 'Greece': 'gr', 'Guatemala': 'gt', 'Honduras': 'hn',
+  'Hong Kong': 'hk', 'Hungary': 'hu', 'Iceland': 'is', 'India': 'in',
+  'Indonesia': 'id', 'Iran': 'ir', 'Iraq': 'iq', 'Ireland': 'ie',
+  'Israel': 'il', 'Italy': 'it', 'Jamaica': 'jm', 'Japan': 'jp',
+  'Jordan': 'jo', 'Kazakhstan': 'kz', 'Kenya': 'ke', 'Kuwait': 'kw',
+  'Kyrgyzstan': 'kg', 'Latvia': 'lv', 'Lebanon': 'lb', 'Lithuania': 'lt',
+  'Luxembourg': 'lu',
+  'Malaysia': 'my', 'Malta': 'mt', 'Mexico': 'mx', 'Moldova': 'md',
+  'Mongolia': 'mn', 'Montenegro': 'me', 'Morocco': 'ma', 'Myanmar': 'mm',
+  'Nepal': 'np', 'Netherlands': 'nl', 'New Zealand': 'nz', 'Nigeria': 'ng',
+  'North Macedonia': 'mk', 'Norway': 'no', 'Pakistan': 'pk', 'Panama': 'pa',
+  'Paraguay': 'py', 'Peru': 'pe', 'Philippines': 'ph', 'Poland': 'pl',
+  'Portugal': 'pt', 'Puerto Rico': 'pr', 'Qatar': 'qa', 'Romania': 'ro',
+  'Russia': 'ru',
+  'Saudi Arabia': 'sa', 'Senegal': 'sn', 'Serbia': 'rs', 'Singapore': 'sg',
+  'Slovakia': 'sk', 'Slovenia': 'si', 'South Africa': 'za',
+  'South Korea': 'kr', 'Spain': 'es', 'Sri Lanka': 'lk', 'Sweden': 'se',
+  'Switzerland': 'ch', 'Taiwan': 'tw', 'Thailand': 'th', 'Tunisia': 'tn',
+  'Turkey': 'tr', 'Türkiye': 'tr', 'Ukraine': 'ua',
+  'United Arab Emirates': 'ae', 'United Kingdom': 'gb',
+  'United States': 'us', 'Uruguay': 'uy', 'Uzbekistan': 'uz',
+  'Venezuela': 've', 'Vietnam': 'vn',
 }
 
 function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
@@ -79,6 +70,19 @@ const COLUMNS: { key: SortKey; label: string; width: string }[] = [
 const CACHE_TTL = 10 * 60 * 1000
 
 export default function NodeTable() {
+  const { status: connStatus } = useConnection()
+  const connectedAddress = connStatus.state === 'connected' ? connStatus.nodeAddress : null
+  const { results: testResults, testing: testingNodes, batchProgress, testBatch, cancelBatch, testNode } = useNodeTest()
+
+  // Derived latency map drives the sort comparator in useNodes.
+  const latencyMap = useMemo(() => {
+    const map = new Map<string, number | null>()
+    for (const [addr, result] of testResults) {
+      map.set(addr, result.reachable ? result.latencyMs : null)
+    }
+    return map
+  }, [testResults])
+
   const {
     nodes,
     totalCount,
@@ -94,20 +98,7 @@ export default function NodeTable() {
     refresh,
     bookmarks,
     toggleBookmark,
-  } = useNodes()
-
-  const { status: connStatus } = useConnection()
-  const connectedAddress = connStatus.state === 'connected' ? connStatus.nodeAddress : null
-  const { results: testResults, testing: testingNodes, batchProgress, testBatch, cancelBatch, testNode } = useNodeTest()
-
-  // Sync test results to sorting module
-  useEffect(() => {
-    const map = new Map<string, number | null>()
-    for (const [addr, result] of testResults) {
-      map.set(addr, result.reachable ? result.latencyMs : null)
-    }
-    setLatencyMap(map)
-  }, [testResults])
+  } = useNodes(latencyMap)
 
   const [selectedNode, setSelectedNode] = useState<SentNode | null>(null)
   const parentRef = useRef<HTMLDivElement>(null)
@@ -168,7 +159,7 @@ export default function NodeTable() {
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const node = nodes[virtualRow.index]
             if (!node) return null
-            const code = countryToCode(node.country || '')
+            const code = COUNTRY_CODES[node.country] || ''
             const active = node.isActive && node.isHealthy
             const isConnected = connectedAddress === node.address
 

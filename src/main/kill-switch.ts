@@ -2,7 +2,6 @@ import { execSync } from 'child_process'
 import { existsSync } from 'fs'
 
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
-const CHAIN_NAME = 'SENTINEL_KILLSWITCH'
 
 function runPrivileged(args: string[]): void {
   if (!existsSync(HELPER_PATH)) {
@@ -28,15 +27,5 @@ export function disableKillSwitch(): void {
     runPrivileged(['killswitch-off'])
   } catch {
     // Best-effort — chain may not exist
-  }
-}
-
-/** Check if the kill switch iptables chain is active */
-export function isKillSwitchActive(): boolean {
-  try {
-    execSync(`iptables -L ${CHAIN_NAME} -n 2>/dev/null`, { stdio: 'pipe' })
-    return true
-  } catch {
-    return false
   }
 }

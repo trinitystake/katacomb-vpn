@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { IpInfo } from '../types'
 import Spinner from './Spinner'
-import { useSettings } from '../contexts/SettingsContext'
+
+const POLL_IP_MS = 60_000
 
 interface Props {
   connected: boolean
@@ -13,8 +14,6 @@ export default function IpDisplay({ connected }: Props) {
   const [revealed, setRevealed] = useState(false)
   const prevConnected = useRef(connected)
   const [ipStale, setIpStale] = useState(false)
-  const { settings } = useSettings()
-  const pollSec = settings?.pollIpSec ?? 60
 
   const fetchIp = useCallback(async (retries = 2, includeGeo = true) => {
     setLoading(true)
@@ -66,9 +65,9 @@ export default function IpDisplay({ connected }: Props) {
       if (document.visibilityState === 'visible') {
         fetchIp(0, false)
       }
-    }, pollSec * 1000)
+    }, POLL_IP_MS)
     return () => clearInterval(interval)
-  }, [connected, fetchIp, pollSec])
+  }, [connected, fetchIp])
 
   const shouldBlur = !connected && !revealed
   const ip = ipInfo?.ip

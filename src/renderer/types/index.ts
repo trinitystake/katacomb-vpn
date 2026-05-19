@@ -89,15 +89,7 @@ export interface SessionInfo {
   nodeCountry: string
 }
 
-export type ConnectionState =
-  | 'idle'
-  | 'subscribing'
-  | 'handshaking'
-  | 'connecting'
-  | 'connected'
-  | 'disconnecting'
-  | 'reconnecting'
-  | 'error'
+export type ConnectionState = 'idle' | 'connected' | 'reconnecting'
 
 export interface ConnectionStatus {
   state: ConnectionState
@@ -131,12 +123,6 @@ export interface AppSettings {
   autoReconnect: boolean
   bookmarkedNodes: string[]
   splitTunnelRoutes: string[]
-  preferHourlyWhenCheaper: boolean
-  pollStatusSec: number
-  pollIpSec: number
-  pollBalanceSec: number
-  pollAllocationSec: number
-  planDiscoveryMaxId: number
 }
 
 export interface PlanInfo {

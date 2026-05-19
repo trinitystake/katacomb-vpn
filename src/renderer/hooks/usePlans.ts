@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PlanInfo, PlanAllocation, DiscoverProgress } from '../types'
-import { useSettings } from '../contexts/SettingsContext'
+
+const POLL_ALLOCATIONS_MS = 120_000
 
 export function usePlans() {
   const [plans, setPlans] = useState<PlanInfo[]>([])
@@ -9,8 +10,6 @@ export function usePlans() {
   const [discovering, setDiscovering] = useState(false)
   const [progress, setProgress] = useState<DiscoverProgress | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const { settings } = useSettings()
-  const pollSec = settings?.pollAllocationSec ?? 120
 
   const refreshCached = useCallback(async () => {
     try {
@@ -50,11 +49,11 @@ export function usePlans() {
   }, [refreshCached, refreshAllocations])
 
   useEffect(() => {
-    intervalRef.current = setInterval(refreshAllocations, pollSec * 1000)
+    intervalRef.current = setInterval(refreshAllocations, POLL_ALLOCATIONS_MS)
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [refreshAllocations, pollSec])
+  }, [refreshAllocations])
 
   useEffect(() => {
     const unsub = window.api.onPlanDiscoverProgress((p) => setProgress(p))

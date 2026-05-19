@@ -14,7 +14,7 @@ import {
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow, app, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getRpcEndpoint } from './settings'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
@@ -73,17 +73,9 @@ export function loadSessionConfig(sessionId: string): SavedSessionConfig | null 
   }
 }
 
-export function deleteSessionConfig(sessionId: string): void {
+function deleteSessionConfig(sessionId: string): void {
   const path = sessionConfigPath(sessionId)
   if (existsSync(path)) unlinkSync(path)
-}
-
-export function listSavedSessionIds(): string[] {
-  const dir = getSessionsDir()
-  if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .filter((f) => f.startsWith('session-') && f.endsWith('.json'))
-    .map((f) => f.replace('session-', '').replace('.json', ''))
 }
 
 function sendProgress(step: string, detail: string): void {

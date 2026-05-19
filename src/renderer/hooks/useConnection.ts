@@ -1,12 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ConnectionStatus } from '../types'
-import { useSettings } from '../contexts/SettingsContext'
+
+const POLL_STATUS_MS = 3_000
 
 export function useConnection() {
   const [status, setStatus] = useState<ConnectionStatus>({ state: 'idle' })
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const { settings } = useSettings()
-  const pollSec = settings?.pollStatusSec ?? 5
 
   const pollStatus = useCallback(async () => {
     try {
@@ -19,7 +18,7 @@ export function useConnection() {
 
   useEffect(() => {
     pollStatus()
-    intervalRef.current = setInterval(pollStatus, pollSec * 1000)
+    intervalRef.current = setInterval(pollStatus, POLL_STATUS_MS)
 
     // Listen for push events from main process for immediate updates
     const unsubscribe = window.api.onConnectionStateChange(() => {
@@ -41,7 +40,7 @@ export function useConnection() {
       unsubscribe()
       unsubReconnect()
     }
-  }, [pollStatus, pollSec])
+  }, [pollStatus])
 
   async function disconnect() {
     await window.api.connectionDisconnect()

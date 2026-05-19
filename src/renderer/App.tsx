@@ -12,7 +12,6 @@ import PlanDiscovery from './components/PlanDiscovery'
 import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
 import ThemeToggle from './components/ThemeToggle'
-import { ToastProvider } from './components/Toast'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { NavigationProvider, useNavigation } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
@@ -133,9 +132,7 @@ export default function App() {
   return (
     <SettingsProvider>
       <NavigationProvider>
-        <ToastProvider>
-          <AppInner />
-        </ToastProvider>
+        <AppInner />
       </NavigationProvider>
     </SettingsProvider>
   )

@@ -14,7 +14,7 @@ import { BrowserWindow } from 'electron'
 import { getRpcEndpoint } from './settings'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
-import { setCachedPlans, getCachedPlans, isCacheFresh, type CachedPlan } from './plan-cache'
+import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
 import { getCachedProviders } from './provider-cache'
 import type { ProviderInfo } from './provider-service'
 import { isTestPlan } from '../shared/test-plan'
@@ -122,10 +122,6 @@ export function listCachedPlans(): { plans: EnrichedPlan[]; fetchedAt: number | 
   const cache = getCachedPlans()
   const { providers } = getCachedProviders()
   return { plans: enrichPlans(cache.plans, providers), fetchedAt: cache.fetchedAt }
-}
-
-export function cachedPlansAreFresh(): boolean {
-  return isCacheFresh()
 }
 
 const planNodesCache = new Map<string, { addresses: string[]; fetchedAt: number }>()

@@ -13,12 +13,6 @@ export interface AppSettings {
   autoReconnect: boolean
   bookmarkedNodes: string[]
   splitTunnelRoutes: string[]
-  preferHourlyWhenCheaper: boolean
-  pollStatusSec: number
-  pollIpSec: number
-  pollBalanceSec: number
-  pollAllocationSec: number
-  planDiscoveryMaxId: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -29,12 +23,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoReconnect: false,
   bookmarkedNodes: [],
   splitTunnelRoutes: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
-  preferHourlyWhenCheaper: false,
-  pollStatusSec: 3,
-  pollIpSec: 60,
-  pollBalanceSec: 300,
-  pollAllocationSec: 120,
-  planDiscoveryMaxId: 500,
 }
 
 function settingsPath(): string {

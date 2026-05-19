@@ -52,13 +52,50 @@ VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a po
 
 ### Renderer Conventions
 
-- Hooks in `src/renderer/hooks/`: `useWallet` (balance polling 30s), `useNodes` (node fetch + filter/sort, 60s refresh), `useConnection` (status polling 5s).
+- Hooks in `src/renderer/hooks/`: `useWallet` (balance polling 300s), `useNodes` (node fetch + filter/sort, 60s refresh), `useConnection` (status polling 3s). Polling intervals are hardcoded per-hook — not user-tunable.
 - Node table uses `@tanstack/react-virtual` for virtualized rendering (5000+ nodes).
-- Toast notifications via React context (`Toast.tsx`).
 - BIP-39 validation uses direct JSON wordlist import + Set lookup (not `bip39.validateMnemonic` — that function's dynamic require fails in Vite's renderer bundle).
 - Cypherpunk dark theme: bg `#0a0a0f`, accent green `#00ff88`.
 - `@` alias maps to `src/renderer/`.
 - Types for renderer in `src/renderer/types/index.ts` — includes `ElectronAPI` interface matching preload bridge and `declare global` for `window.api`.
+
+## Working Principles (for LLM contributors)
+
+This codebase follows Karpathy-style discipline. Apply these in order of precedence:
+
+1. **Think before coding.** State assumptions. If a simpler approach exists, say
+   so. When multiple interpretations of a request exist, ask — don't pick silently.
+
+2. **Simplicity first.** No code beyond what was asked. No abstractions for
+   single-use callers. No configurability that wasn't requested (especially
+   user-tunable knobs — defaults are a feature). No error handling for situations
+   that can't happen given the IPC bridge's typing.
+
+3. **Surgical changes.** Touch only what the task requires. Don't reformat
+   adjacent code, don't "improve" comments, don't refactor neighbours. If you
+   notice pre-existing dead code, mention it — don't delete it unless asked.
+
+4. **Goal-driven execution.** Define how you'll verify success (build passes,
+   feature works in app, specific commands), then loop until it does. "It should
+   work" isn't a verification.
+
+5. **Rule-of-three before extracting.** Two similar blocks: leave them. Three:
+   then a helper is warranted. Premature abstraction is worse than duplication.
+
+**Concrete antipatterns this repo has burned on** (extend as new ones surface):
+- Settings keys for things only one user tunes. Hardcode the constant; if it
+  needs to change, change the constant.
+- Exported helpers without callers — dead exports drift over time and get
+  imported by mistake. Unexport (or delete) the moment they go unused.
+- Defensive per-key validation behind an already-typed IPC bridge. Validate
+  shapes at the trust boundary; trust the types past it.
+- Module-level mutable state used as a side channel between files (e.g. a
+  setter exported from one module, called from another). Thread the value
+  through a hook/prop instead.
+- Single-use components extracted into their own files just because the parent
+  file feels "long." Keep them inline until a second caller appears.
+- Graceful degradation that silently weakens security — supply-chain integrity
+  failures should throw, not fall back to less-trusted sources.
 
 ### Blockchain Details
 

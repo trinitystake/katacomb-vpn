@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useSettings } from '../contexts/SettingsContext'
+
+const POLL_BALANCE_MS = 300_000
 
 interface WalletInfo {
   address: string | null
@@ -14,8 +15,6 @@ export function useWallet() {
     loading: true,
   })
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const { settings } = useSettings()
-  const pollSec = settings?.pollBalanceSec ?? 30
 
   const fetchBalance = useCallback(async () => {
     try {
@@ -45,11 +44,11 @@ export function useWallet() {
 
   useEffect(() => {
     initialize()
-    intervalRef.current = setInterval(fetchBalance, pollSec * 1000)
+    intervalRef.current = setInterval(fetchBalance, POLL_BALANCE_MS)
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [initialize, fetchBalance, pollSec])
+  }, [initialize, fetchBalance])
 
   async function importWallet(mnemonic: string): Promise<string> {
     const result = await window.api.walletImport(mnemonic)

@@ -33,7 +33,12 @@ function verifyBinaryIntegrity(path: string, name: string): boolean {
   }
 }
 
-/** Resolve path to a bundled binary, falling back to system PATH */
+/**
+ * Resolve path to a bundled binary, falling back to system PATH if absent.
+ * A bundled binary that *exists* but fails the SHA-256 check is treated as
+ * tampering and throws — falling back to $PATH on hash mismatch would
+ * silently weaken the supply-chain guarantee.
+ */
 function resolveBundled(name: string): string {
   const bundled = is.dev
     ? join(__dirname, '../../resources/linux/v2ray', name)
@@ -41,8 +46,10 @@ function resolveBundled(name: string): string {
 
   if (existsSync(bundled)) {
     if (!verifyBinaryIntegrity(bundled, name)) {
-      console.error(`[security] Bundled binary ${name} failed integrity check — refusing to use it`)
-      return name // fall back to system PATH
+      throw new Error(
+        `Bundled binary ${name} failed SHA-256 integrity check. ` +
+        `Refusing to run — reinstall the app to restore the verified binary.`
+      )
     }
     return bundled
   }
@@ -92,7 +99,7 @@ function helperInstalled(): boolean {
 }
 
 /** Run a privileged command via the helper script (polkit cached) */
-function runPrivileged(args: string[]): void {
+export function runPrivileged(args: string[]): void {
   if (!helperInstalled()) {
     throw new Error('VPN helper not installed. Please restart the app to set it up.')
   }
@@ -262,40 +269,38 @@ function bringDownTun(): void {
   tunActive = false
 }
 
-/** Get v2ray major version number */
-function v2rayVersion(): number {
-  const bin = resolveV2RayBinary()
-  try {
-    const ver = execFileSync(bin, ['version'], { stdio: 'pipe' }).toString()
-    const match = ver.match(/V2Ray (\d+)\./)
-    if (match) return parseInt(match[1], 10)
-  } catch { /* ignore */ }
-  try {
-    const ver = execFileSync(bin, ['-version'], { stdio: 'pipe' }).toString()
-    const match = ver.match(/V2Ray (\d+)\./)
-    if (match) return parseInt(match[1], 10)
-  } catch { /* ignore */ }
+// Cached major version per binary path. The bundled binary is pinned (its hash is
+// verified at resolveBundled), so we never re-probe it; system-PATH fallbacks
+// are probed once and cached.
+const v2rayVersionCache = new Map<string, number>()
+
+function probeV2RayVersion(bin: string): number {
+  for (const flag of ['version', '-version']) {
+    try {
+      const out = execFileSync(bin, [flag], { stdio: 'pipe' }).toString()
+      const match = out.match(/V2Ray (\d+)\./)
+      if (match) return parseInt(match[1], 10)
+    } catch { /* try next flag */ }
+  }
   return 0
 }
 
-/** Detect v2ray major version to determine CLI syntax */
-function v2rayArgs(configFile: string): string[] {
-  if (v2rayVersion() >= 5) {
-    return ['run', '-config', configFile]  // V5+ syntax
+function v2rayArgs(bin: string, configFile: string): string[] {
+  // Bundled binary is pinned at V5; resolveBundled() returns the basename
+  // 'v2ray' only when falling back to system PATH.
+  const isBundled = bin !== 'v2ray'
+  let major = v2rayVersionCache.get(bin)
+  if (major === undefined) {
+    major = isBundled ? 5 : probeV2RayVersion(bin)
+    v2rayVersionCache.set(bin, major)
   }
-  return ['-config', configFile]  // V4 syntax
-}
-
-/** Check if v2ray supports required features (gRPC transport, etc.) */
-export function v2raySupportsGrpc(): boolean {
-  return v2rayVersion() >= 5
+  return major >= 5 ? ['run', '-config', configFile] : ['-config', configFile]
 }
 
 /** Spawn v2ray process and wait briefly to confirm it stays alive */
 function spawnV2Ray(configFile: string): ChildProcess {
-  const args = v2rayArgs(configFile)
-
   const bin = resolveV2RayBinary()
+  const args = v2rayArgs(bin, configFile)
 
   // Set V2RAY_LOCATION_ASSET so v2ray can find geoip/geosite if bundled alongside
   const binDir = join(bin, '..')
@@ -455,7 +460,7 @@ export function connectV2RayFromConfig(configString: string): void {
   activeConfigFile = V2RAY_CONFIG
 }
 
-export function disconnect(_v2ray: V2Ray | null, _wg: Wireguard | null): void {
+export function disconnect(): void {
   // Tear down tun2socks TUN interface first (before killing V2Ray)
   if (tunActive || isTunUp()) {
     bringDownTun()
@@ -484,10 +489,7 @@ export function disconnect(_v2ray: V2Ray | null, _wg: Wireguard | null): void {
   activeChild = null
 }
 
-export function getConnectionStatus(
-  _v2ray: V2Ray | null,
-  _wg: Wireguard | null
-): { connected: boolean; protocol: string | null } {
+export function getConnectionStatus(): { connected: boolean; protocol: string | null } {
   // V2Ray: check if our spawned process is still running
   if (activeProtocol === 'v2ray' && activeChild && activeChild.exitCode === null) {
     return { connected: true, protocol: 'v2ray' }
@@ -526,11 +528,6 @@ export function isVpnActive(): boolean {
 /** Get V2Ray error output if the process crashed */
 export function getV2RayError(): string {
   return v2rayStderr
-}
-
-/** Get the currently active VPN protocol */
-export function getActiveProtocol(): 'wireguard' | 'v2ray' | null {
-  return activeProtocol
 }
 
 /** Get the V2Ray remote server IP from the active config */

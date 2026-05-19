@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import Spinner from './Spinner'
 
 interface Props {
   address: string | null
@@ -10,7 +11,9 @@ export default function WalletPanel({ address, onLogout }: Props) {
   const [sessions, setSessions] = useState<{ id: string; nodeAddress: string; status: string }[]>([])
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (address) {
@@ -25,6 +28,26 @@ export default function WalletPanel({ address, onLogout }: Props) {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
   }, [address])
+
+  useEffect(() => {
+    if (!expanded) return
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setExpanded(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [expanded])
+
+  async function refresh() {
+    setRefreshing(true)
+    try {
+      await Promise.all([fetchBalance(), fetchSessions()])
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   async function fetchBalance() {
     try {
@@ -59,7 +82,7 @@ export default function WalletPanel({ address, onLogout }: Props) {
   if (!address) return null
 
   return (
-    <div className="relative">
+    <div className="relative" ref={containerRef}>
       <div className="flex items-center gap-4 text-sm">
         {balance !== null && (
           <span className="text-success font-medium font-mono">
@@ -121,10 +144,11 @@ export default function WalletPanel({ address, onLogout }: Props) {
           )}
 
           <button
-            onClick={() => { fetchBalance(); fetchSessions() }}
-            className="text-text-secondary hover:text-accent text-sm transition-colors w-full text-center"
+            onClick={refresh}
+            disabled={refreshing}
+            className="text-text-secondary hover:text-accent text-sm transition-colors w-full text-center inline-flex items-center justify-center gap-2 disabled:opacity-50"
           >
-            Refresh
+            {refreshing ? <><Spinner className="text-accent" /> Refreshing</> : 'Refresh'}
           </button>
         </div>
       )}

@@ -3,10 +3,11 @@ import Spinner from './Spinner'
 
 interface Props {
   address: string | null
+  name: string | null
   onLogout: () => void
 }
 
-export default function WalletPanel({ address, onLogout }: Props) {
+export default function WalletPanel({ address, name, onLogout }: Props) {
   const [balance, setBalance] = useState<string | null>(null)
   const [sessions, setSessions] = useState<{ id: string; nodeAddress: string; status: string }[]>([])
   const [copied, setCopied] = useState(false)
@@ -68,10 +69,6 @@ export default function WalletPanel({ address, onLogout }: Props) {
     }
   }
 
-  function truncateAddress(addr: string): string {
-    return `${addr.slice(0, 10)}...${addr.slice(-6)}`
-  }
-
   async function copyAddress() {
     if (!address) return
     await navigator.clipboard.writeText(address)
@@ -83,18 +80,13 @@ export default function WalletPanel({ address, onLogout }: Props) {
 
   return (
     <div className="relative" ref={containerRef}>
-      <div className="flex items-center gap-4 text-sm">
-        {balance !== null && (
-          <span className="text-success font-medium font-mono">
-            {balance} <span className="text-text-secondary font-normal font-sans">P2P</span>
-          </span>
-        )}
+      <div className="flex items-center gap-1.5 text-sm">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="text-text-secondary hover:text-accent transition-colors font-mono text-xs"
+          className="text-text-secondary hover:text-accent transition-colors"
           title="Wallet details"
         >
-          {truncateAddress(address)}
+          Wallet
         </button>
         <button
           onClick={() => setExpanded(!expanded)}
@@ -105,17 +97,15 @@ export default function WalletPanel({ address, onLogout }: Props) {
             {expanded ? <polyline points="18 15 12 9 6 15" /> : <polyline points="6 9 12 15 18 9" />}
           </svg>
         </button>
-        <button
-          onClick={onLogout}
-          className="text-text-secondary hover:text-danger transition-colors text-sm"
-          title="Logout"
-        >
-          Logout
-        </button>
       </div>
 
       {expanded && (
         <div className="absolute right-0 top-full mt-2 bg-bg-secondary border border-border p-4 w-80 z-50 space-y-3 rounded-lg shadow-overlay">
+          {name && (
+            <div className="text-text-primary text-sm font-semibold pb-2 border-b border-border">
+              {name}
+            </div>
+          )}
           <div className="space-y-2 text-sm">
             <div>
               <div className="flex items-center justify-between">
@@ -136,9 +126,28 @@ export default function WalletPanel({ address, onLogout }: Props) {
                 {address}
               </button>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-secondary">Balance</span>
-              <span className="text-success font-mono">{balance || '...'} P2P</span>
+              <div className="flex items-center gap-2">
+                <span className="text-success font-mono">{balance || '...'} P2P</span>
+                <button
+                  onClick={refresh}
+                  disabled={refreshing}
+                  className="text-text-secondary hover:text-accent transition-colors disabled:opacity-50"
+                  title="Refresh balance"
+                  aria-label="Refresh balance"
+                >
+                  {refreshing ? (
+                    <Spinner />
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="23 4 23 10 17 10" />
+                      <polyline points="1 20 1 14 7 14" />
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -159,11 +168,11 @@ export default function WalletPanel({ address, onLogout }: Props) {
           )}
 
           <button
-            onClick={refresh}
-            disabled={refreshing}
-            className="text-text-secondary hover:text-accent text-sm transition-colors w-full text-center inline-flex items-center justify-center gap-2 disabled:opacity-50"
+            onClick={onLogout}
+            className="text-text-secondary hover:text-danger text-sm transition-colors w-full text-center"
+            title="Logout"
           >
-            {refreshing ? <><Spinner className="text-accent" /> Refreshing</> : 'Refresh'}
+            Logout
           </button>
         </div>
       )}

@@ -4,7 +4,7 @@ import { IPC } from '../shared/ipc-channels'
 contextBridge.exposeInMainWorld('api', {
   walletHasStored: () => ipcRenderer.invoke(IPC.WALLET_HAS_STORED),
   walletGenerate: (wordCount: 12 | 24) => ipcRenderer.invoke(IPC.WALLET_GENERATE, wordCount),
-  walletImport: (mnemonic: string) => ipcRenderer.invoke(IPC.WALLET_IMPORT, mnemonic),
+  walletImport: (mnemonic: string, name?: string) => ipcRenderer.invoke(IPC.WALLET_IMPORT, mnemonic, name),
   walletGetAddress: () => ipcRenderer.invoke(IPC.WALLET_GET_ADDRESS),
   walletGetBalance: () => ipcRenderer.invoke(IPC.WALLET_GET_BALANCE),
   walletLogout: () => ipcRenderer.invoke(IPC.WALLET_LOGOUT),
@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('api', {
   walletSwitch: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_SWITCH, walletId),
   walletDelete: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_DELETE, walletId),
   walletRename: (walletId: string, newName: string) => ipcRenderer.invoke(IPC.WALLET_RENAME, walletId, newName),
+  walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; name: string }) =>
+    ipcRenderer.invoke(IPC.WALLET_DERIVE_SUBACCOUNT, params),
 
   settingsGet: () => ipcRenderer.invoke(IPC.SETTINGS_GET),
   settingsSet: (settings: Record<string, unknown>) => ipcRenderer.invoke(IPC.SETTINGS_SET, settings),

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { WalletEntry, AppSettings } from '../types'
 import Toggle from './Toggle'
+import ThemeToggle from './ThemeToggle'
 import { useSettings } from '../contexts/SettingsContext'
 import { CHAIN_ID, DENOM, GAS_PRICE_STR } from '../../shared/chain-constants'
 
@@ -8,6 +9,9 @@ interface Props {
   currentAddress: string | null
   onClose: () => void
   onWalletSwitch: () => void
+  // Called after a wallet rename / derive succeeds, so the top-bar Wallet
+  // popover can re-fetch the active wallet's display name.
+  onWalletsChanged?: () => void
 }
 
 const KNOWN_RPC_ENDPOINTS = [
@@ -40,7 +44,7 @@ const DNS_OPTIONS = [
   { label: 'NextDNS (45.90.28.0)', value: '45.90.28.0' },
 ]
 
-export default function Settings({ currentAddress, onClose, onWalletSwitch }: Props) {
+export default function Settings({ currentAddress, onClose, onWalletSwitch, onWalletsChanged }: Props) {
   const { reload: reloadGlobalSettings } = useSettings()
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [wallets, setWallets] = useState<WalletEntry[]>([])
@@ -52,6 +56,13 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
   const [rpcChecking, setRpcChecking] = useState<string | null>(null)
   const [rpcLatency, setRpcLatency] = useState<Record<string, number>>({})
   const [splitTunnelInput, setSplitTunnelInput] = useState('')
+  // Derive-subaccount modal state. `source` is the wallet whose mnemonic we'll
+  // reuse; `index` is the BIP-44 account index to derive at.
+  const [deriveSource, setDeriveSource] = useState<WalletEntry | null>(null)
+  const [deriveName, setDeriveName] = useState('')
+  const [deriveIndex, setDeriveIndex] = useState('1')
+  const [deriveError, setDeriveError] = useState('')
+  const [deriveLoading, setDeriveLoading] = useState(false)
 
   const load = useCallback(async () => {
     const [s, w] = await Promise.all([
@@ -102,7 +113,61 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
     setEditingName(null)
     setNameInput('')
     await load()
+    onWalletsChanged?.()
   }
+
+  function openDeriveModal(source: WalletEntry) {
+    // Suggest the smallest non-zero index not already in use, since the user
+    // is starting from an existing wallet (which is most likely at index 0).
+    const used = new Set(wallets.map((w) => w.accountIndex ?? 0))
+    let next = 1
+    while (used.has(next)) next += 1
+    setDeriveSource(source)
+    setDeriveName('')
+    setDeriveIndex(String(next))
+    setDeriveError('')
+  }
+
+  function closeDeriveModal() {
+    setDeriveSource(null)
+    setDeriveName('')
+    setDeriveIndex('')
+    setDeriveError('')
+    setDeriveLoading(false)
+  }
+
+  async function submitDerive() {
+    if (!deriveSource) return
+    setDeriveError('')
+    const name = deriveName.trim()
+    if (!name) {
+      setDeriveError('Please enter a wallet name')
+      return
+    }
+    const idx = parseInt(deriveIndex, 10)
+    if (!Number.isInteger(idx) || idx < 0) {
+      setDeriveError('Account index must be a non-negative integer')
+      return
+    }
+    setDeriveLoading(true)
+    try {
+      await window.api.walletDeriveSubaccount({
+        sourceWalletId: deriveSource.id,
+        accountIndex: idx,
+        name,
+      })
+      closeDeriveModal()
+      await load()
+      onWalletsChanged?.()
+    } catch (err) {
+      setDeriveError(err instanceof Error ? err.message : 'Failed to derive subaccount')
+      setDeriveLoading(false)
+    }
+  }
+
+  // Show the account-index pill on each wallet row only when at least one
+  // wallet is a non-default subaccount — avoids noise for single-account users.
+  const showAccountIndex = wallets.some((w) => (w.accountIndex ?? 0) > 0)
 
   if (!settings) return null
 
@@ -141,6 +206,20 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {tab === 'general' && (
             <>
+              {/* Appearance */}
+              <div className="space-y-3">
+                <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
+                  Appearance
+                </label>
+                <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
+                  <div>
+                    <span className="text-text-primary text-sm">Theme</span>
+                    <p className="text-text-tertiary text-xs mt-0.5">Light, system, or dark color scheme</p>
+                  </div>
+                  <ThemeToggle />
+                </div>
+              </div>
+
               {/* VPN Security */}
               <div className="space-y-3">
                 <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
@@ -376,6 +455,11 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
                           ) : (
                             <>
                               <span className="text-text-primary text-sm font-semibold">{w.name}</span>
+                              {showAccountIndex && (
+                                <span className="text-text-tertiary text-xs font-mono">
+                                  Account {w.accountIndex ?? 0}
+                                </span>
+                              )}
                               <button
                                 onClick={() => { setEditingName(w.id); setNameInput(w.name) }}
                                 className="text-text-secondary text-xs hover:text-accent transition-colors"
@@ -398,6 +482,13 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
                             </button>
                           )}
                           <button
+                            onClick={() => openDeriveModal(w)}
+                            className="text-text-secondary text-xs hover:text-accent transition-colors px-2"
+                            title="Derive a new wallet from this seed at a different account index"
+                          >
+                            Derive Subaccount
+                          </button>
+                          <button
                             onClick={() => handleDelete(w)}
                             className="btn btn-danger text-xs px-3 py-1"
                           >
@@ -414,12 +505,79 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch }: Pr
               </div>
 
               <p className="text-text-tertiary text-xs">
-                To add a new wallet, log out and import or create a new seed phrase. Each wallet's seed is encrypted with your OS keyring.
+                To add a new wallet, log out and import or create a new seed phrase. To derive a second address from an existing seed, use Derive Subaccount. Each wallet's seed is encrypted with your OS keyring.
               </p>
             </div>
           )}
         </div>
       </div>
+
+      {deriveSource && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]"
+          onClick={() => !deriveLoading && closeDeriveModal()}
+        >
+          <div
+            className="bg-bg-secondary border border-border w-full max-w-md mx-4 p-5 space-y-4 rounded-lg shadow-overlay"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <h3 className="text-text-primary text-base font-semibold">Derive Subaccount</h3>
+              <p className="text-text-tertiary text-xs mt-1">
+                Creates a new wallet from the seed of <span className="text-text-secondary">{deriveSource.name}</span> at a different BIP-44 account index. Same seed, different address.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">Wallet name</label>
+              <input
+                type="text"
+                value={deriveName}
+                onChange={(e) => setDeriveName(e.target.value)}
+                placeholder="e.g. Sub 1"
+                maxLength={100}
+                autoFocus
+                className="w-full bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">Account index</label>
+              <input
+                type="number"
+                min={0}
+                value={deriveIndex}
+                onChange={(e) => setDeriveIndex(e.target.value)}
+                className="w-full bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus font-mono"
+              />
+              <p className="text-text-tertiary text-xs font-mono">
+                m/44'/118'/{deriveIndex || '?'}'/0/0
+              </p>
+            </div>
+
+            {deriveError && (
+              <p className="text-danger text-xs">{deriveError}</p>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                onClick={closeDeriveModal}
+                disabled={deriveLoading}
+                className="text-text-secondary hover:text-text-primary text-sm px-3 py-1.5 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitDerive}
+                disabled={deriveLoading || !deriveName.trim()}
+                className="btn btn-primary text-sm px-3 py-1.5 disabled:opacity-50"
+              >
+                {deriveLoading ? 'Deriving...' : 'Derive'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import { DirectSecp256k1HdWallet } from '@cosmjs/proto-signing'
+import { stringToPath } from '@cosmjs/crypto'
 import Long from 'long'
 import { SentinelClient, privKeyFromMnemonic } from '@sentinel-official/sentinel-js-sdk'
 import { Session as NodeSession } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/node/v3/session'
@@ -16,6 +17,14 @@ import {
   updateWalletAddress,
 } from './settings'
 import { WALLET_PREFIX } from '../shared/chain-constants'
+
+// BIP-44 path for Cosmos SDK chains (coin type 118). Varying the account
+// segment yields a different address from the same seed, the way Keplr /
+// Ledger Live expose "subaccounts".
+const COSMOS_COIN_TYPE = 118
+function cosmosHdPath(accountIndex: number) {
+  return stringToPath(`m/44'/${COSMOS_COIN_TYPE}'/${accountIndex}'/0/0`)
+}
 
 interface WalletState {
   wallet: DirectSecp256k1HdWallet | null
@@ -44,15 +53,16 @@ export function generateMnemonicPhrase(strength: 12 | 24): string {
   return generateMnemonic(wordlist, bits)
 }
 
-export async function importWallet(mnemonic: string, name?: string): Promise<string> {
+export async function importWallet(mnemonic: string, name?: string, accountIndex = 0): Promise<string> {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
     prefix: WALLET_PREFIX,
+    hdPaths: [cosmosHdPath(accountIndex)],
   })
   const [account] = await wallet.getAccounts()
   const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic })
 
   const walletName = name || `Wallet ${listWallets().length + 1}`
-  const entry = addWalletEntry(walletName, account.address, wallet.mnemonic)
+  const entry = addWalletEntry(walletName, account.address, wallet.mnemonic, accountIndex)
   saveSettings({ activeWalletId: entry.id })
 
   state.wallet = wallet
@@ -70,9 +80,13 @@ export async function restoreWallet(): Promise<string | null> {
 
   try {
     const mnemonic = getWalletMnemonic(settings.activeWalletId)
+    const wallets = listWallets()
+    const entry = wallets.find((w) => w.id === settings.activeWalletId)
+    const accountIndex = entry?.accountIndex ?? 0
 
     const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
       prefix: WALLET_PREFIX,
+      hdPaths: [cosmosHdPath(accountIndex)],
     })
     const [account] = await wallet.getAccounts()
     const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic })
@@ -83,8 +97,6 @@ export async function restoreWallet(): Promise<string | null> {
     state.activeWalletId = settings.activeWalletId
 
     // Update address in wallet index if it was blank (migration)
-    const wallets = listWallets()
-    const entry = wallets.find((w) => w.id === settings.activeWalletId)
     if (entry && !entry.address) {
       updateWalletAddress(settings.activeWalletId, account.address)
     }
@@ -104,8 +116,10 @@ export async function switchWallet(walletId: string): Promise<string | null> {
 
   try {
     const mnemonic = getWalletMnemonic(walletId)
+    const accountIndex = entry.accountIndex ?? 0
     const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
       prefix: WALLET_PREFIX,
+      hdPaths: [cosmosHdPath(accountIndex)],
     })
     const [account] = await wallet.getAccounts()
     const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic })
@@ -119,6 +133,39 @@ export async function switchWallet(walletId: string): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+/**
+ * Derive a new subaccount from an existing wallet's mnemonic, using a
+ * different BIP-44 account index. Same seed → different address. The
+ * resulting WalletEntry owns its own .enc file (mnemonic re-encrypted)
+ * so the existing one-file-per-wallet model is preserved.
+ */
+export async function deriveSubaccount(
+  sourceWalletId: string,
+  accountIndex: number,
+  name: string,
+): Promise<string> {
+  const wallets = listWallets()
+  const source = wallets.find((w) => w.id === sourceWalletId)
+  if (!source) throw new Error('Source wallet not found')
+
+  const mnemonic = getWalletMnemonic(sourceWalletId)
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: WALLET_PREFIX,
+    hdPaths: [cosmosHdPath(accountIndex)],
+  })
+  const [account] = await wallet.getAccounts()
+
+  // Reject if an existing wallet already holds this address (e.g. picking
+  // index 0 when the source is already at index 0).
+  if (wallets.some((w) => w.address === account.address)) {
+    throw new Error(`A wallet with address ${account.address} already exists`)
+  }
+
+  const walletName = name.trim() || `Wallet ${listWallets().length + 1}`
+  addWalletEntry(walletName, account.address, wallet.mnemonic, accountIndex)
+  return account.address
 }
 
 export function getAddress(): string | null {

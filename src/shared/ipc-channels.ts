@@ -12,6 +12,7 @@ export const IPC = {
   WALLET_SWITCH: 'wallet:switch',
   WALLET_DELETE: 'wallet:delete',
   WALLET_RENAME: 'wallet:rename',
+  WALLET_DERIVE_SUBACCOUNT: 'wallet:derive-subaccount',
 
   // Settings
   SETTINGS_GET: 'settings:get',

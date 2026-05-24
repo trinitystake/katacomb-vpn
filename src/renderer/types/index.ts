@@ -113,6 +113,7 @@ export interface WalletEntry {
   id: string
   name: string
   address: string
+  accountIndex?: number
 }
 
 export interface AppSettings {
@@ -206,7 +207,7 @@ export interface BatchProgress {
 export interface ElectronAPI {
   walletHasStored: () => Promise<boolean>
   walletGenerate: (wordCount: 12 | 24) => Promise<string>
-  walletImport: (mnemonic: string) => Promise<{ address: string }>
+  walletImport: (mnemonic: string, name?: string) => Promise<{ address: string }>
   walletGetAddress: () => Promise<string | null>
   walletGetBalance: () => Promise<{ denom: string; amount: string }[]>
   walletLogout: () => Promise<void>
@@ -216,6 +217,7 @@ export interface ElectronAPI {
   walletSwitch: (walletId: string) => Promise<{ address: string | null }>
   walletDelete: (walletId: string) => Promise<void>
   walletRename: (walletId: string, newName: string) => Promise<void>
+  walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; name: string }) => Promise<{ address: string }>
 
   settingsGet: () => Promise<AppSettings>
   settingsSet: (settings: Partial<AppSettings>) => Promise<AppSettings>

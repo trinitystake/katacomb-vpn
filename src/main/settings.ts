@@ -57,6 +57,9 @@ export interface WalletEntry {
   id: string
   name: string
   address: string
+  // BIP-44 account index used to derive `address` from this entry's mnemonic.
+  // Missing on legacy entries — treat as 0.
+  accountIndex?: number
 }
 
 function walletsDir(): string {
@@ -83,7 +86,7 @@ function saveWalletIndex(wallets: WalletEntry[]): void {
   writeFileSync(walletIndexPath(), JSON.stringify(wallets, null, 2))
 }
 
-export function addWalletEntry(name: string, address: string, mnemonic: string): WalletEntry {
+export function addWalletEntry(name: string, address: string, mnemonic: string, accountIndex = 0): WalletEntry {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('OS keyring encryption is not available')
   }
@@ -92,7 +95,7 @@ export function addWalletEntry(name: string, address: string, mnemonic: string):
   const encrypted = safeStorage.encryptString(mnemonic)
   writeFileSync(join(walletsDir(), `${id}.enc`), encrypted)
 
-  const entry: WalletEntry = { id, name, address }
+  const entry: WalletEntry = { id, name, address, accountIndex }
   const wallets = listWallets()
   wallets.push(entry)
   saveWalletIndex(wallets)

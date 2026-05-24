@@ -12,7 +12,6 @@ import ActiveSessions from './components/ActiveSessions'
 import PlanDiscovery from './components/PlanDiscovery'
 import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
-import ThemeToggle from './components/ThemeToggle'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { NodesProvider } from './contexts/NodesContext'
 import { NavigationProvider, useNavigation } from './contexts/NavigationContext'
@@ -43,8 +42,8 @@ function AppInner() {
   if (!wallet.address) {
     return (
       <MnemonicInput
-        onImport={async (mnemonic) => {
-          await wallet.importWallet(mnemonic)
+        onImport={async (mnemonic, name) => {
+          await wallet.importWallet(mnemonic, name)
         }}
       />
     )
@@ -64,6 +63,7 @@ function AppInner() {
           <IpDisplay connected={isConnected} />
         </div>
         <div className="flex items-center gap-3">
+          <WalletPanel address={wallet.address} name={wallet.name} onLogout={wallet.logout} />
           <button
             onClick={() => setShowSettings(true)}
             className="text-text-secondary hover:text-accent text-sm transition-colors"
@@ -71,8 +71,6 @@ function AppInner() {
           >
             Settings
           </button>
-          <ThemeToggle />
-          <WalletPanel address={wallet.address} onLogout={wallet.logout} />
         </div>
       </header>
 
@@ -125,6 +123,7 @@ function AppInner() {
             // Trigger re-init by refreshing wallet state
             window.location.reload()
           }}
+          onWalletsChanged={wallet.refreshIdentity}
         />
       )}
     </div>

@@ -4,7 +4,7 @@ import englishWordlist from 'bip39/src/wordlists/english.json'
 const wordSet = new Set<string>(englishWordlist)
 
 interface Props {
-  onImport: (mnemonic: string) => Promise<void>
+  onImport: (mnemonic: string, name?: string) => Promise<void>
 }
 
 type Mode = 'choose' | 'import' | 'create'
@@ -12,6 +12,7 @@ type Mode = 'choose' | 'import' | 'create'
 export default function MnemonicInput({ onImport }: Props) {
   const [mode, setMode] = useState<Mode>('choose')
   const [mnemonic, setMnemonic] = useState('')
+  const [walletName, setWalletName] = useState('')
   const [generatedMnemonic, setGeneratedMnemonic] = useState('')
   const [wordCount, setWordCount] = useState<12 | 24>(12)
   const [error, setError] = useState('')
@@ -38,7 +39,7 @@ export default function MnemonicInput({ onImport }: Props) {
     if (err) { setError(err); return }
     setLoading(true)
     try {
-      await onImport(mnemonic.trim())
+      await onImport(mnemonic.trim(), walletName.trim() || undefined)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to import wallet')
     } finally {
@@ -64,7 +65,7 @@ export default function MnemonicInput({ onImport }: Props) {
     setError('')
     setLoading(true)
     try {
-      await onImport(generatedMnemonic)
+      await onImport(generatedMnemonic, walletName.trim() || undefined)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create wallet')
     } finally {
@@ -79,6 +80,7 @@ export default function MnemonicInput({ onImport }: Props) {
   function handleBack() {
     setMode('choose')
     setMnemonic('')
+    setWalletName('')
     setGeneratedMnemonic('')
     setError('')
     setConfirmed(false)
@@ -145,6 +147,21 @@ export default function MnemonicInput({ onImport }: Props) {
 
           <div className="space-y-2">
             <label className="text-text-secondary text-sm font-medium block">
+              Wallet Name <span className="text-text-tertiary font-normal">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={walletName}
+              onChange={(e) => setWalletName(e.target.value)}
+              placeholder="e.g. Cold Storage"
+              maxLength={100}
+              className="w-full bg-bg-tertiary border border-border px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-border-focus rounded-md"
+              autoComplete="off"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-text-secondary text-sm font-medium block">
               BIP-39 Mnemonic
             </label>
             <textarea
@@ -196,6 +213,21 @@ export default function MnemonicInput({ onImport }: Props) {
 
         {!generatedMnemonic ? (
           <>
+            <div className="space-y-2">
+              <label className="text-text-secondary text-sm font-medium block">
+                Wallet Name <span className="text-text-tertiary font-normal">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={walletName}
+                onChange={(e) => setWalletName(e.target.value)}
+                placeholder="e.g. Daily Driver"
+                maxLength={100}
+                className="w-full bg-bg-tertiary border border-border px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-border-focus rounded-md"
+                autoComplete="off"
+              />
+            </div>
+
             <div className="space-y-2">
               <label className="text-text-secondary text-sm font-medium block">
                 Word Count

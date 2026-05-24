@@ -6,6 +6,7 @@ import {
   importWallet,
   restoreWallet,
   switchWallet,
+  deriveSubaccount,
   getAddress,
   getBalance,
   getActiveSessions,
@@ -295,13 +296,20 @@ export function registerIpcHandlers(): void {
     return generateMnemonicPhrase(wordCount)
   })
 
-  ipcMain.handle(IPC.WALLET_IMPORT, async (_event, mnemonic: string) => {
+  ipcMain.handle(IPC.WALLET_IMPORT, async (_event, mnemonic: string, name?: string) => {
     assertString(mnemonic, 'mnemonic')
     const words = mnemonic.trim().split(/\s+/)
     if (words.length !== 12 && words.length !== 24) {
       throw new Error('Mnemonic must be 12 or 24 words')
     }
-    const address = await importWallet(mnemonic)
+    let cleanName: string | undefined
+    if (name !== undefined && name !== null) {
+      if (typeof name !== 'string') throw new Error('Invalid name')
+      const trimmed = name.trim()
+      if (trimmed.length > 100) throw new Error('Wallet name too long')
+      cleanName = trimmed || undefined
+    }
+    const address = await importWallet(mnemonic, cleanName)
     return { address }
   })
 
@@ -386,6 +394,19 @@ export function registerIpcHandlers(): void {
     assertString(newName, 'newName')
     if (newName.length > 100) throw new Error('Wallet name too long')
     renameWallet(walletId, newName)
+  })
+
+  ipcMain.handle(IPC.WALLET_DERIVE_SUBACCOUNT, async (_event, params: {
+    sourceWalletId: string
+    accountIndex: number
+    name: string
+  }) => {
+    assertString(params.sourceWalletId, 'sourceWalletId')
+    assertIntRange(params.accountIndex, 'accountIndex', 0, 2147483647)
+    assertString(params.name, 'name')
+    if (params.name.length > 100) throw new Error('Wallet name too long')
+    const address = await deriveSubaccount(params.sourceWalletId, params.accountIndex, params.name)
+    return { address }
   })
 
   // Settings

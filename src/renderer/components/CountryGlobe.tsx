@@ -233,7 +233,13 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
 
   return (
     <div ref={containerRef} className="absolute inset-0">
-      {size.w > 0 && size.h > 0 && (
+      {/*
+        Mount the Globe only once we have BOTH container dimensions AND the
+        country polygons. Mounting earlier shows a bare dark sphere for a
+        few frames while the GeoJSON fetch resolves — visible as the "small
+        black sphere" flash the user otherwise sees on first load.
+      */}
+      {size.w > 0 && size.h > 0 && features.length > 0 && (
         <div
           className={`absolute inset-0 transition-opacity duration-300 ${ready ? 'opacity-100' : 'opacity-0'}`}
         >
@@ -263,8 +269,16 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
                 renderer.setPixelRatio(1)
               }
               g.pointOfView({ lat: 35, lng: 15, altitude: 2.2 }, 0)
-              setReady(true)
-              armAutoPause()
+              // Wait two animation frames before fading in: onGlobeReady
+              // fires before the polygon meshes have actually rendered, so
+              // flipping opacity immediately can still show a bare sphere
+              // for one frame.
+              requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                  setReady(true)
+                  armAutoPause()
+                })
+              })
             }}
           />
         </div>

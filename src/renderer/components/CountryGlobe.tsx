@@ -174,6 +174,13 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     if (ready) doResume()
   }, [counts, ready])
 
+  // Resume on container resize. Without this, the render loop stays paused
+  // and the canvas appears frozen at the old size until the user interacts —
+  // visible as a 1+ second lag when dragging the window edge.
+  useEffect(() => {
+    if (ready) doResume()
+  }, [size.w, size.h, ready])
+
   const darkMatte = useMemo(
     () => new THREE.MeshPhongMaterial({ color: 0x0c0c10 }),
     [],

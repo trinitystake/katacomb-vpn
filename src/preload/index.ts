@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('api', {
   bookmarkList: () => ipcRenderer.invoke(IPC.BOOKMARK_LIST),
 
   rpcCheck: (endpoint: string) => ipcRenderer.invoke(IPC.RPC_CHECK, endpoint),
+  rpcList: () => ipcRenderer.invoke(IPC.RPC_LIST),
 
   binaryCheck: () => ipcRenderer.invoke(IPC.BINARY_CHECK),
 

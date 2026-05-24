@@ -43,6 +43,8 @@ import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'
+const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
+const PUBLIC_RPC_TTL_MS = 60_000
 const RECONNECT_MAX_ATTEMPTS = 5
 
 let activeWg: Wireguard | null = null
@@ -59,6 +61,20 @@ let cachedNodes: { address: string; moniker: string; country: string }[] = []
 // refreshed on a 60s timer in main, broadcast to all renderer windows on update.
 let nodesMemoryCache: NodesCacheFile | null = null
 let nodeRefreshTimer: ReturnType<typeof setInterval> | null = null
+
+// Tiny TTL cache for the public RPC list. The user only sees this when the
+// Settings modal is open, so refreshing every minute is more than enough.
+interface PublicRpcEntry {
+  provider: string
+  address: string
+  status: number
+  height: number
+  location: string
+  isLoadbalance: number
+  availability: number
+  errorReason: string | null
+}
+let publicRpcCache: { list: PublicRpcEntry[]; fetchedAt: number } | null = null
 
 // Auto-reconnect state
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -244,6 +260,20 @@ export function stopNodeRefreshTimer(): void {
     clearInterval(nodeRefreshTimer)
     nodeRefreshTimer = null
   }
+}
+
+async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
+  if (publicRpcCache && Date.now() - publicRpcCache.fetchedAt < PUBLIC_RPC_TTL_MS) {
+    return publicRpcCache.list
+  }
+  const response = await net.fetch(PUBLIC_RPC_API)
+  if (!response.ok) throw new Error(`Public RPC API returned ${response.status}`)
+  const json = await response.json() as { success: boolean; data?: { publicRPC?: PublicRpcEntry[] } }
+  if (!json.success || !Array.isArray(json.data?.publicRPC)) {
+    throw new Error('Invalid response from public RPC API')
+  }
+  publicRpcCache = { list: json.data!.publicRPC!, fetchedAt: Date.now() }
+  return publicRpcCache.list
 }
 
 function getNodeMeta(nodeAddress: string): { moniker: string; country: string } {
@@ -466,6 +496,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.NODES_GET_CACHED, async () => {
     return nodesMemoryCache
+  })
+
+  ipcMain.handle(IPC.RPC_LIST, async () => {
+    return fetchPublicRpcs()
   })
 
   // Connection: Subscribe

@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { WalletEntry, AppSettings } from '../types'
+import type { WalletEntry, AppSettings, PublicRpc } from '../types'
 import Toggle from './Toggle'
 import ThemeToggle from './ThemeToggle'
+import Spinner from './Spinner'
 import { useSettings } from '../contexts/SettingsContext'
-import { CHAIN_ID, DENOM, GAS_PRICE_STR } from '../../shared/chain-constants'
 
 interface Props {
   currentAddress: string | null
@@ -13,27 +13,6 @@ interface Props {
   // popover can re-fetch the active wallet's display name.
   onWalletsChanged?: () => void
 }
-
-const KNOWN_RPC_ENDPOINTS = [
-  { url: 'https://rpc.sentinel.co:443', region: 'Global' },
-  { url: 'https://rpc-sentinel.busurnode.com:443', region: 'EU' },
-  { url: 'https://sentinel-rpc.publicnode.com:443', region: 'Global' },
-  { url: 'https://rpc.sentinel.quokkastake.io:443', region: 'EU' },
-  { url: 'https://sentinel-rpc.polkachu.com:443', region: 'US' },
-  { url: 'https://sentinel.rpc.nodeshub.online:443', region: 'EU' },
-  { url: 'https://rpc-sentinel.whispernode.com:443', region: 'US' },
-  { url: 'https://sentinel-rpc.validatornode.com:443', region: 'Global' },
-  { url: 'https://rpc.sentinel.chaintools.tech:443', region: 'US' },
-  { url: 'https://sentinel-rpc.badgerbite.io:443', region: 'EU' },
-  { url: 'https://sentinel-rpc.openbitlab.com:443', region: 'EU' },
-  { url: 'https://rpc-sentinel-ia.cosmosia.notional.ventures:443', region: 'US' },
-  { url: 'https://sentinel-rpc.0base.dev:443', region: 'Asia' },
-  { url: 'https://sentinel.declab.pro:26628', region: 'EU' },
-  { url: 'https://sentinel-mainnet-rpc.autostake.com:443', region: 'US' },
-  { url: 'https://rpc.dvpn.me:443', region: 'EU' },
-  { url: 'https://rpc.mathnodes.com:443', region: 'US' },
-  { url: 'https://rpc.noncompliant.network:443', region: 'Global' },
-]
 
 const DNS_OPTIONS = [
   { label: 'System Default', value: 'system' },
@@ -52,10 +31,13 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
   const [saving, setSaving] = useState(false)
   const [editingName, setEditingName] = useState<string | null>(null)
   const [nameInput, setNameInput] = useState('')
-  const [tab, setTab] = useState<'general' | 'wallets'>('general')
+  const [tab, setTab] = useState<'general' | 'network' | 'wallets'>('general')
   const [rpcChecking, setRpcChecking] = useState<string | null>(null)
   const [rpcLatency, setRpcLatency] = useState<Record<string, number>>({})
   const [splitTunnelInput, setSplitTunnelInput] = useState('')
+  const [knownRpcs, setKnownRpcs] = useState<PublicRpc[]>([])
+  const [rpcsLoading, setRpcsLoading] = useState(true)
+  const [rpcsError, setRpcsError] = useState<string | null>(null)
   // Derive-subaccount modal state. `source` is the wallet whose mnemonic we'll
   // reuse; `index` is the BIP-44 account index to derive at.
   const [deriveSource, setDeriveSource] = useState<WalletEntry | null>(null)
@@ -78,6 +60,25 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
   useEffect(() => {
     load()
   }, [load])
+
+  // Fetch the live public RPC list from sentnodes.com (cached in main for 60s)
+  useEffect(() => {
+    let cancelled = false
+    setRpcsLoading(true)
+    setRpcsError(null)
+    window.api.rpcList()
+      .then((rpcs) => {
+        if (cancelled) return
+        setKnownRpcs(rpcs)
+        setRpcsLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setRpcsError(err instanceof Error ? err.message : 'Failed to load RPCs')
+        setRpcsLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [])
 
   async function saveRpc() {
     if (!rpcInput.trim()) return
@@ -187,7 +188,7 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
 
         {/* Tabs */}
         <div className="flex border-b border-border px-6 shrink-0">
-          {(['general', 'wallets'] as const).map((t) => (
+          {(['general', 'network', 'wallets'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -318,89 +319,83 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
                 </p>
               </div>
 
-              {/* RPC Endpoint */}
-              <div className="space-y-3">
-                <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
-                  RPC Endpoint
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={rpcInput}
-                    onChange={(e) => setRpcInput(e.target.value)}
-                    className="flex-1 bg-bg-tertiary border border-border text-text-primary text-sm font-mono px-3 py-2 rounded-sm focus:outline-none focus:border-border-focus"
-                    placeholder="https://rpc.sentinel.co:443"
-                  />
-                  <button
-                    onClick={saveRpc}
-                    disabled={saving || rpcInput === settings.rpcEndpoint}
-                    className="btn btn-primary text-sm px-4 disabled:opacity-30"
-                  >
-                    {saving ? 'Saving...' : 'Save'}
-                  </button>
-                </div>
-
-                <div className="space-y-1.5">
-                  <span className="text-text-secondary text-xs">Known endpoints:</span>
-                  <div className="grid grid-cols-2 gap-1.5 max-h-[200px] overflow-y-auto">
-                    {KNOWN_RPC_ENDPOINTS.map((ep) => (
-                      <button
-                        key={ep.url}
-                        onClick={async () => {
-                          setRpcInput(ep.url)
-                          setRpcChecking(ep.url)
-                          try {
-                            const result = await window.api.rpcCheck(ep.url)
-                            setRpcLatency((prev) => ({ ...prev, [ep.url]: result.latencyMs }))
-                          } catch { /* silent */ }
-                          setRpcChecking(null)
-                        }}
-                        className={`text-xs px-2.5 py-2 border transition-colors text-left flex items-center justify-between gap-1 rounded-md ${
-                          rpcInput === ep.url
-                            ? 'border-accent text-accent'
-                            : 'border-border text-text-secondary hover:text-text-primary hover:border-text-secondary'
-                        }`}
-                      >
-                        <span className="truncate font-mono">
-                          {settings.rpcEndpoint === ep.url && <span className="text-success mr-1">●</span>}
-                          {ep.url.replace('https://', '').replace(':443', '')}
-                        </span>
-                        <span className="shrink-0 text-text-tertiary">
-                          {rpcChecking === ep.url ? '...' : rpcLatency[ep.url] ? `${rpcLatency[ep.url]}ms` : ep.region}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {rpcInput !== settings.rpcEndpoint && (
-                  <p className="text-warning text-xs">
-                    Unsaved changes. Click Save to apply.
-                  </p>
-                )}
-              </div>
-
-              {/* Chain */}
-              <div className="space-y-3">
-                <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
-                  Chain
-                </label>
-                <div className="border border-border bg-bg-tertiary rounded-md divide-y divide-border">
-                  <div className="flex items-center justify-between px-4 py-2.5 text-sm">
-                    <span className="text-text-secondary">Chain ID</span>
-                    <span className="text-text-primary font-mono">{CHAIN_ID}</span>
-                  </div>
-                  <div className="flex items-center justify-between px-4 py-2.5 text-sm">
-                    <span className="text-text-secondary">Denom</span>
-                    <span className="text-text-primary font-mono">{DENOM}</span>
-                  </div>
-                  <div className="flex items-center justify-between px-4 py-2.5 text-sm">
-                    <span className="text-text-secondary">Gas Price</span>
-                    <span className="text-text-primary font-mono">{GAS_PRICE_STR}</span>
-                  </div>
-                </div>
-              </div>
             </>
+          )}
+
+          {tab === 'network' && (
+            <div className="space-y-3">
+              <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
+                RPC Endpoint
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={rpcInput}
+                  onChange={(e) => setRpcInput(e.target.value)}
+                  className="flex-1 bg-bg-tertiary border border-border text-text-primary text-sm font-mono px-3 py-2 rounded-sm focus:outline-none focus:border-border-focus"
+                  placeholder="https://rpc.sentinel.co:443"
+                />
+                <button
+                  onClick={saveRpc}
+                  disabled={saving || rpcInput === settings.rpcEndpoint}
+                  className="btn btn-primary text-sm px-4 disabled:opacity-30"
+                >
+                  {saving ? 'Saving...' : 'Save'}
+                </button>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-text-secondary text-xs">
+                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>:
+                  </span>
+                  {rpcsLoading && (
+                    <span className="text-text-tertiary text-xs flex items-center gap-1">
+                      <Spinner /> Loading
+                    </span>
+                  )}
+                </div>
+                {rpcsError && (
+                  <p className="text-danger text-xs">Failed to load RPC list: {rpcsError}</p>
+                )}
+                <div className="grid grid-cols-2 gap-1.5 max-h-[200px] overflow-y-auto">
+                  {knownRpcs.map((ep) => (
+                    <button
+                      key={ep.address}
+                      onClick={async () => {
+                        setRpcInput(ep.address)
+                        setRpcChecking(ep.address)
+                        try {
+                          const result = await window.api.rpcCheck(ep.address)
+                          setRpcLatency((prev) => ({ ...prev, [ep.address]: result.latencyMs }))
+                        } catch { /* silent */ }
+                        setRpcChecking(null)
+                      }}
+                      className={`text-xs px-2.5 py-2 border transition-colors text-left flex items-center justify-between gap-1 rounded-md ${
+                        rpcInput === ep.address
+                          ? 'border-accent text-accent'
+                          : 'border-border text-text-secondary hover:text-text-primary hover:border-text-secondary'
+                      }`}
+                      title={`${ep.provider}\nHeight: ${ep.height.toLocaleString('en')}\nAvailability: ${ep.availability}%`}
+                    >
+                      <span className="truncate font-mono">
+                        {settings.rpcEndpoint === ep.address && <span className="text-success mr-1">●</span>}
+                        {ep.address.replace('https://', '').replace(':443', '')}
+                      </span>
+                      <span className="shrink-0 text-text-tertiary">
+                        {rpcChecking === ep.address ? '...' : rpcLatency[ep.address] ? `${rpcLatency[ep.address]}ms` : ep.location}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {rpcInput !== settings.rpcEndpoint && (
+                <p className="text-warning text-xs">
+                  Unsaved changes. Click Save to apply.
+                </p>
+              )}
+            </div>
           )}
 
           {tab === 'wallets' && (

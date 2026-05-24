@@ -177,6 +177,17 @@ export interface IpInfo {
   org: string
 }
 
+export interface PublicRpc {
+  provider: string
+  address: string
+  status: number
+  height: number
+  location: string
+  isLoadbalance: number
+  availability: number
+  errorReason: string | null
+}
+
 export interface BinaryStatus {
   wireguard: boolean
   v2ray: boolean
@@ -260,6 +271,7 @@ export interface ElectronAPI {
   bookmarkList: () => Promise<string[]>
 
   rpcCheck: (endpoint: string) => Promise<{ latencyMs: number; chainId: string }>
+  rpcList: () => Promise<PublicRpc[]>
 
   binaryCheck: () => Promise<BinaryStatus>
 

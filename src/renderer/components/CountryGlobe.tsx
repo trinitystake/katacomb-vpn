@@ -3,6 +3,7 @@ import Globe, { type GlobeMethods } from 'react-globe.gl'
 import * as THREE from 'three'
 import geoUrl from '../assets/world-countries-110m.geojson?url'
 import { polyKey, type PolyFeature } from '../utils/country-normalization'
+import Spinner from './Spinner'
 
 interface Props {
   counts: Map<string, number>
@@ -233,6 +234,18 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
 
   return (
     <div ref={containerRef} className="absolute inset-0">
+      {/* Loader covers the globe area until the canvas is fully composed.
+          Hides the dark-empty gap between tab-mount and the chloropleth
+          fade-in. Hidden once `ready` flips after onGlobeReady + 2 rAFs. */}
+      {!ready && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="text-text-secondary text-sm flex items-center gap-2">
+            <Spinner />
+            Loading map...
+          </div>
+        </div>
+      )}
+
       {/*
         Mount the Globe only once we have BOTH container dimensions AND the
         country polygons. Mounting earlier shows a bare dark sphere for a

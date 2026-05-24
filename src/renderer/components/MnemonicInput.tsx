@@ -91,7 +91,7 @@ export default function MnemonicInput({ onImport }: Props) {
         <div className="w-full max-w-xl space-y-8">
           <div className="space-y-3">
             <h1 className="text-accent font-semibold text-2xl">
-              Morpheus dVPN
+              Sentinel dVPN
             </h1>
             <p className="text-text-secondary text-sm leading-relaxed">
               Create a new wallet or import an existing one to connect to the decentralized VPN network.

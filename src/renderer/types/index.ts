@@ -221,6 +221,8 @@ export interface ElectronAPI {
   settingsSet: (settings: Partial<AppSettings>) => Promise<AppSettings>
 
   nodesFetch: () => Promise<SentNode[]>
+  nodesGetCached: () => Promise<{ nodes: SentNode[]; fetchedAt: number } | null>
+  onNodesUpdate: (callback: (nodes: SentNode[]) => void) => () => void
   networkGetIp: (includeGeo?: boolean) => Promise<IpInfo>
 
   planDiscover: (maxId: number) => Promise<PlanInfo[]>

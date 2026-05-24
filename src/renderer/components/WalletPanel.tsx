@@ -90,11 +90,11 @@ export default function WalletPanel({ address, onLogout }: Props) {
           </span>
         )}
         <button
-          onClick={copyAddress}
+          onClick={() => setExpanded(!expanded)}
           className="text-text-secondary hover:text-accent transition-colors font-mono text-xs"
-          title="Copy address"
+          title="Wallet details"
         >
-          {copied ? 'Copied!' : truncateAddress(address)}
+          {truncateAddress(address)}
         </button>
         <button
           onClick={() => setExpanded(!expanded)}
@@ -118,8 +118,23 @@ export default function WalletPanel({ address, onLogout }: Props) {
         <div className="absolute right-0 top-full mt-2 bg-bg-secondary border border-border p-4 w-80 z-50 space-y-3 rounded-lg shadow-overlay">
           <div className="space-y-2 text-sm">
             <div>
-              <span className="text-text-secondary text-xs">Address</span>
-              <p className="text-text-primary font-mono text-xs break-all mt-0.5">{address}</p>
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-xs">Address</span>
+                <button
+                  onClick={copyAddress}
+                  className="text-text-secondary hover:text-accent transition-colors text-xs"
+                  title="Copy address"
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <button
+                onClick={copyAddress}
+                className="text-text-primary font-mono text-xs break-all mt-0.5 text-left w-full hover:text-accent transition-colors"
+                title="Copy address"
+              >
+                {address}
+              </button>
             </div>
             <div className="flex justify-between">
               <span className="text-text-secondary">Balance</span>

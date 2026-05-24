@@ -3,6 +3,7 @@ import { useWallet } from './hooks/useWallet'
 import { useConnection } from './hooks/useConnection'
 import { useSessions } from './hooks/useSessions'
 import MnemonicInput from './components/MnemonicInput'
+import MapView from './components/MapView'
 import NodeTable from './components/NodeTable'
 import WalletPanel from './components/WalletPanel'
 import ConnectedBar from './components/ConnectedBar'
@@ -13,9 +14,10 @@ import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
 import ThemeToggle from './components/ThemeToggle'
 import { SettingsProvider } from './contexts/SettingsContext'
+import { NodesProvider } from './contexts/NodesContext'
 import { NavigationProvider, useNavigation } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
-import appIcon from './assets/icon.png'
+import appIcon from './assets/sentinel.svg'
 
 function AppInner() {
   const wallet = useWallet()
@@ -55,7 +57,7 @@ function AppInner() {
           <div className="flex items-center gap-2.5">
             <img src={appIcon} alt="" width={22} height={22} className="shrink-0" />
             <h1 className="text-accent font-semibold text-base">
-              Morpheus dVPN
+              Sentinel dVPN
             </h1>
           </div>
           <ConnectedBar />
@@ -76,7 +78,7 @@ function AppInner() {
 
       {/* Main tabs */}
       <nav className="flex border-b border-border bg-bg-secondary px-5 shrink-0">
-        {(['nodes', 'plans', 'sessions'] as const).map((t) => (
+        {(['map', 'nodes', 'plans', 'sessions'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setMainTab(t)}
@@ -97,6 +99,7 @@ function AppInner() {
       </nav>
 
       <main className="flex-1 overflow-hidden">
+        {mainTab === 'map' && <MapView />}
         {mainTab === 'nodes' && <NodeTable />}
         {mainTab === 'plans' && <PlanDiscovery />}
         {mainTab === 'sessions' && (
@@ -131,9 +134,11 @@ function AppInner() {
 export default function App() {
   return (
     <SettingsProvider>
-      <NavigationProvider>
-        <AppInner />
-      </NavigationProvider>
+      <NodesProvider>
+        <NavigationProvider>
+          <AppInner />
+        </NavigationProvider>
+      </NodesProvider>
     </SettingsProvider>
   )
 }

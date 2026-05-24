@@ -19,6 +19,16 @@ contextBridge.exposeInMainWorld('api', {
   settingsSet: (settings: Record<string, unknown>) => ipcRenderer.invoke(IPC.SETTINGS_SET, settings),
 
   nodesFetch: () => ipcRenderer.invoke(IPC.NODES_FETCH),
+  nodesGetCached: () => ipcRenderer.invoke(IPC.NODES_GET_CACHED),
+  onNodesUpdate: (callback: (nodes: unknown[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, nodes: unknown[]) => {
+      callback(nodes)
+    }
+    ipcRenderer.on(IPC.NODES_UPDATE, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.NODES_UPDATE, handler)
+    }
+  },
   networkGetIp: (includeGeo?: boolean) => ipcRenderer.invoke(IPC.NETWORK_GET_IP, includeGeo),
 
   trafficStats: () => ipcRenderer.invoke(IPC.TRAFFIC_STATS),

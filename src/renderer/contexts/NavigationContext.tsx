@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useState, ReactNode } from 'react'
 
-export type MainTab = 'nodes' | 'plans' | 'sessions'
+export type MainTab = 'map' | 'nodes' | 'plans' | 'sessions'
 
 interface NavigationContextValue {
   mainTab: MainTab
@@ -8,13 +8,17 @@ interface NavigationContextValue {
   plansNodeFilter: string | null
   goToPlansForNode: (nodeAddress: string) => void
   clearPlansNodeFilter: () => void
+  nodesCountryFilter: string | null
+  goToNodesForCountry: (country: string) => void
+  clearNodesCountryFilter: () => void
 }
 
 const NavigationContext = createContext<NavigationContextValue | null>(null)
 
 export function NavigationProvider({ children }: { children: ReactNode }) {
-  const [mainTab, setMainTab] = useState<MainTab>('nodes')
+  const [mainTab, setMainTab] = useState<MainTab>('map')
   const [plansNodeFilter, setPlansNodeFilter] = useState<string | null>(null)
+  const [nodesCountryFilter, setNodesCountryFilter] = useState<string | null>(null)
 
   const goToPlansForNode = useCallback((nodeAddress: string) => {
     setPlansNodeFilter(nodeAddress)
@@ -25,9 +29,27 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setPlansNodeFilter(null)
   }, [])
 
+  const goToNodesForCountry = useCallback((country: string) => {
+    setNodesCountryFilter(country)
+    setMainTab('nodes')
+  }, [])
+
+  const clearNodesCountryFilter = useCallback(() => {
+    setNodesCountryFilter(null)
+  }, [])
+
   return (
     <NavigationContext.Provider
-      value={{ mainTab, setMainTab, plansNodeFilter, goToPlansForNode, clearPlansNodeFilter }}
+      value={{
+        mainTab,
+        setMainTab,
+        plansNodeFilter,
+        goToPlansForNode,
+        clearPlansNodeFilter,
+        nodesCountryFilter,
+        goToNodesForCountry,
+        clearNodesCountryFilter,
+      }}
     >
       {children}
     </NavigationContext.Provider>

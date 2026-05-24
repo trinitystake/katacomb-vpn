@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useMemo } from 'react'
 import type { SentNode, NodeFilter } from '../types'
+import { useNodesContext } from '../contexts/NodesContext'
 
 const DEFAULT_FILTER: NodeFilter = {
   country: '',
@@ -72,47 +73,14 @@ function compareNodes(
 const EMPTY_LATENCY_MAP: Map<string, number | null> = new Map()
 
 export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_MAP) {
-  const [allNodes, setAllNodes] = useState<SentNode[]>([])
+  // Raw node state is owned by the NodesProvider so Map + Nodes tabs share
+  // a single fetch + a single in-memory cache (seeded from disk on startup).
+  const { allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark } = useNodesContext()
+
+  // Per-consumer filter/sort state — Map and Nodes can hold independent filters.
   const [filter, setFilter] = useState<NodeFilter>(DEFAULT_FILTER)
   const [sortKey, setSortKey] = useState<SortKey>('country')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
-  const [loading, setLoading] = useState(false)
-  const [lastFetched, setLastFetched] = useState<Date | null>(null)
-  const [bookmarks, setBookmarks] = useState<Set<string>>(new Set())
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  // Load bookmarks on mount
-  useEffect(() => {
-    window.api.bookmarkList().then((list) => setBookmarks(new Set(list))).catch(() => {})
-  }, [])
-
-  const toggleBookmark = useCallback(async (nodeAddress: string) => {
-    try {
-      const updated = await window.api.bookmarkToggle(nodeAddress)
-      setBookmarks(new Set(updated))
-    } catch { /* silent */ }
-  }, [])
-
-  const fetchNodes = useCallback(async () => {
-    setLoading(true)
-    try {
-      const nodes = await window.api.nodesFetch()
-      setAllNodes(nodes)
-      setLastFetched(new Date())
-    } catch {
-      // silent — will retry on interval
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchNodes()
-    intervalRef.current = setInterval(fetchNodes, 60_000)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
-  }, [fetchNodes])
 
   const countries = useMemo(() => {
     const set = new Set(allNodes.map((n) => n.country).filter(Boolean))
@@ -180,7 +148,7 @@ export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_
     lastFetched,
     countries,
     cities,
-    refresh: fetchNodes,
+    refresh,
     bookmarks,
     toggleBookmark,
   }

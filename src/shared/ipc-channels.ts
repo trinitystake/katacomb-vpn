@@ -19,6 +19,7 @@ export const IPC = {
 
   // Nodes
   NODES_FETCH: 'nodes:fetch',
+  NODES_GET_CACHED: 'nodes:get-cached',
 
   // Connection
   CONNECTION_SUBSCRIBE: 'connection:subscribe',
@@ -69,6 +70,7 @@ export const IPC = {
   CONNECTION_STATE_CHANGE: 'connection:state-change',
   CONNECTION_RECONNECTING: 'connection:reconnecting',
   NODE_TEST_PROGRESS: 'node-test:progress',
+  NODES_UPDATE: 'nodes:update',
   PLAN_DISCOVER_PROGRESS: 'plan:discover:progress',
 } as const
 

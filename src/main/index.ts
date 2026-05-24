@@ -3,8 +3,9 @@ import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
-import { registerIpcHandlers, cleanupOnQuit } from './ipc-handlers'
+import { registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection, isVpnActive } from './vpn-manager'
+import { listProviders } from './provider-service'
 
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
 const POLICY_PATH = '/usr/share/polkit-1/actions/com.sentinel.dvpn.policy'
@@ -193,17 +194,19 @@ app.whenReady().then(() => {
   ensurePolkitSetup()
   detectExistingConnection()
   registerIpcHandlers()
+  // Seed node cache from disk so the first window gets instant data via
+  // nodesGetCached(), then start the 60s background refresh loop.
+  bootstrapNodesCache()
+  startNodeRefreshTimer()
   createWindow()
   createTrayIcon()
 
   // Background prefetch so the Plans tab feels instant on first open.
   // Safely returns cached data if VPN is already active.
   setTimeout(() => {
-    import('./provider-service')
-      .then(({ listProviders }) => listProviders())
-      .catch(() => {
-        // silent — best-effort warmup
-      })
+    listProviders().catch(() => {
+      // silent — best-effort warmup
+    })
   }, 500)
 
   app.on('activate', () => {
@@ -214,6 +217,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  stopNodeRefreshTimer()
   cleanupOnQuit()
   killAllTunnels()
 })

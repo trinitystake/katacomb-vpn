@@ -18,6 +18,7 @@ import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, que
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet } from './settings'
+import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
 import {
   connectV2Ray,
   connectWireGuard,
@@ -52,6 +53,11 @@ let activeNodeInfo: { address: string; moniker: string; country: string; type: 1
 let lastKnownBalance: { denom: string; amount: string }[] = []
 let lastKnownSessions: unknown[] = []
 let cachedNodes: { address: string; moniker: string; country: string }[] = []
+
+// Shared in-memory cache for the full node list. Seeded from disk on startup,
+// refreshed on a 60s timer in main, broadcast to all renderer windows on update.
+let nodesMemoryCache: NodesCacheFile | null = null
+let nodeRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 // Auto-reconnect state
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -198,7 +204,45 @@ async function fetchNodes(): Promise<unknown[]> {
   cachedNodes = (json.data as { address?: string; moniker?: string; country?: string }[])
     .filter((n) => n.address)
     .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '' }))
+  // Update shared cache: in-memory, disk, and broadcast to all renderer windows
+  nodesMemoryCache = { nodes: json.data, fetchedAt: Date.now() }
+  saveNodesCache(json.data)
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(IPC.NODES_UPDATE, json.data)
+  }
   return json.data
+}
+
+/**
+ * Seed the in-memory node cache from disk at app startup so the first IPC call
+ * (and session enrichment via getNodeMeta) has data immediately, without waiting
+ * for the network. Safe to call before the first BrowserWindow exists.
+ */
+export function bootstrapNodesCache(): void {
+  const disk = loadNodesCache()
+  if (!disk) return
+  nodesMemoryCache = disk
+  cachedNodes = (disk.nodes as { address?: string; moniker?: string; country?: string }[])
+    .filter((n) => n.address)
+    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '' }))
+}
+
+/**
+ * Start the background refresh loop. Fires immediately, then every 60s.
+ * Failures are silent — renderers keep seeing the last good cache.
+ */
+export function startNodeRefreshTimer(): void {
+  if (nodeRefreshTimer) return
+  const tick = () => { fetchNodes().catch(() => { /* silent */ }) }
+  tick()
+  nodeRefreshTimer = setInterval(tick, 60_000)
+}
+
+export function stopNodeRefreshTimer(): void {
+  if (nodeRefreshTimer) {
+    clearInterval(nodeRefreshTimer)
+    nodeRefreshTimer = null
+  }
 }
 
 function getNodeMeta(nodeAddress: string): { moniker: string; country: string } {
@@ -397,6 +441,10 @@ export function registerIpcHandlers(): void {
   // Nodes
   ipcMain.handle(IPC.NODES_FETCH, async () => {
     return fetchNodes()
+  })
+
+  ipcMain.handle(IPC.NODES_GET_CACHED, async () => {
+    return nodesMemoryCache
   })
 
   // Connection: Subscribe

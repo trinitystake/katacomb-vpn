@@ -1,11 +1,17 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ConnectionStatus } from '../types'
+import { useState, useEffect, useCallback } from 'react'
+import type { ConnectionStatus, ConnectionState } from '../types'
 
-const POLL_STATUS_MS = 3_000
+// Defensive poll rates per state. State transitions are pushed from main via
+// IPC.CONNECTION_STATE_CHANGE, so the poll only catches drift; tight intervals
+// are only useful when the user is watching reconnect progress.
+const POLL_INTERVAL_MS: Record<ConnectionState, number> = {
+  idle: 15_000,
+  connected: 10_000,
+  reconnecting: 3_000,
+}
 
 export function useConnection() {
   const [status, setStatus] = useState<ConnectionStatus>({ state: 'idle' })
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const pollStatus = useCallback(async () => {
     try {
@@ -16,16 +22,14 @@ export function useConnection() {
     }
   }, [])
 
+  // Mount-only: initial fetch + push-event subscriptions.
   useEffect(() => {
     pollStatus()
-    intervalRef.current = setInterval(pollStatus, POLL_STATUS_MS)
 
-    // Listen for push events from main process for immediate updates
     const unsubscribe = window.api.onConnectionStateChange(() => {
       pollStatus()
     })
 
-    // Listen for reconnecting events
     const unsubReconnect = window.api.onConnectionReconnecting((attempt, maxAttempts) => {
       setStatus((prev) => ({
         ...prev,
@@ -36,11 +40,17 @@ export function useConnection() {
     })
 
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
       unsubscribe()
       unsubReconnect()
     }
   }, [pollStatus])
+
+  // State-dependent: polling cadence adjusts when state changes.
+  useEffect(() => {
+    const ms = POLL_INTERVAL_MS[status.state] ?? 10_000
+    const id = setInterval(pollStatus, ms)
+    return () => clearInterval(id)
+  }, [pollStatus, status.state])
 
   async function disconnect() {
     await window.api.connectionDisconnect()

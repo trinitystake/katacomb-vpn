@@ -8,6 +8,8 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "jsx": "react-jsx",
     "outDir": "./out",
@@ -20,5 +22,6 @@
   "include": [
     "src/renderer/**/*",
     "src/shared/**/*"
-  ]
+  ],
+  "exclude": ["src/**/*.test.ts"]
 }

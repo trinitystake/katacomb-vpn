@@ -1,9 +1,11 @@
-import { useMemo } from 'react'
+import { lazy, Suspense, useMemo } from 'react'
 import { useNodes } from '../hooks/useNodes'
 import { useNavigation } from '../contexts/NavigationContext'
 import CountrySidebar from './CountrySidebar'
-import CountryGlobe from './CountryGlobe'
 import Spinner from './Spinner'
+
+// three.js + react-globe.gl are large; only load them when the Map tab is opened.
+const CountryGlobe = lazy(() => import('./CountryGlobe'))
 
 export default function MapView() {
   const { nodes, lastFetched } = useNodes()
@@ -32,7 +34,9 @@ export default function MapView() {
     <div className="h-full flex">
       <CountrySidebar counts={counts} onSelect={goToNodesForCountry} />
       <div className="flex-1 relative">
-        <CountryGlobe counts={counts} onSelect={goToNodesForCountry} />
+        <Suspense fallback={null}>
+          <CountryGlobe counts={counts} onSelect={goToNodesForCountry} />
+        </Suspense>
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react'
 import type { SentNode } from '../types'
 
 interface NodesContextValue {
@@ -67,11 +67,12 @@ export function NodesProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  return (
-    <NodesContext.Provider value={{ allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark }}>
-      {children}
-    </NodesContext.Provider>
+  const value = useMemo(
+    () => ({ allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark }),
+    [allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark],
   )
+
+  return <NodesContext.Provider value={value}>{children}</NodesContext.Provider>
 }
 
 export function useNodesContext(): NodesContextValue {

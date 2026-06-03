@@ -7,6 +7,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "postinstall": "electron-builder install-app-deps",
     "dist": "electron-vite build && electron-builder --linux",
     "dist:deb": "electron-vite build && electron-builder --linux deb",

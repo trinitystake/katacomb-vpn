@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useState, ReactNode } from 'react'
+import { createContext, useCallback, useContext, useMemo, useState, ReactNode } from 'react'
 
 export type MainTab = 'map' | 'nodes' | 'plans' | 'sessions'
 
@@ -38,22 +38,30 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     setNodesCountryFilter(null)
   }, [])
 
-  return (
-    <NavigationContext.Provider
-      value={{
-        mainTab,
-        setMainTab,
-        plansNodeFilter,
-        goToPlansForNode,
-        clearPlansNodeFilter,
-        nodesCountryFilter,
-        goToNodesForCountry,
-        clearNodesCountryFilter,
-      }}
-    >
-      {children}
-    </NavigationContext.Provider>
+  const value = useMemo(
+    () => ({
+      mainTab,
+      setMainTab,
+      plansNodeFilter,
+      goToPlansForNode,
+      clearPlansNodeFilter,
+      nodesCountryFilter,
+      goToNodesForCountry,
+      clearNodesCountryFilter,
+    }),
+    [
+      mainTab,
+      setMainTab,
+      plansNodeFilter,
+      goToPlansForNode,
+      clearPlansNodeFilter,
+      nodesCountryFilter,
+      goToNodesForCountry,
+      clearNodesCountryFilter,
+    ],
   )
+
+  return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>
 }
 
 export function useNavigation(): NavigationContextValue {

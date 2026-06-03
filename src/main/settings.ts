@@ -1,7 +1,8 @@
 import { app, safeStorage } from 'electron'
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs'
+import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { writeFileAtomic } from './fs-utils'
 
 // --- App Settings ---
 
@@ -43,7 +44,7 @@ export function loadSettings(): AppSettings {
 export function saveSettings(settings: Partial<AppSettings>): AppSettings {
   const current = loadSettings()
   const merged = { ...current, ...settings }
-  writeFileSync(settingsPath(), JSON.stringify(merged, null, 2))
+  writeFileAtomic(settingsPath(), JSON.stringify(merged, null, 2))
   return merged
 }
 
@@ -83,7 +84,7 @@ export function listWallets(): WalletEntry[] {
 }
 
 function saveWalletIndex(wallets: WalletEntry[]): void {
-  writeFileSync(walletIndexPath(), JSON.stringify(wallets, null, 2))
+  writeFileAtomic(walletIndexPath(), JSON.stringify(wallets, null, 2))
 }
 
 export function addWalletEntry(name: string, address: string, mnemonic: string, accountIndex = 0): WalletEntry {
@@ -93,7 +94,7 @@ export function addWalletEntry(name: string, address: string, mnemonic: string, 
 
   const id = randomUUID()
   const encrypted = safeStorage.encryptString(mnemonic)
-  writeFileSync(join(walletsDir(), `${id}.enc`), encrypted)
+  writeFileAtomic(join(walletsDir(), `${id}.enc`), encrypted)
 
   const entry: WalletEntry = { id, name, address, accountIndex }
   const wallets = listWallets()
@@ -176,15 +177,19 @@ export function migrateOldWallet(): void {
     // For migration, we store mnemonic and will derive address when loaded
     const id = randomUUID()
     const reEncrypted = safeStorage.encryptString(mnemonic)
-    writeFileSync(join(walletsDir(), `${id}.enc`), reEncrypted)
+    writeFileAtomic(join(walletsDir(), `${id}.enc`), reEncrypted)
 
     const entry: WalletEntry = { id, name: 'My Wallet', address: '' }
+    // Index + active-id are written (atomically) before the old file is removed,
+    // so a crash mid-migration leaves the original wallet.enc recoverable.
     saveWalletIndex([entry])
     saveSettings({ activeWalletId: id })
 
     // Delete old file
     unlinkSync(oldPath)
-  } catch {
-    // Migration failed — leave old file, user can re-import
+  } catch (err) {
+    // Migration failed — leave old file so the user can re-import. Surface the
+    // cause instead of swallowing it silently.
+    console.error('[migrate] Failed to migrate legacy wallet.enc:', err)
   }
 }

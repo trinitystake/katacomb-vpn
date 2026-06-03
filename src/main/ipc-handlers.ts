@@ -1,4 +1,5 @@
 import { ipcMain, net, BrowserWindow } from 'electron'
+import { is } from '@electron-toolkit/utils'
 import { IPC } from '../shared/ipc-channels'
 import {
   hasStoredWallet,
@@ -32,12 +33,15 @@ import {
   getV2RayError,
   bringUpV2RayTunnel,
   getV2RayRemoteHost,
+  getWireGuardRemoteHost,
+  isWireGuardUp,
   binaryExists,
   isBinaryAvailable,
   runPrivileged,
 } from './vpn-manager'
+import { isAllowedBypassCidr } from './config-guard'
 import { enableKillSwitch, disableKillSwitch } from './kill-switch'
-import { getTrafficStats } from './traffic-stats'
+import { getTrafficStats, resetTrafficStats } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
@@ -81,6 +85,31 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let isIntentionalDisconnect = false
 
+// Active protocol + WireGuard liveness monitor. V2Ray has a process exit
+// callback; WireGuard has no process to watch, so we poll the interface and
+// trigger the same auto-reconnect path when it drops.
+let activeProtocol: 'wireguard' | 'v2ray' | null = null
+let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
+
+function startWireGuardMonitor(): void {
+  if (wgMonitorTimer) return
+  wgMonitorTimer = setInterval(() => {
+    if (activeProtocol !== 'wireguard' || isIntentionalDisconnect || reconnectAttempt > 0) return
+    if (!activeSessionId) return
+    if (!isWireGuardUp()) {
+      console.log('[vpn] WireGuard interface dropped, attempting reconnect...')
+      attemptReconnect()
+    }
+  }, 5000)
+}
+
+function stopWireGuardMonitor(): void {
+  if (wgMonitorTimer) {
+    clearInterval(wgMonitorTimer)
+    wgMonitorTimer = null
+  }
+}
+
 function sendStateChange(state: 'connected' | 'idle'): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.CONNECTION_STATE_CHANGE, state)
@@ -109,6 +138,9 @@ function applySession(
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
 async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promise<void> {
+  // New interface/session — clear the speed baseline (finding M10).
+  resetTrafficStats()
+
   const settings = loadSettings()
 
   // Apply custom DNS
@@ -124,7 +156,10 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   if (settings.killSwitch) {
     try {
       const vpnIface = protocol === 'wireguard' ? 'sntl0' : 'sntl-tun'
-      const remoteHost = getV2RayRemoteHost() || '0.0.0.0'
+      // Whitelist the *real* server endpoint so the tunnel can re-handshake
+      // while the kill switch is engaged (was hardcoded to a useless 0.0.0.0
+      // for WireGuard — see finding H2).
+      const remoteHost = (protocol === 'wireguard' ? getWireGuardRemoteHost() : getV2RayRemoteHost()) || '0.0.0.0'
       const dnsIp = settings.dnsResolver !== 'system' ? settings.dnsResolver : undefined
       enableKillSwitch(vpnIface, remoteHost, dnsIp)
     } catch (err) {
@@ -163,6 +198,11 @@ async function attemptReconnect(): Promise<void> {
   if (reconnectAttempt > RECONNECT_MAX_ATTEMPTS) {
     console.log('[reconnect] Max attempts reached, giving up')
     reconnectAttempt = 0
+    // Don't strand the user behind a DROP-all kill switch / overridden DNS.
+    revertPostConnectSettings()
+    disconnect()
+    stopWireGuardMonitor()
+    activeProtocol = null
     sendStateChange('idle')
     return
   }
@@ -180,6 +220,10 @@ async function attemptReconnect(): Promise<void> {
       if (!saved) {
         console.log('[reconnect] No saved config, cannot reconnect')
         reconnectAttempt = 0
+        revertPostConnectSettings()
+        disconnect()
+        stopWireGuardMonitor()
+        activeProtocol = null
         sendStateChange('idle')
         return
       }
@@ -199,6 +243,9 @@ async function attemptReconnect(): Promise<void> {
 
       // Apply post-connect settings
       await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
+
+      activeProtocol = saved.protocol as 'wireguard' | 'v2ray'
+      if (activeProtocol === 'wireguard') startWireGuardMonitor()
 
       console.log('[reconnect] Success')
       reconnectAttempt = 0
@@ -315,18 +362,41 @@ function assertIntRange(value: unknown, name: string, min: number, max: number):
   }
 }
 
+/** Only accept IPC from our own renderer frame (dev server origin or file://). */
+function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
+  const url = event.senderFrame?.url || event.sender.getURL() || ''
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    return url.startsWith(process.env['ELECTRON_RENDERER_URL'])
+  }
+  return url.startsWith('file://')
+}
+
+/**
+ * ipcMain.handle wrapper that rejects calls from any frame that isn't our own
+ * renderer — defense-in-depth so a single renderer-side compromise (or a future
+ * sub-frame) can't reach these privileged handlers (finding M2).
+ */
+function handle(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedSender(event)) {
+      throw new Error(`Rejected IPC ${channel} from untrusted sender`)
+    }
+    return listener(event, ...args)
+  })
+}
+
 export function registerIpcHandlers(): void {
   // Wallet
-  ipcMain.handle(IPC.WALLET_HAS_STORED, async () => {
+  handle(IPC.WALLET_HAS_STORED, async () => {
     return hasStoredWallet()
   })
 
-  ipcMain.handle(IPC.WALLET_GENERATE, async (_event, wordCount: 12 | 24) => {
+  handle(IPC.WALLET_GENERATE, async (_event, wordCount: 12 | 24) => {
     if (wordCount !== 12 && wordCount !== 24) throw new Error('Word count must be 12 or 24')
     return generateMnemonicPhrase(wordCount)
   })
 
-  ipcMain.handle(IPC.WALLET_IMPORT, async (_event, mnemonic: string, name?: string) => {
+  handle(IPC.WALLET_IMPORT, async (_event, mnemonic: string, name?: string) => {
     assertString(mnemonic, 'mnemonic')
     const words = mnemonic.trim().split(/\s+/)
     if (words.length !== 12 && words.length !== 24) {
@@ -343,7 +413,7 @@ export function registerIpcHandlers(): void {
     return { address }
   })
 
-  ipcMain.handle(IPC.WALLET_GET_ADDRESS, async () => {
+  handle(IPC.WALLET_GET_ADDRESS, async () => {
     const stored = hasStoredWallet()
     if (stored && !getAddress()) {
       await restoreWallet()
@@ -351,7 +421,7 @@ export function registerIpcHandlers(): void {
     return getAddress()
   })
 
-  ipcMain.handle(IPC.WALLET_GET_BALANCE, async () => {
+  handle(IPC.WALLET_GET_BALANCE, async () => {
     // Skip RPC calls when VPN tunnel is active — traffic routes through
     // the node and RPC endpoints may be unreachable
     if (isVpnActive()) return lastKnownBalance
@@ -364,11 +434,11 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.WALLET_LOGOUT, async () => {
+  handle(IPC.WALLET_LOGOUT, async () => {
     logout()
   })
 
-  ipcMain.handle(IPC.WALLET_SESSIONS, async () => {
+  handle(IPC.WALLET_SESSIONS, async () => {
     if (isVpnActive()) return lastKnownSessions
     try {
       // Ensure node cache is populated for enrichment
@@ -393,7 +463,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.WALLET_END_SESSION, async (_event, sessionId: string) => {
+  handle(IPC.WALLET_END_SESSION, async (_event, sessionId: string) => {
     assertString(sessionId, 'sessionId')
     if (!/^\d+$/.test(sessionId)) throw new Error('Invalid session ID')
     const wallet = getWallet()
@@ -404,29 +474,29 @@ export function registerIpcHandlers(): void {
     await endSession({ wallet, address, sessionId })
   })
 
-  ipcMain.handle(IPC.WALLET_LIST, async () => {
+  handle(IPC.WALLET_LIST, async () => {
     return listWallets()
   })
 
-  ipcMain.handle(IPC.WALLET_SWITCH, async (_event, walletId: string) => {
+  handle(IPC.WALLET_SWITCH, async (_event, walletId: string) => {
     assertString(walletId, 'walletId')
     const address = await switchWallet(walletId)
     return { address }
   })
 
-  ipcMain.handle(IPC.WALLET_DELETE, async (_event, walletId: string) => {
+  handle(IPC.WALLET_DELETE, async (_event, walletId: string) => {
     assertString(walletId, 'walletId')
     deleteWalletEntry(walletId)
   })
 
-  ipcMain.handle(IPC.WALLET_RENAME, async (_event, walletId: string, newName: string) => {
+  handle(IPC.WALLET_RENAME, async (_event, walletId: string, newName: string) => {
     assertString(walletId, 'walletId')
     assertString(newName, 'newName')
     if (newName.length > 100) throw new Error('Wallet name too long')
     renameWallet(walletId, newName)
   })
 
-  ipcMain.handle(IPC.WALLET_DERIVE_SUBACCOUNT, async (_event, params: {
+  handle(IPC.WALLET_DERIVE_SUBACCOUNT, async (_event, params: {
     sourceWalletId: string
     accountIndex: number
     name: string
@@ -440,11 +510,11 @@ export function registerIpcHandlers(): void {
   })
 
   // Settings
-  ipcMain.handle(IPC.SETTINGS_GET, async () => {
+  handle(IPC.SETTINGS_GET, async () => {
     return loadSettings()
   })
 
-  ipcMain.handle(IPC.SETTINGS_SET, async (_event, settings: Record<string, unknown>) => {
+  handle(IPC.SETTINGS_SET, async (_event, settings: Record<string, unknown>) => {
     if (typeof settings !== 'object' || settings === null) throw new Error('Invalid settings')
     // Only allow known setting keys
     const allowed = new Set([
@@ -480,9 +550,12 @@ export function registerIpcHandlers(): void {
     }
     if (filtered.splitTunnelRoutes !== undefined) {
       if (!Array.isArray(filtered.splitTunnelRoutes)) throw new Error('Invalid splitTunnelRoutes: expected array')
-      for (const route of filtered.splitTunnelRoutes as string[]) {
-        if (!/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(route)) {
-          throw new Error(`Invalid CIDR route: ${route}`)
+      if (filtered.splitTunnelRoutes.length > 64) throw new Error('Too many split-tunnel routes (max 64)')
+      for (const route of filtered.splitTunnelRoutes as unknown[]) {
+        // Reject 0.0.0.0/x and /0 (would swallow the default route) and
+        // out-of-range octets/prefixes — see finding H3.
+        if (typeof route !== 'string' || !isAllowedBypassCidr(route)) {
+          throw new Error(`Invalid CIDR route: ${String(route)}`)
         }
       }
     }
@@ -490,20 +563,20 @@ export function registerIpcHandlers(): void {
   })
 
   // Nodes
-  ipcMain.handle(IPC.NODES_FETCH, async () => {
+  handle(IPC.NODES_FETCH, async () => {
     return fetchNodes()
   })
 
-  ipcMain.handle(IPC.NODES_GET_CACHED, async () => {
+  handle(IPC.NODES_GET_CACHED, async () => {
     return nodesMemoryCache
   })
 
-  ipcMain.handle(IPC.RPC_LIST, async () => {
+  handle(IPC.RPC_LIST, async () => {
     return fetchPublicRpcs()
   })
 
   // Connection: Subscribe
-  ipcMain.handle(IPC.CONNECTION_SUBSCRIBE, async (_event, params: {
+  handle(IPC.CONNECTION_SUBSCRIBE, async (_event, params: {
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
@@ -589,7 +662,7 @@ export function registerIpcHandlers(): void {
   })
 
   // Connection: Reconnect to existing session using saved config
-  ipcMain.handle(IPC.CONNECTION_RECONNECT, async (_event, params: {
+  handle(IPC.CONNECTION_RECONNECT, async (_event, params: {
     sessionId: string
   }) => {
     assertString(params.sessionId, 'sessionId')
@@ -622,12 +695,12 @@ export function registerIpcHandlers(): void {
   // Network: public IP lookup with geolocation (see override below)
 
   // Connection: Check for other active VPNs
-  ipcMain.handle(IPC.CONNECTION_CHECK_VPN, async () => {
+  handle(IPC.CONNECTION_CHECK_VPN, async () => {
     return detectOtherVpn()
   })
 
   // Connection: Connect (establish tunnel — from SDK instance or raw config)
-  ipcMain.handle(IPC.CONNECTION_CONNECT, async (_event, params: {
+  handle(IPC.CONNECTION_CONNECT, async (_event, params: {
     protocol: 'wireguard' | 'v2ray'
     configString?: string
   }) => {
@@ -649,6 +722,8 @@ export function registerIpcHandlers(): void {
       // Apply DNS and kill switch if enabled
       await applyPostConnectSettings('wireguard')
 
+      activeProtocol = 'wireguard'
+      startWireGuardMonitor()
       sendStateChange('connected')
       return { protocol: 'wireguard' }
     }
@@ -679,6 +754,7 @@ export function registerIpcHandlers(): void {
       // Apply DNS and kill switch if enabled
       await applyPostConnectSettings('v2ray')
 
+      activeProtocol = 'v2ray'
       sendStateChange('connected')
       return { protocol: 'v2ray' }
     }
@@ -687,7 +763,7 @@ export function registerIpcHandlers(): void {
   })
 
   // Connection: Disconnect
-  ipcMain.handle(IPC.CONNECTION_DISCONNECT, async () => {
+  handle(IPC.CONNECTION_DISCONNECT, async () => {
     isIntentionalDisconnect = true
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
@@ -695,10 +771,12 @@ export function registerIpcHandlers(): void {
     }
     reconnectAttempt = 0
 
+    stopWireGuardMonitor()
     revertPostConnectSettings()
     disconnect()
     activeV2ray = null
     activeWg = null
+    activeProtocol = null
     activeSessionId = null
     activeNodeInfo = null
     isIntentionalDisconnect = false
@@ -706,7 +784,7 @@ export function registerIpcHandlers(): void {
   })
 
   // Connection: Status
-  ipcMain.handle(IPC.CONNECTION_STATUS, async () => {
+  handle(IPC.CONNECTION_STATUS, async () => {
     const vpnStatus = getConnectionStatus()
     const state = reconnectAttempt > 0 ? 'reconnecting' : vpnStatus.connected ? 'connected' : 'idle'
     return {
@@ -722,12 +800,12 @@ export function registerIpcHandlers(): void {
   })
 
   // Traffic Stats
-  ipcMain.handle(IPC.TRAFFIC_STATS, async () => {
+  handle(IPC.TRAFFIC_STATS, async () => {
     return getTrafficStats()
   })
 
   // Bookmarks
-  ipcMain.handle(IPC.BOOKMARK_TOGGLE, async (_event, nodeAddress: string) => {
+  handle(IPC.BOOKMARK_TOGGLE, async (_event, nodeAddress: string) => {
     assertString(nodeAddress, 'nodeAddress')
     const settings = loadSettings()
     const bookmarks = settings.bookmarkedNodes || []
@@ -741,13 +819,13 @@ export function registerIpcHandlers(): void {
     return bookmarks
   })
 
-  ipcMain.handle(IPC.BOOKMARK_LIST, async () => {
+  handle(IPC.BOOKMARK_LIST, async () => {
     const settings = loadSettings()
     return settings.bookmarkedNodes || []
   })
 
   // RPC health check
-  ipcMain.handle(IPC.RPC_CHECK, async (_event, endpoint: string) => {
+  handle(IPC.RPC_CHECK, async (_event, endpoint: string) => {
     assertString(endpoint, 'endpoint')
     try { new URL(endpoint) } catch { throw new Error('Invalid RPC endpoint URL') }
     const start = Date.now()
@@ -760,7 +838,7 @@ export function registerIpcHandlers(): void {
   })
 
   // Binary check — checks bundled binaries first, then system PATH
-  ipcMain.handle(IPC.BINARY_CHECK, async () => {
+  handle(IPC.BINARY_CHECK, async () => {
     return {
       wireguard: binaryExists('wg-quick'),
       v2ray: isBinaryAvailable('v2ray'),
@@ -769,13 +847,13 @@ export function registerIpcHandlers(): void {
   })
 
   // Node Testing: Single probe
-  ipcMain.handle(IPC.NODE_TEST_PROBE, async (_event, params: { nodeAddress: string; remoteUrl: string }) => {
+  handle(IPC.NODE_TEST_PROBE, async (_event, params: { nodeAddress: string; remoteUrl: string }) => {
     assertString(params.nodeAddress, 'nodeAddress')
     return probeNode(params.remoteUrl, params.nodeAddress)
   })
 
   // Node Testing: Batch probe
-  ipcMain.handle(IPC.NODE_TEST_BATCH, async (_event, nodes: Array<{ nodeAddress: string; remoteUrl: string }>) => {
+  handle(IPC.NODE_TEST_BATCH, async (_event, nodes: Array<{ nodeAddress: string; remoteUrl: string }>) => {
     if (!Array.isArray(nodes) || nodes.length === 0) throw new Error('Invalid nodes array')
     for (const n of nodes) {
       assertString(n.nodeAddress, 'nodeAddress')
@@ -784,18 +862,18 @@ export function registerIpcHandlers(): void {
   })
 
   // Node Testing: Cancel batch
-  ipcMain.handle(IPC.NODE_TEST_CANCEL, async () => {
+  handle(IPC.NODE_TEST_CANCEL, async () => {
     cancelBatch()
   })
 
   // Node Testing: Speed test on active connection
-  ipcMain.handle(IPC.NODE_TEST_SPEED, async () => {
+  handle(IPC.NODE_TEST_SPEED, async () => {
     if (!isVpnActive()) throw new Error('No active VPN connection')
     return speedTest()
   })
 
   // Node Testing: Get cached results
-  ipcMain.handle(IPC.NODE_TEST_RESULTS, async () => {
+  handle(IPC.NODE_TEST_RESULTS, async () => {
     return getAllCachedResults()
   })
 
@@ -803,7 +881,7 @@ export function registerIpcHandlers(): void {
   // country/city/ASN/org; includeGeo=false uses icanhazip.com only (no rate
   // limits) — intended for polled refreshes so we don't burn the 1000/day
   // free tier on ipapi.co.
-  ipcMain.handle(IPC.NETWORK_GET_IP, async (_event, includeGeo?: boolean) => {
+  handle(IPC.NETWORK_GET_IP, async (_event, includeGeo?: boolean) => {
     const geo = includeGeo !== false
     if (geo) {
       try {
@@ -830,17 +908,17 @@ export function registerIpcHandlers(): void {
   })
 
   // Plan Discovery
-  ipcMain.handle(IPC.PLAN_DISCOVER, async (_event, maxCount: number) => {
+  handle(IPC.PLAN_DISCOVER, async (_event, maxCount: number) => {
     assertIntRange(maxCount, 'maxCount', 100, 1000)
     if (isVpnActive()) throw new Error('Disconnect VPN before discovering plans')
     return discoverPlans(maxCount)
   })
 
-  ipcMain.handle(IPC.PLAN_LIST_CACHED, async () => {
+  handle(IPC.PLAN_LIST_CACHED, async () => {
     return listCachedPlans()
   })
 
-  ipcMain.handle(IPC.PLAN_ALLOCATIONS, async () => {
+  handle(IPC.PLAN_ALLOCATIONS, async () => {
     const address = getAddress()
     if (!address) return []
     if (isVpnActive()) return []
@@ -851,7 +929,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.PLAN_SUBSCRIBE, async (_event, params: {
+  handle(IPC.PLAN_SUBSCRIBE, async (_event, params: {
     planId: string
     denom: string
     nodeAddress: string
@@ -904,7 +982,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.PLAN_START_SESSION_FROM_SUB, async (_event, params: {
+  handle(IPC.PLAN_START_SESSION_FROM_SUB, async (_event, params: {
     subscriptionId: string
     nodeAddress: string
     nodeMoniker: string
@@ -954,7 +1032,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.PLAN_NODES, async (_event, params: { planId: string }) => {
+  handle(IPC.PLAN_NODES, async (_event, params: { planId: string }) => {
     assertString(params?.planId, 'planId')
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     if (isVpnActive()) return []
@@ -965,7 +1043,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.PLAN_LIST_FOR_NODE, async (_event, params: { nodeAddress: string }) => {
+  handle(IPC.PLAN_LIST_FOR_NODE, async (_event, params: { nodeAddress: string }) => {
     assertString(params?.nodeAddress, 'nodeAddress')
     if (isVpnActive()) return []
     try {
@@ -975,7 +1053,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.PROVIDER_GET, async (_event, params: { address: string }) => {
+  handle(IPC.PROVIDER_GET, async (_event, params: { address: string }) => {
     assertString(params?.address, 'address')
     assertSentAddress(params.address, 'address')
     try {
@@ -986,7 +1064,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle(IPC.PROVIDER_LIST, async () => {
+  handle(IPC.PROVIDER_LIST, async () => {
     try {
       return await listProviders()
     } catch {
@@ -1008,6 +1086,7 @@ export function cleanupOnQuit(): void {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  stopWireGuardMonitor()
   revertPostConnectSettings()
   disconnect()
 }

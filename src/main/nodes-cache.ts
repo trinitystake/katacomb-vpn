@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import { writeFileAtomic } from './fs-utils'
 
 export interface NodesCacheFile {
   nodes: unknown[]
@@ -25,7 +26,7 @@ export function loadNodesCache(): NodesCacheFile | null {
 
 export function saveNodesCache(nodes: unknown[]): void {
   try {
-    writeFileSync(cachePath(), JSON.stringify({ nodes, fetchedAt: Date.now() }))
+    writeFileAtomic(cachePath(), JSON.stringify({ nodes, fetchedAt: Date.now() }))
   } catch {
     // silent — disk full / permission errors must not break the app
   }

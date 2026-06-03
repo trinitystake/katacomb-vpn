@@ -14,9 +14,10 @@ import {
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow, app, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
+import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getRpcEndpoint } from './settings'
+import { writeFileAtomic } from './fs-utils'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -43,13 +44,16 @@ function sessionConfigPath(sessionId: string): string {
 }
 
 export function saveSessionConfig(config: SavedSessionConfig): void {
-  const json = JSON.stringify(config)
-  if (safeStorage.isEncryptionAvailable()) {
-    const encrypted = safeStorage.encryptString(json)
-    writeFileSync(sessionConfigPath(config.sessionId), encrypted, { mode: 0o600 })
-  } else {
-    writeFileSync(sessionConfigPath(config.sessionId), json, { mode: 0o600 })
+  // Never write tunnel credentials (WG private key / V2Ray UUID) to disk in
+  // plaintext. Without a working keyring we skip persistence entirely —
+  // connecting still works this session, only reconnect-after-restart is lost.
+  if (!safeStorage.isEncryptionAvailable()) {
+    console.warn('[session] OS keyring unavailable — session config not persisted')
+    return
   }
+  const json = JSON.stringify(config)
+  const encrypted = safeStorage.encryptString(json)
+  writeFileAtomic(sessionConfigPath(config.sessionId), encrypted, 0o600)
 }
 
 export function loadSessionConfig(sessionId: string): SavedSessionConfig | null {
@@ -93,10 +97,13 @@ interface OnChainNode {
 
 async function queryNodeOnChain(nodeAddress: string): Promise<OnChainNode> {
   const client = await SentinelClient.connect(getRpcEndpoint())
-  const result = await client.sentinelQuery?.node.node(nodeAddress)
-  client.disconnect()
-  if (!result) throw new Error('Node not found on chain')
-  return result as OnChainNode
+  try {
+    const result = await client.sentinelQuery?.node.node(nodeAddress)
+    if (!result) throw new Error('Node not found on chain')
+    return result as OnChainNode
+  } finally {
+    client.disconnect()
+  }
 }
 
 export async function resolveNodeRemoteUrl(
@@ -113,7 +120,18 @@ export async function resolveNodeRemoteUrl(
   }
 
   if (apiField) {
+    // apiField is renderer-supplied: parse + constrain it before it becomes the
+    // handshake endpoint (which we hit with the wallet private key). Reject
+    // non-http(s) schemes and embedded credentials (finding M5).
     const url = apiField.startsWith('http') ? apiField : `https://${apiField}`
+    let parsed: URL
+    try { parsed = new URL(url) } catch { throw new Error('Invalid node API endpoint') }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Node API endpoint must use http(s)')
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error('Node API endpoint must not contain credentials')
+    }
     return url
   }
 
@@ -137,49 +155,52 @@ export async function subscribeToNode(params: {
     queryNodeOnChain(nodeAddress),
   ])
 
-  // Find the matching on-chain Price for the selected denom and subscription type
-  const priceList = type === 'gigabytes' ? onChainNode.gigabytePrices : onChainNode.hourlyPrices
-  const price = priceList.find((p) => p.denom === denom)
-  if (!price) {
-    throw new Error(`Node does not accept ${denom} for ${type} subscriptions`)
+  try {
+    // Find the matching on-chain Price for the selected denom and subscription type
+    const priceList = type === 'gigabytes' ? onChainNode.gigabytePrices : onChainNode.hourlyPrices
+    const price = priceList.find((p) => p.denom === denom)
+    if (!price) {
+      throw new Error(`Node does not accept ${denom} for ${type} subscriptions`)
+    }
+
+    // Step 2: Broadcast subscription transaction
+    sendProgress('2/5', 'Broadcasting subscription transaction...')
+    const msgArgs: Record<string, unknown> = {
+      from: address,
+      nodeAddress,
+      maxPrice: { denom: price.denom, baseValue: price.baseValue, quoteValue: price.quoteValue },
+    }
+
+    if (type === 'gigabytes') {
+      msgArgs.gigabytes = Long.fromNumber(amount, true)
+    } else {
+      msgArgs.hours = Long.fromNumber(amount, true)
+    }
+
+    const msg = nodeStartSession(msgArgs as unknown as Parameters<typeof nodeStartSession>[0])
+    const tx = await client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app')
+
+    if (tx.code !== 0) {
+      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
+    }
+
+    // Step 3: Extract session ID
+    sendProgress('3/5', 'Extracting session ID...')
+    const event = searchEvent(NodeEventCreateSession.type, tx.events)
+    if (!event) {
+      throw new Error('Could not find session creation event in transaction')
+    }
+
+    const parsed = NodeEventCreateSession.parse(event)
+    const sessionId = parsed.value.sessionId
+    if (!sessionId) {
+      throw new Error('Session ID not found in event')
+    }
+
+    return sessionId.toString()
+  } finally {
+    client.disconnect()
   }
-
-  // Step 2: Broadcast subscription transaction
-  sendProgress('2/5', 'Broadcasting subscription transaction...')
-  const msgArgs: Record<string, unknown> = {
-    from: address,
-    nodeAddress,
-    maxPrice: { denom: price.denom, baseValue: price.baseValue, quoteValue: price.quoteValue },
-  }
-
-  if (type === 'gigabytes') {
-    msgArgs.gigabytes = Long.fromNumber(amount, true)
-  } else {
-    msgArgs.hours = Long.fromNumber(amount, true)
-  }
-
-  const msg = nodeStartSession(msgArgs as unknown as Parameters<typeof nodeStartSession>[0])
-  const tx = await client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app')
-
-  if (tx.code !== 0) {
-    throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
-  }
-
-  // Step 3: Extract session ID
-  sendProgress('3/5', 'Extracting session ID...')
-  const event = searchEvent(NodeEventCreateSession.type, tx.events)
-  if (!event) {
-    throw new Error('Could not find session creation event in transaction')
-  }
-
-  const parsed = NodeEventCreateSession.parse(event)
-  const sessionId = parsed.value.sessionId
-  if (!sessionId) {
-    throw new Error('Session ID not found in event')
-  }
-
-  client.disconnect()
-  return sessionId.toString()
 }
 
 export async function endSession(params: {
@@ -192,19 +213,22 @@ export async function endSession(params: {
     gasPrice: GAS_PRICE,
   })
 
-  const msg = sessionCancel({
-    from: address,
-    id: Long.fromString(sessionId, true),
-  })
+  try {
+    const msg = sessionCancel({
+      from: address,
+      id: Long.fromString(sessionId, true),
+    })
 
-  const tx = await client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app: end session')
-  client.disconnect()
+    const tx = await client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app: end session')
 
-  if (tx.code !== 0) {
-    throw new Error(`End session failed with code ${tx.code}: ${tx.rawLog}`)
+    if (tx.code !== 0) {
+      throw new Error(`End session failed with code ${tx.code}: ${tx.rawLog}`)
+    }
+
+    deleteSessionConfig(sessionId)
+  } finally {
+    client.disconnect()
   }
-
-  deleteSessionConfig(sessionId)
 }
 
 export async function performHandshake(params: {

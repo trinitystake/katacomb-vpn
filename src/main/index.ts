@@ -94,9 +94,32 @@ function createWindow(): void {
     }
   })
 
+  // Never open a new window; hand only web/mail links to the OS browser.
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    try {
+      const { protocol } = new URL(details.url)
+      if (protocol === 'https:' || protocol === 'http:' || protocol === 'mailto:') {
+        shell.openExternal(details.url)
+      }
+    } catch { /* malformed URL — ignore */ }
     return { action: 'deny' }
+  })
+
+  // Lock the renderer to its own origin. The SPA navigates via React state, so
+  // a real top-frame navigation is always unwanted — block it (and send any
+  // external link to the OS browser instead).
+  const rendererOrigin = is.dev && process.env['ELECTRON_RENDERER_URL']
+    ? new URL(process.env['ELECTRON_RENDERER_URL']).origin
+    : null
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    let isSameOrigin = false
+    try { isSameOrigin = rendererOrigin !== null && new URL(url).origin === rendererOrigin } catch { /* ignore */ }
+    if (isSameOrigin) return // allow dev-server reload/HMR
+    event.preventDefault()
+    try {
+      const { protocol } = new URL(url)
+      if (protocol === 'https:' || protocol === 'http:') shell.openExternal(url)
+    } catch { /* ignore */ }
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {

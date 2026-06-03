@@ -7,6 +7,10 @@ import react from '@vitejs/plugin-react'
 // (@scure/base, @noble/*) that Electron's CJS require() can't load,
 // so we must let Vite transpile the entire dependency tree.
 const DEPS_TO_BUNDLE = [
+  // Bundle the one remaining externalized main-process dep so NOTHING needs
+  // node_modules at runtime — lets us drop the whole tree from the package
+  // (everything else main/renderer use is already inlined by the bundler).
+  '@electron-toolkit/utils',
   '@sentinel-official/sentinel-js-sdk',
   '@cosmjs/encoding',
   '@cosmjs/crypto',

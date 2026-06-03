@@ -440,6 +440,10 @@ export function registerIpcHandlers(): void {
 
   handle(IPC.WALLET_SESSIONS, async () => {
     if (isVpnActive()) return lastKnownSessions
+    // On app startup this can run before the wallet is restored (it races the
+    // first walletGetAddress); restore it here too so sessions auto-load instead
+    // of returning [] until a manual Refresh.
+    if (hasStoredWallet() && !getAddress()) await restoreWallet()
     try {
       // Ensure node cache is populated for enrichment
       if (cachedNodes.length === 0) {

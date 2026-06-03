@@ -12,6 +12,7 @@ import {
 } from './config-guard'
 import { verifyBinaryIntegrity } from './binary-integrity'
 import { runPrivileged } from './privileged'
+import { loadSettings } from './settings'
 
 const WG_IFACE = 'sntl0'
 
@@ -203,7 +204,6 @@ async function bringUpTun(): Promise<void> {
   console.log(`[tun2socks] Remote host: ${remoteHost}, Gateway: ${defaultRoute.gateway} via ${defaultRoute.iface}`)
 
   // Load split tunnel routes from settings
-  const { loadSettings } = require('./settings') as typeof import('./settings')
   const settings = loadSettings()
   const bypassRoutes = sanitizeBypassRoutes(settings.splitTunnelRoutes).join(',')
 

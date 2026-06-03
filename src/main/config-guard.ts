@@ -107,6 +107,36 @@ export function sanitizeBypassRoutes(routes: unknown): string[] {
     .slice(0, MAX_BYPASS_ROUTES)
 }
 
+// DNS resolvers the app is allowed to switch to. The daemon re-checks this (a
+// socket client is untrusted) so a local attacker can't point DNS at their own
+// resolver; 'system' means "no override" and is handled by the caller.
+export const ALLOWED_DNS_RESOLVERS = new Set([
+  '1.1.1.1', '1.0.0.1', '8.8.8.8', '9.9.9.9', '45.90.28.0',
+])
+
+export function isAllowedDnsResolver(ip: string): boolean {
+  return ALLOWED_DNS_RESOLVERS.has(ip)
+}
+
+/** Strict IPv4 literal (octets 0-255). */
+export function isIPv4(s: string): boolean {
+  const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  return m !== null && [m[1], m[2], m[3], m[4]].every((o) => parseInt(o, 10) <= 255)
+}
+
+/** Linux interface name: alphanumeric/underscore/hyphen, 1-15 chars. */
+export function isValidInterfaceName(s: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,15}$/.test(s)
+}
+
+/** `ipv4:port` SOCKS address. */
+export function isValidSocksAddr(s: string): boolean {
+  const m = s.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$/)
+  if (!m) return false
+  const port = parseInt(m[2], 10)
+  return isIPv4(m[1]) && port > 0 && port <= 65535
+}
+
 const V2RAY_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1'])
 
 /**

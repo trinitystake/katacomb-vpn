@@ -2,17 +2,20 @@
   "name": "sentinel-dvpn-app",
   "version": "0.1.0",
   "description": "Sentinel dVPN Desktop Client",
+  "author": "Sentinel <noreply@sentinel.co>",
+  "homepage": "https://sentinel.co",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "electron-vite build && npm run build:daemon",
+    "build:daemon": "node scripts/build-daemon.mjs",
     "preview": "electron-vite preview",
     "test": "node --test \"src/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "postinstall": "electron-builder install-app-deps",
-    "dist": "electron-vite build && electron-builder --linux",
-    "dist:deb": "electron-vite build && electron-builder --linux deb",
-    "dist:appimage": "electron-vite build && electron-builder --linux AppImage"
+    "dist": "npm run build && electron-builder --linux",
+    "dist:deb": "npm run build && electron-builder --linux deb",
+    "dist:appimage": "npm run build && electron-builder --linux AppImage"
   },
   "dependencies": {
     "@cosmjs/proto-signing": "^0.38.1",

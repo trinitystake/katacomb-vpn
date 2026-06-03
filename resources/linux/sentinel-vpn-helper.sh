@@ -47,6 +47,49 @@ validate_socks_addr() {
   fi
 }
 
+# Validate WireGuard config CONTENT — allow-list [Interface]/[Peer] keys and
+# reject any script-executing directive (PostUp/PreUp/PostDown/PreDown) or
+# routing-table override. Mirror of assertSafeWireguardConfig in config-guard.ts.
+# This is the last line of defense: it holds even if the daemon/app validation
+# is bypassed or the helper is invoked directly.
+validate_wg_config() {
+  local config="$1"
+  local section="" line key lc_key sec
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # trim surrounding whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
+    if [[ "$line" =~ ^\[(.+)\]$ ]]; then
+      sec="${BASH_REMATCH[1],,}"
+      if [[ "$sec" != "interface" && "$sec" != "peer" ]]; then
+        echo "Error: WireGuard config section [$sec] is not allowed" >&2; exit 1
+      fi
+      section="$sec"; continue
+    fi
+    if [[ "$line" != *"="* ]]; then
+      echo "Error: malformed WireGuard config line is not allowed" >&2; exit 1
+    fi
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    lc_key="${key,,}"
+    if [[ -z "$section" ]]; then
+      echo "Error: WireGuard key outside any section is not allowed" >&2; exit 1
+    fi
+    if [[ "$section" == "interface" ]]; then
+      case "$lc_key" in
+        privatekey|address|dns|mtu|listenport) ;;
+        *) echo "Error: WireGuard [Interface] key '$lc_key' is not allowed" >&2; exit 1 ;;
+      esac
+    else
+      case "$lc_key" in
+        publickey|presharedkey|allowedips|endpoint|persistentkeepalive) ;;
+        *) echo "Error: WireGuard [Peer] key '$lc_key' is not allowed" >&2; exit 1 ;;
+      esac
+    fi
+  done < "$config"
+}
+
 # Ensure state directory exists with restrictive permissions
 ensure_run_dir() {
   if [[ ! -d "$RUN_DIR" ]]; then
@@ -69,6 +112,7 @@ case "${1:-}" in
       echo "Error: interface must be $ALLOWED_IFACE, got $IFACE" >&2
       exit 1
     fi
+    validate_wg_config "$CONFIG"
     wg-quick up "$CONFIG"
     ;;
   down)

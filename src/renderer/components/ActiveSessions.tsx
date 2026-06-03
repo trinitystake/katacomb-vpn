@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useConnection } from '../hooks/useConnection'
 import { usePlans } from '../hooks/usePlans'
+import { useTrafficStats } from '../hooks/useTrafficStats'
 import Spinner from './Spinner'
 import type { SessionInfo } from '../types'
 
@@ -53,6 +54,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   const { status, refresh: refreshConnection } = useConnection()
   const { allocations } = usePlans()
   const vpnConnected = status.state === 'connected'
+  // Live interface counter (bytes used this session). The on-chain session
+  // counters are frozen while connected (RPC is unreachable through the tunnel)
+  // and lag node settlement anyway, so the connected session's usage is driven
+  // off this real-time meter instead.
+  const liveStats = useTrafficStats(vpnConnected)
 
   async function handleReconnect(session: SessionInfo) {
     setBusy(session.id)
@@ -181,7 +187,15 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
           {sessions.map((session) => {
             const isBusy = busy === session.id
             const isConnectedSession = vpnConnected && status.sessionId === session.id
-            const pct = usagePercent(session.downloadBytes, session.maxBytes)
+            // For the live session, add the real-time interface counter to the
+            // on-chain baseline (settled before this connect) so the gauge moves.
+            const downloadBytes = isConnectedSession
+              ? String(parseInt(session.downloadBytes || '0', 10) + liveStats.rxBytes)
+              : session.downloadBytes
+            const uploadBytes = isConnectedSession
+              ? String(parseInt(session.uploadBytes || '0', 10) + liveStats.txBytes)
+              : session.uploadBytes
+            const pct = usagePercent(downloadBytes, session.maxBytes)
             const hasTimeSub = session.maxDurationSeconds !== null && session.maxDurationSeconds > 0
 
             return (
@@ -250,7 +264,8 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                 <div className="mb-2">
                   <div className="flex items-center justify-between text-xs mb-1">
                     <span className="text-text-secondary">
-                      Data: {formatBytes(session.downloadBytes)} / {formatBytes(session.maxBytes)}
+                      Data: {formatBytes(downloadBytes)} / {formatBytes(session.maxBytes)}
+                      {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
                     </span>
                     <span className={`font-mono ${pct > 90 ? 'text-danger' : pct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
                       {pct.toFixed(1)}%
@@ -286,7 +301,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                     </span>
                   )}
                   <span>
-                    Up: <span className="font-mono">{formatBytes(session.uploadBytes)}</span>
+                    Up: <span className="font-mono">{formatBytes(uploadBytes)}</span>
                   </span>
                 </div>
               </div>

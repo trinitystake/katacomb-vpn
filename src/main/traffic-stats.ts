@@ -1,4 +1,3 @@
-import { execSync } from 'child_process'
 import { readFileSync } from 'fs'
 
 interface TrafficStats {
@@ -23,50 +22,39 @@ export function resetTrafficStats(): void {
   prevTimestamp = 0
 }
 
-/** Parse /proc/net/dev for a given interface, returning rx and tx bytes */
-function readProcNetDev(iface: string): { rx: number; tx: number } | null {
-  try {
-    const content = readFileSync('/proc/net/dev', 'utf-8')
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith(`${iface}:`)) {
-        const parts = trimmed.split(/\s+/)
-        // Format: iface: rx_bytes rx_packets ... tx_bytes tx_packets ...
-        const rx = parseInt(parts[1], 10)
-        const tx = parseInt(parts[9], 10)
-        if (!isNaN(rx) && !isNaN(tx)) return { rx, tx }
-      }
+/** Parse one interface's rx/tx bytes out of /proc/net/dev content (rx=field 1, tx=field 9). */
+export function parseProcNetDev(content: string, iface: string): { rx: number; tx: number } | null {
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith(`${iface}:`)) {
+      const parts = trimmed.split(/\s+/)
+      // Format: iface: rx_bytes rx_packets ... tx_bytes tx_packets ...
+      const rx = parseInt(parts[1], 10)
+      const tx = parseInt(parts[9], 10)
+      if (!isNaN(rx) && !isNaN(tx)) return { rx, tx }
     }
-  } catch { /* ignore */ }
+  }
   return null
 }
 
-/** Get WireGuard transfer stats via `wg show sntl0 transfer` */
-function readWireGuardStats(): { rx: number; tx: number } | null {
+/** Read an interface's rx/tx bytes from the world-readable /proc/net/dev. */
+function readProcNetDev(iface: string): { rx: number; tx: number } | null {
   try {
-    const output = execSync('wg show sntl0 transfer', { stdio: 'pipe', timeout: 5000 }).toString().trim()
-    if (!output) return null
-    // Output format: <peer-pubkey>\t<rx>\t<tx>
-    let totalRx = 0
-    let totalTx = 0
-    for (const line of output.split('\n')) {
-      const parts = line.split('\t')
-      if (parts.length >= 3) {
-        totalRx += parseInt(parts[1], 10) || 0
-        totalTx += parseInt(parts[2], 10) || 0
-      }
-    }
-    return { rx: totalRx, tx: totalTx }
-  } catch { /* ignore */ }
-  return null
+    return parseProcNetDev(readFileSync('/proc/net/dev', 'utf-8'), iface)
+  } catch {
+    return null
+  }
 }
 
 /** Get current traffic stats from the active VPN interface */
 export function getTrafficStats(): TrafficStats {
   const now = Date.now()
 
-  // Try WireGuard first, then TUN interface
-  const stats = readWireGuardStats() || readProcNetDev('sntl-tun')
+  // Read the active interface's byte counters from /proc/net/dev: sntl0 for
+  // WireGuard, sntl-tun for V2Ray. (`wg show transfer` would need root, since the
+  // wg device is owned by the root-created interface, so /proc/net/dev — which is
+  // world-readable — is the right source for both protocols.)
+  const stats = readProcNetDev('sntl0') || readProcNetDev('sntl-tun')
 
   if (!stats) {
     return { rxBytes: 0, txBytes: 0, rxSpeed: 0, txSpeed: 0 }

@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
-import type { TrafficStats as TrafficStatsType } from '../types'
+import { useTrafficStats } from '../hooks/useTrafficStats'
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`
@@ -21,28 +20,7 @@ interface Props {
 }
 
 export default function TrafficStats({ connected }: Props) {
-  const [stats, setStats] = useState<TrafficStatsType>({ rxBytes: 0, txBytes: 0, rxSpeed: 0, txSpeed: 0 })
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  useEffect(() => {
-    if (!connected) {
-      setStats({ rxBytes: 0, txBytes: 0, rxSpeed: 0, txSpeed: 0 })
-      return
-    }
-
-    const poll = async () => {
-      try {
-        const s = await window.api.trafficStats()
-        setStats(s)
-      } catch { /* silent */ }
-    }
-
-    poll()
-    intervalRef.current = setInterval(poll, 1000)
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
-    }
-  }, [connected])
+  const stats = useTrafficStats(connected)
 
   if (!connected) return null
 

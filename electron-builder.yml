@@ -5,6 +5,16 @@ directories:
   buildResources: build
 files:
   - out/**/*
+  # The daemon ships unbundled via extraResources (run by Electron-as-node from a
+  # real filesystem path); keep it out of the asar to avoid a confusing duplicate.
+  - "!out/daemon/**"
+  # electron-vite already inlines every runtime dependency into out/, so the
+  # production node_modules tree (~120 MB) is dead weight in the asar. The only
+  # remaining externals are ws's optional native deps, which gracefully no-op.
+  - "!node_modules/**"
+# Ship only English UI strings (saves ~39 MB of Chromium locale .pak files).
+electronLanguages:
+  - en-US
 extraResources:
   - from: resources/linux/
     to: linux/
@@ -15,6 +25,9 @@ extraResources:
     to: linux/v2ray/
     filter:
       - "**/*"
+  # Standalone root-daemon bundle → /opt/Sentinel dVPN/resources/daemon/index.js
+  - from: out/daemon/index.js
+    to: daemon/index.js
 linux:
   target:
     - AppImage
@@ -30,5 +43,6 @@ deb:
     - wireguard-tools
     - policykit-1
   afterInstall: resources/linux/postinstall.sh
+  afterRemove: resources/linux/postrm.sh
 appImage:
   artifactName: sentinel-dvpn-${version}.AppImage

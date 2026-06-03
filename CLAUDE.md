@@ -54,6 +54,31 @@ VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a po
 - Helper commands: `up <config>`, `down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard interface name: `sntl0`. TUN interface: `sntl-tun`.
 
+### Privileged daemon (deb) vs. pkexec fallback (AppImage/dev)
+
+The `.deb` installs a **persistent root daemon** (systemd `sentinel-dvpn-daemon`,
+run via `ELECTRON_RUN_AS_NODE` on the bundled Electron) so connect/disconnect
+**never prompt for a password**. The GUI (as the user) sends JSON ops over a Unix
+socket at `/run/sentinel-dvpn/daemon.sock` (mode 0666 — any local user, Mullvad
+model). The AppImage and `npm run dev` have no daemon, so they fall back to the
+per-op `pkexec` helper (one cached prompt).
+
+- `daemon-core.ts`: socket server + op dispatch — **all validation lives here**,
+  since the socket is unauthenticated it's the trust boundary. `daemon.ts`: the
+  `ELECTRON_RUN_AS_NODE` entry, bundled standalone by `scripts/build-daemon.mjs`
+  (esbuild) → `out/daemon/index.js`, shipped **outside the asar** to
+  `resources/daemon/index.js`. The daemon must NOT import `electron`.
+- `daemon-client.ts` (`isDaemonAvailable`/`daemonRequest`) + `privileged.ts`
+  (`runPrivileged` routes to the daemon if its socket exists, else `pkexec`).
+  The privileged call tree (`vpn-manager`, `kill-switch`, `ipc-handlers`) is
+  **async** because of the socket round-trip.
+- Packaging: `postinstall.sh` installs+enables the unit and a space-free
+  `/opt/sentinel-dvpn` → `/opt/Sentinel dVPN` symlink (the unit ExecStart uses it
+  + the `sentinel-dvpn-app` binary name). `postrm.sh` tears down any tunnel then
+  removes everything. **If you change the package `name`, fix the unit ExecStart
+  binary.** Verify packaging by building + extracting the deb (`dpkg-deb -x`),
+  not just by reading config.
+
 ### Node-trust invariant (critical — do not regress)
 
 **VPN node operators are adversaries in this app's threat model.** Their handshake

@@ -1,12 +1,15 @@
 import { execSync, execFileSync, spawn, type ChildProcess } from 'child_process'
-import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync } from 'fs'
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync, appendFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
+import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 import {
   assertSafeWireguardConfig,
   assertSafeV2RayConfig,
+  withV2RayDiagnosticLog,
+  pinV2RayNodeAddresses,
   sanitizeBypassRoutes,
   extractWireguardEndpointHost,
 } from './config-guard'
@@ -141,6 +144,25 @@ function isTunUp(): boolean {
   }
 }
 
+/**
+ * Resolve a hostname to a single IPv4 via getent. Returns IPs unchanged, null
+ * if it can't resolve or the input has shell metacharacters. Used both to pin
+ * the v2ray config endpoint (before spawn) and to derive the bypass route — so
+ * both see the *same* IP and can never disagree.
+ */
+function resolveHostToIPv4(host: string): string | null {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return host
+  // Validate hostname before passing to shell (no shell metacharacters)
+  if (!/^[a-zA-Z0-9._-]+$/.test(host)) return null
+  try {
+    const resolved = execSync(`getent ahostsv4 '${host}' | head -1 | awk '{print $1}'`, {
+      stdio: 'pipe', timeout: 5000,
+    }).toString().trim()
+    if (resolved && /^\d+\.\d+\.\d+\.\d+$/.test(resolved)) return resolved
+  } catch { /* ignore */ }
+  return null
+}
+
 /** Extract V2Ray remote server IP from the active config file, resolving hostnames to IPs */
 function extractV2RayRemoteHost(): string | null {
   try {
@@ -150,18 +172,9 @@ function extractV2RayRemoteHost(): string | null {
     for (const ob of config.outbounds || []) {
       const addr = ob?.settings?.vnext?.[0]?.address
       if (addr && addr !== '127.0.0.1') {
-        // If it's already an IP, return it directly
-        if (/^\d+\.\d+\.\d+\.\d+$/.test(addr)) return addr
-        // Validate hostname before passing to shell (no shell metacharacters)
-        if (!/^[a-zA-Z0-9._-]+$/.test(addr)) return null
-        // Resolve hostname to IP (must happen before tunnel routes are set up)
-        try {
-          const resolved = execSync(`getent ahostsv4 '${addr}' | head -1 | awk '{print $1}'`, {
-            stdio: 'pipe', timeout: 5000,
-          }).toString().trim()
-          if (resolved && /^\d+\.\d+\.\d+\.\d+$/.test(resolved)) return resolved
-        } catch { /* ignore */ }
-        return null // can't resolve — don't pass raw hostname to ip route
+        // After pinV2RayNodeAddresses this is already an IP; resolve handles the
+        // hostname fall-through case (pinning failed) too.
+        return resolveHostToIPv4(addr)
       }
     }
   } catch { /* ignore */ }
@@ -284,11 +297,23 @@ function spawnV2Ray(configFile: string): ChildProcess {
     env,
   })
 
+  // Persist v2ray's own output to a stable, user-readable file. The in-memory
+  // ring buffer below only survives while the process is alive and is only
+  // surfaced if it exits — but the failure we hit (process alive, outbound to
+  // the node wedged) never exits, so the file is the only way to see why.
+  // Truncated per spawn so it always holds the current session.
+  const logPath = join(app.getPath('userData'), 'v2ray.log')
+  try {
+    writeFileSync(logPath, `# v2ray session started ${new Date().toISOString()}\n`, { mode: 0o600 })
+  } catch { /* logging is best-effort */ }
+
   v2rayStderr = ''
   const collectOutput = (chunk: Buffer): void => {
-    v2rayStderr += chunk.toString()
-    // Keep only last 4KB
+    const text = chunk.toString()
+    v2rayStderr += text
+    // Keep only last 4KB in memory
     if (v2rayStderr.length > 4096) v2rayStderr = v2rayStderr.slice(-4096)
+    try { appendFileSync(logPath, text) } catch { /* best-effort */ }
   }
   child.stdout?.on('data', collectOutput)
   child.stderr?.on('data', collectOutput)
@@ -339,8 +364,16 @@ export function connectV2Ray(v2ray: V2Ray): void {
 
   // Use SDK to write config, then spawn ourselves (SDK hardcodes V5 CLI syntax)
   const configFile = v2ray.writeConfig()
-  // Node-supplied config: reject log file-paths / non-loopback inbounds before spawn.
-  assertSafeV2RayConfig(JSON.parse(readFileSync(configFile, 'utf-8')))
+  // Pin the node endpoint to an IP (so v2ray never re-resolves it through the
+  // tunnel and deadlocks) and turn on v2ray's diagnostic logging (the SDK
+  // silences it). Then re-validate: node-supplied config must reject log
+  // file-paths / non-loopback inbounds before spawn.
+  const cfg = pinV2RayNodeAddresses(
+    withV2RayDiagnosticLog(JSON.parse(readFileSync(configFile, 'utf-8'))),
+    resolveHostToIPv4,
+  )
+  assertSafeV2RayConfig(cfg)
+  writeFileSync(configFile, JSON.stringify(cfg, null, 2), { mode: 0o600 })
   const child = spawnV2Ray(configFile)
 
   activeChild = child
@@ -428,9 +461,10 @@ export function connectV2RayFromConfig(configString: string): void {
       'Please end this session and create a new subscription.'
     )
   }
-  assertSafeV2RayConfig(parsed)
+  const cfg = pinV2RayNodeAddresses(withV2RayDiagnosticLog(parsed), resolveHostToIPv4)
+  assertSafeV2RayConfig(cfg)
 
-  writeFileSync(V2RAY_CONFIG, configString, { mode: 0o600 })
+  writeFileSync(V2RAY_CONFIG, JSON.stringify(cfg, null, 2), { mode: 0o600 })
 
   const child = spawnV2Ray(V2RAY_CONFIG)
 

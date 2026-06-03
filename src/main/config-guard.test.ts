@@ -6,6 +6,8 @@ import {
   isAllowedBypassCidr,
   sanitizeBypassRoutes,
   assertSafeV2RayConfig,
+  withV2RayDiagnosticLog,
+  pinV2RayNodeAddresses,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -122,4 +124,65 @@ test('assertSafeV2RayConfig rejects a config with no outbounds', () => {
   assert.throws(() => assertSafeV2RayConfig({ inbounds: [] }), /outbound|invalid/i)
   assert.throws(() => assertSafeV2RayConfig(null), /invalid/i)
   assert.throws(() => assertSafeV2RayConfig('not an object'), /invalid/i)
+})
+
+// The SDK hardcodes log.loglevel = "none", so v2ray is silent and a dead
+// outbound (process alive, can't reach node) is undiagnosable. Turn logging on
+// without tripping the security guard's "no log file path" rule.
+test('withV2RayDiagnosticLog turns logging on at warning level', () => {
+  const out = withV2RayDiagnosticLog({ log: { loglevel: 'none' }, outbounds: [{ protocol: 'vmess' }] }) as { log: { loglevel: string; error: string } }
+  assert.equal(out.log.loglevel, 'warning')
+  // error must route to stderr ('' = stderr), NOT a file path
+  assert.equal(out.log.error, '')
+})
+
+test('withV2RayDiagnosticLog output still passes the security guard', () => {
+  const out = withV2RayDiagnosticLog(CLEAN_V2RAY)
+  assert.doesNotThrow(() => assertSafeV2RayConfig(out))
+})
+
+test('withV2RayDiagnosticLog preserves the rest of the config and does not mutate input', () => {
+  const input = JSON.parse(JSON.stringify(CLEAN_V2RAY))
+  const out = withV2RayDiagnosticLog(input) as typeof CLEAN_V2RAY
+  assert.deepEqual(out.outbounds, CLEAN_V2RAY.outbounds)
+  assert.deepEqual(out.inbounds, CLEAN_V2RAY.inbounds)
+  // input untouched (pure)
+  assert.deepEqual(input.log, { loglevel: 'none' })
+})
+
+// The real-world failure: the node endpoint is a hostname (oizys.busur.cc).
+// Once tun2socks routes all DNS through the tunnel, v2ray re-resolving that
+// hostname deadlocks. Pinning it to an IP before spawn removes the dependency.
+const HOSTNAME_V2RAY = {
+  log: { loglevel: 'none' },
+  outbounds: [
+    { protocol: 'vmess', settings: { vnext: [{ address: 'oizys.busur.cc', port: 55215, users: [{ id: 'x' }] }] }, tag: 'grpc' },
+    { protocol: 'vless', settings: { vnext: [{ address: 'oizys.busur.cc', port: 55216, users: [{ id: 'x' }] }] }, tag: 'kcp' },
+  ],
+}
+const resolveFixed = (host: string): string | null => (host === 'oizys.busur.cc' ? '103.246.250.10' : null)
+
+test('pinV2RayNodeAddresses replaces a hostname endpoint with its resolved IP', () => {
+  const out = pinV2RayNodeAddresses(HOSTNAME_V2RAY, resolveFixed) as typeof HOSTNAME_V2RAY
+  assert.equal(out.outbounds[0].settings.vnext[0].address, '103.246.250.10')
+  assert.equal(out.outbounds[1].settings.vnext[0].address, '103.246.250.10')
+  // unrelated fields preserved
+  assert.equal(out.outbounds[0].settings.vnext[0].port, 55215)
+})
+
+test('pinV2RayNodeAddresses leaves an IP endpoint untouched', () => {
+  const out = pinV2RayNodeAddresses(CLEAN_V2RAY, () => { throw new Error('must not resolve an IP') }) as typeof CLEAN_V2RAY
+  assert.equal(out.outbounds[0].settings.vnext[0].address, '203.0.113.7')
+})
+
+test('pinV2RayNodeAddresses leaves an unresolvable hostname as-is (best effort)', () => {
+  const out = pinV2RayNodeAddresses(HOSTNAME_V2RAY, () => null) as typeof HOSTNAME_V2RAY
+  assert.equal(out.outbounds[0].settings.vnext[0].address, 'oizys.busur.cc')
+})
+
+test('pinV2RayNodeAddresses does not mutate input and output passes the guard', () => {
+  const input = JSON.parse(JSON.stringify(HOSTNAME_V2RAY))
+  const out = pinV2RayNodeAddresses(input, resolveFixed)
+  assert.equal(input.outbounds[0].settings.vnext[0].address, 'oizys.busur.cc') // input untouched
+  assert.doesNotThrow(() => assertSafeV2RayConfig(out))
 })

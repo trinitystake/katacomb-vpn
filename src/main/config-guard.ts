@@ -137,6 +137,61 @@ export function isValidSocksAddr(s: string): boolean {
   return isIPv4(m[1]) && port > 0 && port <= 65535
 }
 
+/**
+ * Return a copy of a parsed V2Ray config with diagnostic logging enabled. The
+ * SDK hardcodes `log.loglevel = "none"`, which makes a wedged outbound (v2ray
+ * process alive but unable to reach the node) completely silent and
+ * undiagnosable. We route errors to stderr (captured by the spawner) at warning
+ * level — never to a file, so the output still satisfies assertSafeV2RayConfig.
+ */
+export function withV2RayDiagnosticLog(config: unknown): unknown {
+  const cfg = (config && typeof config === 'object') ? { ...(config as Record<string, unknown>) } : {}
+  cfg.log = { access: 'none', error: '', loglevel: 'warning' }
+  return cfg
+}
+
+/**
+ * Pin every V2Ray outbound endpoint that is a hostname to a concrete IPv4,
+ * using the supplied resolver. Returns a new config (pure — input untouched).
+ *
+ * Why this is load-bearing: the node endpoint must be an IP literal so v2ray
+ * never performs a runtime DNS lookup for it. Once the tun2socks tunnel is up,
+ * ALL DNS is routed *through* the tunnel — so any re-resolution of the node
+ * hostname deadlocks (DNS needs the node, the node needs DNS) and permanently
+ * wedges the connection while the v2ray process stays alive (the observed bug).
+ * Resolving once, before the tunnel exists, and pinning the result removes the
+ * dependency. Unresolvable hostnames are left as-is (best effort — connect then
+ * fails loudly downstream rather than silently here).
+ */
+export function pinV2RayNodeAddresses(
+  config: unknown,
+  resolve: (host: string) => string | null,
+): unknown {
+  if (config === null || typeof config !== 'object') return config
+  const cfg = { ...(config as Record<string, unknown>) }
+  if (!Array.isArray(cfg.outbounds)) return cfg
+
+  cfg.outbounds = cfg.outbounds.map((ob) => {
+    if (ob === null || typeof ob !== 'object') return ob
+    const settings = (ob as Record<string, unknown>).settings
+    if (settings === null || typeof settings !== 'object') return ob
+    const vnext = (settings as Record<string, unknown>).vnext
+    if (!Array.isArray(vnext)) return ob
+
+    const newVnext = vnext.map((v) => {
+      if (v === null || typeof v !== 'object') return v
+      const addr = (v as Record<string, unknown>).address
+      if (typeof addr !== 'string' || isIPv4(addr)) return v
+      const ip = resolve(addr)
+      return ip ? { ...(v as Record<string, unknown>), address: ip } : v
+    })
+
+    return { ...(ob as Record<string, unknown>), settings: { ...(settings as Record<string, unknown>), vnext: newVnext } }
+  })
+
+  return cfg
+}
+
 const V2RAY_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1'])
 
 /**

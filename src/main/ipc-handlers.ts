@@ -32,10 +32,13 @@ import {
   getV2RayError,
   bringUpV2RayTunnel,
   getV2RayRemoteHost,
+  getWireGuardRemoteHost,
+  isWireGuardUp,
   binaryExists,
   isBinaryAvailable,
   runPrivileged,
 } from './vpn-manager'
+import { isAllowedBypassCidr } from './config-guard'
 import { enableKillSwitch, disableKillSwitch } from './kill-switch'
 import { getTrafficStats } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
@@ -81,6 +84,31 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let isIntentionalDisconnect = false
 
+// Active protocol + WireGuard liveness monitor. V2Ray has a process exit
+// callback; WireGuard has no process to watch, so we poll the interface and
+// trigger the same auto-reconnect path when it drops.
+let activeProtocol: 'wireguard' | 'v2ray' | null = null
+let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
+
+function startWireGuardMonitor(): void {
+  if (wgMonitorTimer) return
+  wgMonitorTimer = setInterval(() => {
+    if (activeProtocol !== 'wireguard' || isIntentionalDisconnect || reconnectAttempt > 0) return
+    if (!activeSessionId) return
+    if (!isWireGuardUp()) {
+      console.log('[vpn] WireGuard interface dropped, attempting reconnect...')
+      attemptReconnect()
+    }
+  }, 5000)
+}
+
+function stopWireGuardMonitor(): void {
+  if (wgMonitorTimer) {
+    clearInterval(wgMonitorTimer)
+    wgMonitorTimer = null
+  }
+}
+
 function sendStateChange(state: 'connected' | 'idle'): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.CONNECTION_STATE_CHANGE, state)
@@ -124,7 +152,10 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   if (settings.killSwitch) {
     try {
       const vpnIface = protocol === 'wireguard' ? 'sntl0' : 'sntl-tun'
-      const remoteHost = getV2RayRemoteHost() || '0.0.0.0'
+      // Whitelist the *real* server endpoint so the tunnel can re-handshake
+      // while the kill switch is engaged (was hardcoded to a useless 0.0.0.0
+      // for WireGuard — see finding H2).
+      const remoteHost = (protocol === 'wireguard' ? getWireGuardRemoteHost() : getV2RayRemoteHost()) || '0.0.0.0'
       const dnsIp = settings.dnsResolver !== 'system' ? settings.dnsResolver : undefined
       enableKillSwitch(vpnIface, remoteHost, dnsIp)
     } catch (err) {
@@ -163,6 +194,11 @@ async function attemptReconnect(): Promise<void> {
   if (reconnectAttempt > RECONNECT_MAX_ATTEMPTS) {
     console.log('[reconnect] Max attempts reached, giving up')
     reconnectAttempt = 0
+    // Don't strand the user behind a DROP-all kill switch / overridden DNS.
+    revertPostConnectSettings()
+    disconnect()
+    stopWireGuardMonitor()
+    activeProtocol = null
     sendStateChange('idle')
     return
   }
@@ -180,6 +216,10 @@ async function attemptReconnect(): Promise<void> {
       if (!saved) {
         console.log('[reconnect] No saved config, cannot reconnect')
         reconnectAttempt = 0
+        revertPostConnectSettings()
+        disconnect()
+        stopWireGuardMonitor()
+        activeProtocol = null
         sendStateChange('idle')
         return
       }
@@ -199,6 +239,9 @@ async function attemptReconnect(): Promise<void> {
 
       // Apply post-connect settings
       await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
+
+      activeProtocol = saved.protocol as 'wireguard' | 'v2ray'
+      if (activeProtocol === 'wireguard') startWireGuardMonitor()
 
       console.log('[reconnect] Success')
       reconnectAttempt = 0
@@ -480,9 +523,12 @@ export function registerIpcHandlers(): void {
     }
     if (filtered.splitTunnelRoutes !== undefined) {
       if (!Array.isArray(filtered.splitTunnelRoutes)) throw new Error('Invalid splitTunnelRoutes: expected array')
-      for (const route of filtered.splitTunnelRoutes as string[]) {
-        if (!/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(route)) {
-          throw new Error(`Invalid CIDR route: ${route}`)
+      if (filtered.splitTunnelRoutes.length > 64) throw new Error('Too many split-tunnel routes (max 64)')
+      for (const route of filtered.splitTunnelRoutes as unknown[]) {
+        // Reject 0.0.0.0/x and /0 (would swallow the default route) and
+        // out-of-range octets/prefixes — see finding H3.
+        if (typeof route !== 'string' || !isAllowedBypassCidr(route)) {
+          throw new Error(`Invalid CIDR route: ${String(route)}`)
         }
       }
     }
@@ -649,6 +695,8 @@ export function registerIpcHandlers(): void {
       // Apply DNS and kill switch if enabled
       await applyPostConnectSettings('wireguard')
 
+      activeProtocol = 'wireguard'
+      startWireGuardMonitor()
       sendStateChange('connected')
       return { protocol: 'wireguard' }
     }
@@ -679,6 +727,7 @@ export function registerIpcHandlers(): void {
       // Apply DNS and kill switch if enabled
       await applyPostConnectSettings('v2ray')
 
+      activeProtocol = 'v2ray'
       sendStateChange('connected')
       return { protocol: 'v2ray' }
     }
@@ -695,10 +744,12 @@ export function registerIpcHandlers(): void {
     }
     reconnectAttempt = 0
 
+    stopWireGuardMonitor()
     revertPostConnectSettings()
     disconnect()
     activeV2ray = null
     activeWg = null
+    activeProtocol = null
     activeSessionId = null
     activeNodeInfo = null
     isIntentionalDisconnect = false
@@ -1008,6 +1059,7 @@ export function cleanupOnQuit(): void {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  stopWireGuardMonitor()
   revertPostConnectSettings()
   disconnect()
 }

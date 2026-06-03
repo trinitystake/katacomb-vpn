@@ -6,6 +6,12 @@ import { tmpdir } from 'os'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
+import {
+  assertSafeWireguardConfig,
+  assertSafeV2RayConfig,
+  sanitizeBypassRoutes,
+  extractWireguardEndpointHost,
+} from './config-guard'
 
 const WG_IFACE = 'sntl0'
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
@@ -233,7 +239,7 @@ function bringUpTun(): void {
   // Load split tunnel routes from settings
   const { loadSettings } = require('./settings') as typeof import('./settings')
   const settings = loadSettings()
-  const bypassRoutes = (settings.splitTunnelRoutes || []).join(',')
+  const bypassRoutes = sanitizeBypassRoutes(settings.splitTunnelRoutes).join(',')
 
   const args = ['tun-up', tun2socksBin, SOCKS_ADDR, remoteHost, defaultRoute.gateway, defaultRoute.iface]
   if (bypassRoutes) args.push(bypassRoutes)
@@ -371,6 +377,8 @@ export function connectV2Ray(v2ray: V2Ray): void {
 
   // Use SDK to write config, then spawn ourselves (SDK hardcodes V5 CLI syntax)
   const configFile = v2ray.writeConfig()
+  // Node-supplied config: reject log file-paths / non-loopback inbounds before spawn.
+  assertSafeV2RayConfig(JSON.parse(readFileSync(configFile, 'utf-8')))
   const child = spawnV2Ray(configFile)
 
   activeChild = child
@@ -401,6 +409,10 @@ export function connectWireGuard(wg: Wireguard): void {
     throw new Error('Failed to build WireGuard config')
   }
 
+  // Node operators are untrusted: reject any config carrying script-executing
+  // directives (PostUp/PreUp/…) before wg-quick runs it as root.
+  assertSafeWireguardConfig(configString)
+
   const configFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
   writeFileSync(configFile, configString, { mode: 0o600 })
 
@@ -420,6 +432,9 @@ export function connectWireGuardFromConfig(configString: string): void {
   if (isWireGuardUp()) {
     bringDownAllWireGuard()
   }
+
+  // Saved/reconnect configs are equally untrusted — guard before wg-quick (root).
+  assertSafeWireguardConfig(configString)
 
   const configFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
   writeFileSync(configFile, configString, { mode: 0o600 })
@@ -442,14 +457,16 @@ export function connectV2RayFromConfig(configString: string): void {
   }
 
   // Validate that configString is actual JSON, not a stale file path
+  let parsed: unknown
   try {
-    JSON.parse(configString)
+    parsed = JSON.parse(configString)
   } catch {
     throw new Error(
       'Invalid V2Ray config. This session was saved with an older version. ' +
       'Please end this session and create a new subscription.'
     )
   }
+  assertSafeV2RayConfig(parsed)
 
   writeFileSync(V2RAY_CONFIG, configString, { mode: 0o600 })
 
@@ -533,6 +550,23 @@ export function getV2RayError(): string {
 /** Get the V2Ray remote server IP from the active config */
 export function getV2RayRemoteHost(): string | null {
   return extractV2RayRemoteHost()
+}
+
+/**
+ * Get the WireGuard server endpoint IP from the active config, for whitelisting
+ * in the kill switch. Returns null for hostnames (the helper validates IPv4),
+ * which is strictly better than the old `0.0.0.0` placeholder that blocked the
+ * tunnel's own re-handshake.
+ */
+export function getWireGuardRemoteHost(): string | null {
+  try {
+    const configFile = activeConfigFile || join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
+    if (!existsSync(configFile)) return null
+    const host = extractWireguardEndpointHost(readFileSync(configFile, 'utf-8'))
+    return host && /^\d+\.\d+\.\d+\.\d+$/.test(host) ? host : null
+  } catch {
+    return null
+  }
 }
 
 /** Register a callback for unexpected V2Ray disconnection */

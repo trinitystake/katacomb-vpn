@@ -11,9 +11,16 @@ npm run preview      # Preview production build
 npm run dist         # Build + package for Linux (AppImage + deb)
 npm run dist:deb     # Build + package deb only
 npm run dist:appimage # Build + package AppImage only
+npm test             # Run unit tests (Node's built-in TS test runner, zero deps)
+npm run typecheck    # tsc --noEmit on both projects (must pass clean)
 ```
 
-No test framework is configured yet. No linter is configured yet.
+Tests use Node's native `--test` runner against `src/**/*.test.ts` (no Vitest/Jest,
+no extra dependency — Node 22+ strips TS types and runs the tests directly). Cover
+the pure security/IO helpers (`config-guard.ts`, `fs-utils.ts`). Test files are
+excluded from the build tsconfigs and import the module-under-test with a `.ts`
+extension (required by the native runner). No linter is configured; `tsc` is
+`strict` with `noUnusedLocals`/`noUnusedParameters` on.
 
 ## Architecture
 
@@ -33,7 +40,10 @@ Strict Electron security isolation with three process boundaries:
 - `settings.ts`: Multi-wallet store (`wallets/` dir with encrypted `.enc` files + `wallets-index.json`), app settings (`settings.json`), old single-wallet migration. Wallet entries have `id` (UUID), `name`, `address`.
 - `sentinel-service.ts`: `SigningSentinelClient` for on-chain tx (node subscription via `nodeStartSession`), session ID extraction from tx events, cryptographic handshake with nodes (WireGuard/V2Ray branching). Session configs saved to disk for reconnect.
 - `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled binaries (v2ray, tun2socks) verified via SHA-256 before use, with system PATH fallback.
-- `ipc-handlers.ts`: ~22 IPC channels, pre-connect balance validation, node list fetch from `api.sentnodes.com/v2/nodes` via `net.fetch`. Caches balance/sessions/nodes when VPN is active (RPC unreachable through tunnel).
+- `ipc-handlers.ts`: all IPC channels (registered via a `handle()` wrapper that rejects calls from any frame that isn't our own renderer), pre-connect balance validation, node list fetch from `api.sentnodes.com/v2/nodes` via `net.fetch`, auto-reconnect + a WireGuard liveness monitor. Caches balance/sessions/nodes when VPN is active (RPC unreachable through tunnel).
+- `config-guard.ts`: **pure validators for untrusted-node data** — `assertSafeWireguardConfig` (allow-list keys, reject `PostUp`/`PreUp`/… so a node config can't run shell as root via `wg-quick`), `assertSafeV2RayConfig`, `isAllowedBypassCidr`/`sanitizeBypassRoutes` (reject `0.0.0.0/x` split-tunnel routes), `extractWireguardEndpointHost`. Unit-tested; see the node-trust invariant below.
+- `fs-utils.ts`: `writeFileAtomic(path, data, mode=0o600)` (temp + rename). Use it for all settings/wallet/session/cache writes — never `writeFileSync` directly for persisted state.
+- `kill-switch.ts`: iptables-based kill switch (helper `killswitch-on`/`killswitch-off`); `traffic-stats.ts`, `node-tester.ts`, `plan-service.ts`/`provider-service.ts` and their `*-cache.ts`, `nodes-cache.ts` round out the main process.
 
 ### Privilege Escalation
 
@@ -41,8 +51,21 @@ VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a po
 - `resources/linux/sentinel-vpn-helper.sh` — installed to `/usr/local/bin/sentinel-vpn-helper`
 - `resources/linux/com.sentinel.dvpn.policy` — polkit policy for cached auth
 - `resources/linux/postinstall.sh` — deb postinstall that deploys the helper + policy
-- Helper commands: `up <config>`, `down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`
+- Helper commands: `up <config>`, `down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard interface name: `sntl0`. TUN interface: `sntl-tun`.
+
+### Node-trust invariant (critical — do not regress)
+
+**VPN node operators are adversaries in this app's threat model.** Their handshake
+data becomes WireGuard/V2Ray configs and split-tunnel routes that the polkit helper
+runs as **root** (`wg-quick`, `iptables`, `ip route`). A `wg-quick` config with a
+`PostUp = …` directive executes shell as root — so any code path that turns
+node-supplied (or renderer-supplied) data into a `.conf` / spawn / route MUST pass it
+through `config-guard.ts` first. `vpn-manager.ts` enforces this at the sinks
+(`connectWireGuard*`, `connectV2Ray*`, `bringUpTun`); never add a path that writes
+node-derived data to disk or hands it to the helper without a `config-guard` check.
+Likewise, tunnel credentials are only persisted when `safeStorage` is available —
+never fall back to writing them in plaintext.
 
 ### Vite Bundling (Critical)
 

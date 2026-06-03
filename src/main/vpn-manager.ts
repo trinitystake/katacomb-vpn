@@ -108,9 +108,14 @@ export function runPrivileged(args: string[]): void {
   if (!helperInstalled()) {
     throw new Error('VPN helper not installed. Please restart the app to set it up.')
   }
-  // Pass args as separate shell-escaped tokens — no shell interpolation
-  const escaped = args.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')
-  execSync(`pkexec ${HELPER_PATH} ${escaped}`, { stdio: 'pipe', timeout: 60000 })
+  // Invoke pkexec WITHOUT a shell (execFileSync, not execSync). execSync wraps
+  // the command in a throwaway `/bin/sh -c`, which becomes pkexec's parent — and
+  // polkit scopes the auth_admin_keep cache to that subject, so it dies the
+  // instant the call returns and every op re-prompts for the password. With
+  // execFileSync the parent is the long-lived Electron main process, so the
+  // cached authorization persists and repeated connect/disconnect ops don't
+  // re-prompt. (Passing argv directly also removes the manual shell escaping.)
+  execFileSync('pkexec', [HELPER_PATH, ...args], { stdio: 'pipe', timeout: 60000 })
 }
 
 /** Check if our Sentinel WireGuard interface (sntl0) is currently up */

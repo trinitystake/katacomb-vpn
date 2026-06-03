@@ -2,6 +2,8 @@
   "name": "sentinel-dvpn-app",
   "version": "0.1.0",
   "description": "Sentinel dVPN Desktop Client",
+  "author": "Sentinel <noreply@sentinel.co>",
+  "homepage": "https://sentinel.co",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

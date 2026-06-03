@@ -75,5 +75,3 @@ export const IPC = {
   NODES_UPDATE: 'nodes:update',
   PLAN_DISCOVER_PROGRESS: 'plan:discover:progress',
 } as const
-
-export type IPCChannel = (typeof IPC)[keyof typeof IPC]

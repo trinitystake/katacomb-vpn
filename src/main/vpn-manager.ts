@@ -1,9 +1,8 @@
 import { execSync, execFileSync, spawn, type ChildProcess } from 'child_process'
 import { createHash } from 'crypto'
-import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, mkdtempSync } from 'fs'
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 import {

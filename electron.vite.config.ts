@@ -38,6 +38,9 @@ export default defineConfig({
       }),
     ],
     build: {
+      // Never ship source maps in the packaged app (would expose full main
+      // source incl. wallet flow inside the AppImage/deb).
+      sourcemap: false,
       rollupOptions: {
         // ws optional native deps — must stay as runtime require() so they
         // gracefully no-op when not installed
@@ -47,6 +50,7 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
+    build: { sourcemap: false },
   },
   renderer: {
     resolve: {
@@ -58,5 +62,6 @@ export default defineConfig({
     css: {
       postcss: resolve(__dirname, 'postcss.config.js'),
     },
+    build: { sourcemap: false },
   },
 })

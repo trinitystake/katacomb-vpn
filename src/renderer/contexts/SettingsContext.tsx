@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react'
 import type { AppSettings } from '../types'
 
 interface SettingsContextValue {
@@ -27,11 +27,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return updated
   }, [])
 
-  return (
-    <SettingsContext.Provider value={{ settings, updateSettings, reload }}>
-      {children}
-    </SettingsContext.Provider>
+  const value = useMemo(
+    () => ({ settings, updateSettings, reload }),
+    [settings, updateSettings, reload],
   )
+
+  return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>
 }
 
 export function useSettings(): SettingsContextValue {

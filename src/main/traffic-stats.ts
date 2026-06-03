@@ -12,6 +12,17 @@ let prevRx = 0
 let prevTx = 0
 let prevTimestamp = 0
 
+/**
+ * Reset the speed baseline. Called on each (re)connect so the first sample of a
+ * new session/interface doesn't diff against the previous session's counters
+ * (which produced a bogus 0-speed reading for one interval — finding M10).
+ */
+export function resetTrafficStats(): void {
+  prevRx = 0
+  prevTx = 0
+  prevTimestamp = 0
+}
+
 /** Parse /proc/net/dev for a given interface, returning rx and tx bytes */
 function readProcNetDev(iface: string): { rx: number; tx: number } | null {
   try {

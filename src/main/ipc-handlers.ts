@@ -41,7 +41,7 @@ import {
 } from './vpn-manager'
 import { isAllowedBypassCidr } from './config-guard'
 import { enableKillSwitch, disableKillSwitch } from './kill-switch'
-import { getTrafficStats } from './traffic-stats'
+import { getTrafficStats, resetTrafficStats } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
@@ -138,6 +138,9 @@ function applySession(
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
 async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promise<void> {
+  // New interface/session — clear the speed baseline (finding M10).
+  resetTrafficStats()
+
   const settings = loadSettings()
 
   // Apply custom DNS

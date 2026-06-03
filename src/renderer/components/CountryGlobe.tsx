@@ -71,9 +71,14 @@ function makeColorFns(counts: Map<string, number>) {
 // We also pause immediately on window blur or tab/window hidden.
 const IDLE_PAUSE_MS = 1200
 
+// Parse the 436 KB GeoJSON once per process. The globe unmounts on every tab
+// switch, so without this cache it re-fetches + re-parses each time (finding L15).
+let cachedFeatures: Feature[] | null = null
+
 export default function CountryGlobe({ counts, onSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const globeRef = useRef<GlobeMethods | undefined>(undefined)
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const [features, setFeatures] = useState<Feature[]>([])
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
   // Hidden until onGlobeReady has fired and the initial camera is set,
@@ -102,13 +107,18 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     pauseTimerRef.current = setTimeout(doPause, IDLE_PAUSE_MS)
   }
 
-  // Load GeoJSON once
+  // Load GeoJSON once (cached at module level across remounts)
   useEffect(() => {
+    if (cachedFeatures) {
+      setFeatures(cachedFeatures)
+      return
+    }
     let cancelled = false
     fetch(geoUrl)
       .then((r) => r.json() as Promise<GeoJson>)
       .then((data) => {
-        if (!cancelled) setFeatures(data.features ?? [])
+        cachedFeatures = data.features ?? []
+        if (!cancelled) setFeatures(cachedFeatures)
       })
       .catch(() => {
         // silent — globe will render bare sphere
@@ -185,6 +195,19 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     () => new THREE.MeshPhongMaterial({ color: 0x0c0c10 }),
     [],
   )
+
+  // Free the WebGL context + app-owned material on unmount (tab switch). globe.gl
+  // disposes its own objects but never releases the GL context, so each remount
+  // would leak one until Chromium drops the oldest and the globe goes black
+  // (findings H8/M8).
+  useEffect(() => {
+    return () => {
+      const renderer = rendererRef.current
+      try { renderer?.forceContextLoss() } catch { /* ignore */ }
+      try { renderer?.dispose() } catch { /* ignore */ }
+      darkMatte.dispose()
+    }
+  }, [darkMatte])
 
   const { capColor, strokeColor } = useMemo(() => makeColorFns(counts), [counts])
 
@@ -288,6 +311,7 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
               if (renderer && typeof renderer.setPixelRatio === 'function') {
                 renderer.setPixelRatio(1)
               }
+              rendererRef.current = renderer
               g.pointOfView({ lat: 35, lng: 15, altitude: 2.2 }, 0)
               // Wait two animation frames before fading in: onGlobeReady
               // fires before the polygon meshes have actually rendered, so

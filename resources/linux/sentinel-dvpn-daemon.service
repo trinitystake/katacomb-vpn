@@ -1,0 +1,20 @@
+[Unit]
+Description=Sentinel dVPN privileged helper daemon
+Documentation=https://sentinel.co
+After=network.target
+
+[Service]
+Type=simple
+# Reuse the app's bundled Electron in Node mode — no separate Node runtime
+# dependency. /opt/sentinel-dvpn is a space-free symlink to "/opt/Sentinel dVPN"
+# created by the postinstall, so the ExecStart needs no quoting/escaping.
+Environment=ELECTRON_RUN_AS_NODE=1
+ExecStart=/opt/sentinel-dvpn/sentinel-dvpn /opt/sentinel-dvpn/resources/daemon/index.js
+# systemd creates/owns /run/sentinel-dvpn (where the daemon binds its socket).
+RuntimeDirectory=sentinel-dvpn
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

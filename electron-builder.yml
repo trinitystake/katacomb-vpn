@@ -5,6 +5,9 @@ directories:
   buildResources: build
 files:
   - out/**/*
+  # The daemon ships unbundled via extraResources (run by Electron-as-node from a
+  # real filesystem path); keep it out of the asar to avoid a confusing duplicate.
+  - "!out/daemon/**"
 extraResources:
   - from: resources/linux/
     to: linux/
@@ -15,6 +18,9 @@ extraResources:
     to: linux/v2ray/
     filter:
       - "**/*"
+  # Standalone root-daemon bundle → /opt/Sentinel dVPN/resources/daemon/index.js
+  - from: out/daemon/index.js
+    to: daemon/index.js
 linux:
   target:
     - AppImage
@@ -30,5 +36,7 @@ deb:
     - wireguard-tools
     - policykit-1
   afterInstall: resources/linux/postinstall.sh
+  beforeRemove: resources/linux/prerm.sh
+  afterRemove: resources/linux/postrm.sh
 appImage:
   artifactName: sentinel-dvpn-${version}.AppImage

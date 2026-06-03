@@ -6,6 +6,7 @@ import { is } from '@electron-toolkit/utils'
 import { registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection, isVpnActive } from './vpn-manager'
 import { listProviders } from './provider-service'
+import { isDaemonAvailable } from './daemon-client'
 
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
 const POLICY_PATH = '/usr/share/polkit-1/actions/com.sentinel.dvpn.policy'
@@ -214,7 +215,10 @@ function ensurePolkitSetup(): void {
 
 app.whenReady().then(() => {
   checkSystemDeps()
-  ensurePolkitSetup()
+  // The root daemon (deb install) handles privileged ops password-free, so the
+  // per-op polkit helper + its install prompt are only needed on the fallback
+  // path (AppImage / dev).
+  if (!isDaemonAvailable()) ensurePolkitSetup()
   detectExistingConnection()
   registerIpcHandlers()
   // Seed node cache from disk so the first window gets instant data via
@@ -239,10 +243,25 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => {
+let quitHandled = false
+app.on('before-quit', (e) => {
+  if (quitHandled) return
+  // Teardown is now async (it may round-trip to the root daemon), so defer the
+  // quit until it finishes — capped so an unresponsive daemon can't hang the
+  // exit. The kernel-resident kill switch/routes survive regardless.
+  e.preventDefault()
+  quitHandled = true
   stopNodeRefreshTimer()
-  cleanupOnQuit()
-  killAllTunnels()
+  void (async () => {
+    await Promise.race([
+      (async () => {
+        try { await cleanupOnQuit() } catch { /* best-effort */ }
+        try { await killAllTunnels() } catch { /* best-effort */ }
+      })(),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ])
+    app.exit(0)
+  })()
 })
 
 app.on('window-all-closed', () => {

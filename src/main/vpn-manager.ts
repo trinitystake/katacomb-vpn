@@ -1,5 +1,4 @@
 import { execSync, execFileSync, spawn, type ChildProcess } from 'child_process'
-import { createHash } from 'crypto'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -11,32 +10,14 @@ import {
   sanitizeBypassRoutes,
   extractWireguardEndpointHost,
 } from './config-guard'
+import { verifyBinaryIntegrity } from './binary-integrity'
+import { runPrivileged } from './privileged'
 
 const WG_IFACE = 'sntl0'
-const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
 
 // Create a private temp directory for config files (mode 0o700, not predictable)
 const SECURE_TMPDIR = mkdtempSync(join(tmpdir(), 'sentinel-dvpn-'))
 const V2RAY_CONFIG = join(SECURE_TMPDIR, 'v2ray.json')
-
-// SHA-256 hashes of bundled binaries (verified at download time)
-const BUNDLED_HASHES: Record<string, string> = {
-  v2ray: '751f52a3d9324c993953b7ebb6aab79e77115542a8ca1ef83078cb215c03dea8',
-  tun2socks: '42ce074a9a225825ef5e3f21b3657af7ed25187f7cd4e6d11e0646d5d166eb04',
-}
-
-/** Verify a bundled binary's SHA-256 hash matches the expected value */
-function verifyBinaryIntegrity(path: string, name: string): boolean {
-  const expected = BUNDLED_HASHES[name]
-  if (!expected) return true // no hash registered — skip check
-  try {
-    const data = readFileSync(path)
-    const actual = createHash('sha256').update(data).digest('hex')
-    return actual === expected
-  } catch {
-    return false
-  }
-}
 
 /**
  * Resolve path to a bundled binary, falling back to system PATH if absent.
@@ -99,25 +80,6 @@ export function isBinaryAvailable(name: string): boolean {
   return binaryExists(name)
 }
 
-function helperInstalled(): boolean {
-  return existsSync(HELPER_PATH)
-}
-
-/** Run a privileged command via the helper script (polkit cached) */
-export function runPrivileged(args: string[]): void {
-  if (!helperInstalled()) {
-    throw new Error('VPN helper not installed. Please restart the app to set it up.')
-  }
-  // Invoke pkexec WITHOUT a shell (execFileSync, not execSync). execSync wraps
-  // the command in a throwaway `/bin/sh -c`, which becomes pkexec's parent — and
-  // polkit scopes the auth_admin_keep cache to that subject, so it dies the
-  // instant the call returns and every op re-prompts for the password. With
-  // execFileSync the parent is the long-lived Electron main process, so the
-  // cached authorization persists and repeated connect/disconnect ops don't
-  // re-prompt. (Passing argv directly also removes the manual shell escaping.)
-  execFileSync('pkexec', [HELPER_PATH, ...args], { stdio: 'pipe', timeout: 60000 })
-}
-
 /** Check if our Sentinel WireGuard interface (sntl0) is currently up */
 export function isWireGuardUp(): boolean {
   try {
@@ -139,11 +101,11 @@ function isAnyWireGuardUp(): boolean {
 }
 
 /** Bring down ALL WireGuard interfaces — single password prompt via helper */
-function bringDownAllWireGuard(): void {
+async function bringDownAllWireGuard(): Promise<void> {
   if (!isAnyWireGuardUp()) return
 
   try {
-    runPrivileged(['down'])
+    await runPrivileged(['down'])
   } catch {
     // Best-effort
   }
@@ -156,9 +118,9 @@ function bringDownAllWireGuard(): void {
 }
 
 /** Bring up WireGuard from a config file path (must be named sntl0.conf) */
-function bringUpWireGuard(configFile: string): void {
+async function bringUpWireGuard(configFile: string): Promise<void> {
   try {
-    runPrivileged(['up', configFile])
+    await runPrivileged(['up', configFile])
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('dismissed') || msg.includes('cancelled') || msg.includes('Not authorized')) {
@@ -223,7 +185,7 @@ function getDefaultRoute(): { gateway: string; iface: string } | null {
  * The helper daemonizes tun2socks (nohup + detached stdio) so execSync returns immediately.
  * Polkit caches the auth so subsequent connects don't prompt for a password.
  */
-function bringUpTun(): void {
+async function bringUpTun(): Promise<void> {
   const tun2socksBin = resolveTun2Socks()
   if (tun2socksBin === 'tun2socks' && !binaryExists('tun2socks')) {
     throw new Error('tun2socks binary not found. The bundled binary is missing.')
@@ -249,7 +211,7 @@ function bringUpTun(): void {
   if (bypassRoutes) args.push(bypassRoutes)
 
   try {
-    runPrivileged(args)
+    await runPrivileged(args)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('dismissed') || msg.includes('cancelled') || msg.includes('Not authorized')) {
@@ -268,11 +230,11 @@ function bringUpTun(): void {
 }
 
 /** Bring down tun2socks TUN interface and restore routing */
-function bringDownTun(): void {
+async function bringDownTun(): Promise<void> {
   if (!tunActive && !isTunUp()) return
 
   try {
-    runPrivileged(['tun-down'])
+    await runPrivileged(['tun-down'])
   } catch {
     // Best-effort
   }
@@ -336,7 +298,7 @@ function spawnV2Ray(configFile: string): ChildProcess {
       console.error(`v2ray exited with code ${code}. output: ${v2rayStderr}`)
       // V2Ray died — tear down TUN interface too
       if (tunActive || isTunUp()) {
-        try { bringDownTun() } catch { /* best-effort */ }
+        bringDownTun().catch(() => { /* best-effort */ })
       }
       activeChild = null
       activeProtocol = null
@@ -365,11 +327,7 @@ export function detectExistingConnection(): void {
   // Check for stale tun2socks from a previous crash
   if (isTunUp() && !activeChild) {
     console.log('[startup] Stale TUN interface detected — cleaning up')
-    try {
-      bringDownTun()
-    } catch {
-      // Best-effort cleanup
-    }
+    bringDownTun().catch(() => { /* best-effort cleanup */ })
   }
 }
 
@@ -391,11 +349,11 @@ export function connectV2Ray(v2ray: V2Ray): void {
 }
 
 /** Bring up tun2socks after V2Ray is confirmed running — called from IPC handler */
-export function bringUpV2RayTunnel(): void {
-  bringUpTun()
+export async function bringUpV2RayTunnel(): Promise<void> {
+  await bringUpTun()
 }
 
-export function connectWireGuard(wg: Wireguard): void {
+export async function connectWireGuard(wg: Wireguard): Promise<void> {
   if (!binaryExists('wg-quick')) {
     throw new Error(
       'wg-quick not found in PATH. Install wireguard-tools: sudo apt install wireguard-tools'
@@ -403,7 +361,7 @@ export function connectWireGuard(wg: Wireguard): void {
   }
 
   if (isWireGuardUp()) {
-    bringDownAllWireGuard()
+    await bringDownAllWireGuard()
   }
 
   // Use buildConfigString and write to our own sntl0.conf instead of SDK's wgsent0.conf
@@ -420,13 +378,13 @@ export function connectWireGuard(wg: Wireguard): void {
   const configFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
   writeFileSync(configFile, configString, { mode: 0o600 })
 
-  bringUpWireGuard(configFile)
+  await bringUpWireGuard(configFile)
 
   activeProtocol = 'wireguard'
   activeConfigFile = configFile
 }
 
-export function connectWireGuardFromConfig(configString: string): void {
+export async function connectWireGuardFromConfig(configString: string): Promise<void> {
   if (!binaryExists('wg-quick')) {
     throw new Error(
       'wg-quick not found in PATH. Install wireguard-tools: sudo apt install wireguard-tools'
@@ -434,7 +392,7 @@ export function connectWireGuardFromConfig(configString: string): void {
   }
 
   if (isWireGuardUp()) {
-    bringDownAllWireGuard()
+    await bringDownAllWireGuard()
   }
 
   // Saved/reconnect configs are equally untrusted — guard before wg-quick (root).
@@ -444,7 +402,7 @@ export function connectWireGuardFromConfig(configString: string): void {
   writeFileSync(configFile, configString, { mode: 0o600 })
 
   try {
-    bringUpWireGuard(configFile)
+    await bringUpWireGuard(configFile)
   } catch (err) {
     if (existsSync(configFile)) unlinkSync(configFile)
     throw err
@@ -481,10 +439,10 @@ export function connectV2RayFromConfig(configString: string): void {
   activeConfigFile = V2RAY_CONFIG
 }
 
-export function disconnect(): void {
+export async function disconnect(): Promise<void> {
   // Tear down tun2socks TUN interface first (before killing V2Ray)
   if (tunActive || isTunUp()) {
-    bringDownTun()
+    await bringDownTun()
   }
 
   // Kill V2Ray process if running
@@ -497,7 +455,7 @@ export function disconnect(): void {
 
   // Bring down WireGuard interface
   if (activeProtocol === 'wireguard' || isWireGuardUp()) {
-    bringDownAllWireGuard()
+    await bringDownAllWireGuard()
   }
 
   // Clean up V2Ray config
@@ -611,10 +569,10 @@ export function detectOtherVpn(): { type: string; name: string; iface?: string }
   return found
 }
 
-export function killAllTunnels(): void {
+export async function killAllTunnels(): Promise<void> {
   // Tear down tun2socks first
   if (tunActive || isTunUp()) {
-    bringDownTun()
+    await bringDownTun()
   }
 
   if (activeChild && !activeChild.killed) {
@@ -622,7 +580,7 @@ export function killAllTunnels(): void {
   }
 
   if (isWireGuardUp()) {
-    bringDownAllWireGuard()
+    await bringDownAllWireGuard()
   }
 
   if (existsSync(V2RAY_CONFIG)) {

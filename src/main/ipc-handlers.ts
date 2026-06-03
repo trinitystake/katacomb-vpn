@@ -37,9 +37,9 @@ import {
   isWireGuardUp,
   binaryExists,
   isBinaryAvailable,
-  runPrivileged,
 } from './vpn-manager'
-import { isAllowedBypassCidr } from './config-guard'
+import { runPrivileged } from './privileged'
+import { isAllowedBypassCidr, isAllowedDnsResolver } from './config-guard'
 import { enableKillSwitch, disableKillSwitch } from './kill-switch'
 import { getTrafficStats, resetTrafficStats } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
@@ -146,7 +146,7 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   // Apply custom DNS
   if (settings.dnsResolver !== 'system') {
     try {
-      runPrivileged(['dns-set', settings.dnsResolver])
+      await runPrivileged(['dns-set', settings.dnsResolver])
     } catch (err) {
       console.error('Failed to set DNS:', err)
     }
@@ -161,7 +161,7 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
       // for WireGuard — see finding H2).
       const remoteHost = (protocol === 'wireguard' ? getWireGuardRemoteHost() : getV2RayRemoteHost()) || '0.0.0.0'
       const dnsIp = settings.dnsResolver !== 'system' ? settings.dnsResolver : undefined
-      enableKillSwitch(vpnIface, remoteHost, dnsIp)
+      await enableKillSwitch(vpnIface, remoteHost, dnsIp)
     } catch (err) {
       console.error('Failed to enable kill switch:', err)
     }
@@ -169,20 +169,20 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
 }
 
 /** Revert DNS and kill switch on disconnect */
-function revertPostConnectSettings(): void {
+async function revertPostConnectSettings(): Promise<void> {
   const settings = loadSettings()
 
   // Disable kill switch first (so DNS restore traffic can flow)
   if (settings.killSwitch) {
     try {
-      disableKillSwitch()
+      await disableKillSwitch()
     } catch { /* best-effort */ }
   }
 
   // Restore DNS
   if (settings.dnsResolver !== 'system') {
     try {
-      runPrivileged(['dns-restore'])
+      await runPrivileged(['dns-restore'])
     } catch { /* best-effort */ }
   }
 }
@@ -199,8 +199,8 @@ async function attemptReconnect(): Promise<void> {
     console.log('[reconnect] Max attempts reached, giving up')
     reconnectAttempt = 0
     // Don't strand the user behind a DROP-all kill switch / overridden DNS.
-    revertPostConnectSettings()
-    disconnect()
+    await revertPostConnectSettings()
+    await disconnect()
     stopWireGuardMonitor()
     activeProtocol = null
     sendStateChange('idle')
@@ -220,8 +220,8 @@ async function attemptReconnect(): Promise<void> {
       if (!saved) {
         console.log('[reconnect] No saved config, cannot reconnect')
         reconnectAttempt = 0
-        revertPostConnectSettings()
-        disconnect()
+        await revertPostConnectSettings()
+        await disconnect()
         stopWireGuardMonitor()
         activeProtocol = null
         sendStateChange('idle')
@@ -230,7 +230,7 @@ async function attemptReconnect(): Promise<void> {
 
       // Re-establish the tunnel
       if (saved.protocol === 'wireguard') {
-        connectWireGuardFromConfig(saved.configString)
+        await connectWireGuardFromConfig(saved.configString)
       } else {
         connectV2RayFromConfig(saved.configString)
         await new Promise((r) => setTimeout(r, 1500))
@@ -541,8 +541,8 @@ export function registerIpcHandlers(): void {
     }
     if (filtered.dnsResolver !== undefined) {
       assertString(filtered.dnsResolver, 'dnsResolver')
-      const validDns = ['system', '1.1.1.1', '1.0.0.1', '8.8.8.8', '9.9.9.9', '45.90.28.0']
-      if (!validDns.includes(filtered.dnsResolver as string)) {
+      const dns = filtered.dnsResolver as string
+      if (dns !== 'system' && !isAllowedDnsResolver(dns)) {
         throw new Error('Invalid DNS resolver')
       }
     }
@@ -716,9 +716,9 @@ export function registerIpcHandlers(): void {
     }
     if (params.protocol === 'wireguard') {
       if (activeWg) {
-        connectWireGuard(activeWg)
+        await connectWireGuard(activeWg)
       } else if (params.configString) {
-        connectWireGuardFromConfig(params.configString)
+        await connectWireGuardFromConfig(params.configString)
       } else {
         throw new Error('No WireGuard instance or config available')
       }
@@ -776,8 +776,8 @@ export function registerIpcHandlers(): void {
     reconnectAttempt = 0
 
     stopWireGuardMonitor()
-    revertPostConnectSettings()
-    disconnect()
+    await revertPostConnectSettings()
+    await disconnect()
     activeV2ray = null
     activeWg = null
     activeProtocol = null
@@ -1085,12 +1085,12 @@ export function registerIpcHandlers(): void {
   })
 }
 
-export function cleanupOnQuit(): void {
+export async function cleanupOnQuit(): Promise<void> {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
   stopWireGuardMonitor()
-  revertPostConnectSettings()
-  disconnect()
+  await revertPostConnectSettings()
+  await disconnect()
 }

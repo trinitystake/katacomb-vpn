@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useWallet } from './hooks/useWallet'
 import { useConnection } from './hooks/useConnection'
 import { useSessions } from './hooks/useSessions'
+import { useReconnect } from './hooks/useReconnect'
+import type { SessionInfo } from './types'
 import MnemonicInput from './components/MnemonicInput'
 import MapView from './components/MapView'
 import NodeTable from './components/NodeTable'
@@ -27,6 +29,22 @@ function AppInner() {
   const [showBinarySetup, setShowBinarySetup] = useState(true)
   const sessionsState = useSessions()
   const sessionCount = sessionsState.sessions.length
+  const reconnect = useReconnect()
+
+  // Tray "Connect": reconnect to the most recent session (main already showed the
+  // window). If there's none or it fails, the window is open for a manual connect.
+  useEffect(() => {
+    return window.api.onTrayConnect(async () => {
+      try {
+        const sessions = (await window.api.walletSessions()) as SessionInfo[]
+        if (!sessions?.length) return
+        const target = [...sessions].sort(
+          (a, b) => new Date(b.startAt || 0).getTime() - new Date(a.startAt || 0).getTime(),
+        )[0]
+        await reconnect(target)
+      } catch { /* window already shown for manual connect */ }
+    })
+  }, [reconnect])
 
   if (wallet.loading) {
     return (

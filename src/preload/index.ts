@@ -98,6 +98,16 @@ contextBridge.exposeInMainWorld('api', {
     }
   },
 
+  // Tray "Connect" → reconnect to the most recent session (renderer drives it
+  // so it reuses the same reconnect flow + error handling as the Session tab).
+  onTrayConnect: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC.CONNECTION_TRAY_CONNECT, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.CONNECTION_TRAY_CONNECT, handler)
+    }
+  },
+
   planDiscover: (maxId: number) => ipcRenderer.invoke(IPC.PLAN_DISCOVER, maxId),
   planListCached: () => ipcRenderer.invoke(IPC.PLAN_LIST_CACHED),
   planAllocations: () => ipcRenderer.invoke(IPC.PLAN_ALLOCATIONS),

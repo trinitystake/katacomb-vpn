@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useConnection } from '../hooks/useConnection'
 import { usePlans } from '../hooks/usePlans'
 import { useTrafficStats } from '../hooks/useTrafficStats'
+import { useReconnect } from '../hooks/useReconnect'
 import Spinner from './Spinner'
 import type { SessionInfo } from '../types'
 
@@ -53,6 +54,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   const [error, setError] = useState<string | null>(null)
   const { status, refresh: refreshConnection } = useConnection()
   const { allocations } = usePlans()
+  const reconnect = useReconnect()
   const vpnConnected = status.state === 'connected'
   // Live interface counter (bytes used this session). The on-chain session
   // counters are frozen while connected (RPC is unreachable through the tunnel)
@@ -63,28 +65,10 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   async function handleReconnect(session: SessionInfo) {
     setBusy(session.id)
     setError(null)
-
-    try {
-      const res = await window.api.connectionReconnect({
-        sessionId: session.id,
-      })
-
-      await window.api.connectionConnect({
-        protocol: res.protocol as 'wireguard' | 'v2ray',
-        configString: res.configString,
-      })
-
-      await refreshConnection()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Reconnection failed'
-      if (msg.includes('No saved config')) {
-        setError(`Session #${session.id}: No saved tunnel config. You can end this session to free it, then create a new subscription.`)
-      } else {
-        setError(msg)
-      }
-    } finally {
-      setBusy(null)
-    }
+    const result = await reconnect(session)
+    if (!result.ok) setError(result.error || 'Reconnection failed')
+    else await refreshConnection()
+    setBusy(null)
   }
 
   async function handleEndSession(session: SessionInfo) {

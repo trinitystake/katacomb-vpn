@@ -22,6 +22,21 @@ export function resetTrafficStats(): void {
   prevTimestamp = 0
 }
 
+/**
+ * Return the larger of two byte-count strings (non-numeric/empty → 0). Used to
+ * merge a session's on-chain counter with the usage we measured live during the
+ * last connect: after disconnect the chain lags, so we keep showing whichever is
+ * bigger. Once the chain settles (>= the remembered value) it wins automatically,
+ * so there's no double-counting.
+ */
+export function maxUsageBytes(a: string, b: string): string {
+  const na = parseInt(a, 10)
+  const nb = parseInt(b, 10)
+  const va = isNaN(na) ? 0 : na
+  const vb = isNaN(nb) ? 0 : nb
+  return String(Math.max(va, vb))
+}
+
 /** Parse one interface's rx/tx bytes out of /proc/net/dev content (rx=field 1, tx=field 9). */
 export function parseProcNetDev(content: string, iface: string): { rx: number; tx: number } | null {
   for (const line of content.split('\n')) {

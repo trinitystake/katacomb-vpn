@@ -28,6 +28,14 @@ extraResources:
   # Standalone root-daemon bundle → /opt/Sentinel dVPN/resources/daemon/index.js
   - from: out/daemon/index.js
     to: daemon/index.js
+  # App icons → resources/icons/ so the tray (getIconPath in main) can load them
+  # at runtime. `linux.icon` below only sets the launcher/desktop icon; it is NOT
+  # a path readable via nativeImage.createFromPath, so without this copy the tray
+  # icon renders as a broken-image triangle in the packaged app.
+  - from: build/icons/
+    to: icons/
+    filter:
+      - "**/*"
 linux:
   target:
     - AppImage

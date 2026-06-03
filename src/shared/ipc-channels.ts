@@ -71,6 +71,8 @@ export const IPC = {
   CONNECTION_PROGRESS: 'connection:progress',
   CONNECTION_STATE_CHANGE: 'connection:state-change',
   CONNECTION_RECONNECTING: 'connection:reconnecting',
+  // Tray "Connect" → ask the renderer to reconnect to the most recent session.
+  CONNECTION_TRAY_CONNECT: 'connection:tray-connect',
   NODE_TEST_PROGRESS: 'node-test:progress',
   NODES_UPDATE: 'nodes:update',
   PLAN_DISCOVER_PROGRESS: 'plan:discover:progress',

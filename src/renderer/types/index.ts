@@ -292,6 +292,7 @@ export interface ElectronAPI {
   onConnectionProgress: (callback: (step: string, detail: string) => void) => () => void
   onConnectionStateChange: (callback: (state: string) => void) => () => void
   onConnectionReconnecting: (callback: (attempt: number, maxAttempts: number) => void) => () => void
+  onTrayConnect: (callback: () => void) => () => void
 }
 
 declare global {

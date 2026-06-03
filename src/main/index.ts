@@ -3,10 +3,14 @@ import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
-import { registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer } from './ipc-handlers'
-import { killAllTunnels, detectExistingConnection, isVpnActive } from './vpn-manager'
+import {
+  registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer,
+  performDisconnect, onConnectionStateChanged, getConnectionInfo, type ConnectionInfo,
+} from './ipc-handlers'
+import { killAllTunnels, detectExistingConnection } from './vpn-manager'
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
+import { IPC } from '../shared/ipc-channels'
 
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
 const POLICY_PATH = '/usr/share/polkit-1/actions/com.sentinel.dvpn.policy'
@@ -21,24 +25,59 @@ function getIconPath(filename: string): string {
     : join(process.resourcesPath, 'icons', filename)
 }
 
-function createTrayIcon(): void {
-  const icon = nativeImage.createFromPath(getIconPath('32x32.png'))
-  tray = new Tray(icon)
-  tray.setToolTip('Sentinel dVPN — Disconnected')
+function showWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    return
+  }
+  mainWindow.show()
+  mainWindow.focus()
+}
 
-  updateTrayMenu()
+/** Tray "Connect": show the window and let the renderer reconnect to the last session. */
+function triggerTrayConnect(): void {
+  showWindow()
+  mainWindow?.webContents.send(IPC.CONNECTION_TRAY_CONNECT)
+}
 
-  tray.on('click', () => {
-    mainWindow?.show()
-    mainWindow?.focus()
+function showAbout(): void {
+  const aboutIcon = nativeImage.createFromPath(getIconPath('256x256.png'))
+  dialog.showMessageBox({
+    type: 'info',
+    title: 'About Sentinel dVPN',
+    message: 'Sentinel dVPN',
+    detail: `Version ${app.getVersion()}\n\nDecentralized VPN client for the Sentinel network.\n\nhttps://sentinel.co`,
+    icon: aboutIcon.isEmpty() ? undefined : aboutIcon,
+    buttons: ['OK'],
   })
 }
 
-function updateTrayMenu(): void {
+function createTrayIcon(): void {
+  // 32x32 is the tray size; fall back to 256 if that file is somehow empty so we
+  // never construct a Tray with a blank image (the broken-image triangle).
+  let icon = nativeImage.createFromPath(getIconPath('32x32.png'))
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(getIconPath('256x256.png'))
+  tray = new Tray(icon)
+  tray.on('click', () => showWindow())
+  refreshTray(getConnectionInfo())
+}
+
+/** Rebuild the tray tooltip + context menu to reflect the current connection state. */
+function refreshTray(info: ConnectionInfo): void {
   if (!tray) return
+  const connected = info.state === 'connected'
+  const where = info.nodeMoniker ? ` (${info.nodeMoniker})` : ''
+
+  tray.setToolTip(connected ? `Sentinel dVPN — Connected${where}` : 'Sentinel dVPN — Disconnected')
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Show Window', click: () => { mainWindow?.show(); mainWindow?.focus() } },
+    { label: connected ? `Connected${where}` : 'Disconnected', enabled: false },
+    { type: 'separator' },
+    connected
+      ? { label: 'Disconnect', click: () => { void performDisconnect() } }
+      : { label: 'Connect', click: () => triggerTrayConnect() },
+    { label: 'Show Window', click: () => showWindow() },
+    { label: 'About', click: () => showAbout() },
     { type: 'separator' },
     { label: 'Quit', click: () => { forceQuit = true; app.quit() } },
   ])
@@ -70,29 +109,11 @@ function createWindow(): void {
 
   mainWindow.on('close', (e) => {
     if (forceQuit) return // Allow quit (from tray menu or app.quit())
-
-    if (isVpnActive()) {
-      e.preventDefault()
-
-      const choice = dialog.showMessageBoxSync(mainWindow!, {
-        type: 'question',
-        title: 'VPN is Active',
-        message: 'You are currently connected to a dVPN node. What would you like to do?',
-        buttons: ['Disconnect & Quit', 'Minimize to Tray', 'Cancel'],
-        defaultId: 2,
-        cancelId: 2,
-      })
-
-      if (choice === 0) {
-        // Disconnect & Quit
-        forceQuit = true
-        app.quit()
-      } else if (choice === 1) {
-        // Minimize to tray
-        mainWindow?.hide()
-      }
-      // choice === 2: Cancel — do nothing
-    }
+    // Closing the window always minimizes to the tray; the app keeps running so
+    // the tray Connect/Disconnect menu stays available. Real quit = tray "Quit"
+    // (sets forceQuit), whose before-quit handler tears down any active tunnel.
+    e.preventDefault()
+    mainWindow?.hide()
   })
 
   // Never open a new window; hand only web/mail links to the OS browser.
@@ -227,6 +248,9 @@ app.whenReady().then(() => {
   startNodeRefreshTimer()
   createWindow()
   createTrayIcon()
+  // Keep the tray tooltip + menu in sync with connect/disconnect (incl. from the
+  // renderer, auto-reconnect, or the tray itself).
+  onConnectionStateChanged(refreshTray)
 
   // Background prefetch so the Plans tab feels instant on first open.
   // Safely returns cached data if VPN is already active.
@@ -265,10 +289,8 @@ app.on('before-quit', (e) => {
 })
 
 app.on('window-all-closed', () => {
-  // Don't quit if VPN is active and user chose to minimize to tray
-  if (!isVpnActive()) {
-    app.quit()
-  }
+  // No-op: the app lives in the tray (closing the window only hides it). Quitting
+  // is done explicitly via the tray "Quit" item, which sets forceQuit + app.quit().
 })
 
 export { mainWindow }

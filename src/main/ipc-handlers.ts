@@ -41,7 +41,7 @@ import {
 import { runPrivileged } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver } from './config-guard'
 import { enableKillSwitch, disableKillSwitch } from './kill-switch'
-import { getTrafficStats, resetTrafficStats } from './traffic-stats'
+import { getTrafficStats, resetTrafficStats, maxUsageBytes } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
@@ -60,6 +60,12 @@ let activeNodeInfo: { address: string; moniker: string; country: string; type: 1
 let lastKnownBalance: { denom: string; amount: string }[] = []
 let lastKnownSessions: unknown[] = []
 let cachedNodes: { address: string; moniker: string; country: string }[] = []
+
+// Per-session usage measured live during the last connect (on-chain baseline +
+// interface bytes). After disconnect the on-chain counter lags, so WALLET_SESSIONS
+// shows max(onChain, remembered) to keep the Session tab from collapsing to ~0
+// until the chain settles. In-memory only (resets on app restart).
+const lastSessionUsage = new Map<string, { downloadBytes: string; uploadBytes: string }>()
 
 // Shared in-memory cache for the full node list. Seeded from disk on startup,
 // refreshed on a 60s timer in main, broadcast to all renderer windows on update.
@@ -110,10 +116,34 @@ function stopWireGuardMonitor(): void {
   }
 }
 
+// Main-process listeners (e.g. the tray) for connection-state changes. Mirrors
+// the onV2RayUnexpectedExit pattern: ipc-handlers owns the state and notifies on
+// change — callers register a listener rather than us reaching into their module.
+export interface ConnectionInfo {
+  state: 'connected' | 'idle'
+  nodeMoniker?: string
+  nodeCountry?: string
+}
+let connectionStateListener: ((info: ConnectionInfo) => void) | null = null
+
+export function onConnectionStateChanged(cb: (info: ConnectionInfo) => void): void {
+  connectionStateListener = cb
+}
+
+/** Current connection info, for seeding the tray at startup. */
+export function getConnectionInfo(): ConnectionInfo {
+  return {
+    state: getConnectionStatus().connected ? 'connected' : 'idle',
+    nodeMoniker: activeNodeInfo?.moniker,
+    nodeCountry: activeNodeInfo?.country,
+  }
+}
+
 function sendStateChange(state: 'connected' | 'idle'): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.CONNECTION_STATE_CHANGE, state)
   }
+  connectionStateListener?.({ state, nodeMoniker: activeNodeInfo?.moniker, nodeCountry: activeNodeInfo?.country })
 }
 
 function sendReconnecting(attempt: number, maxAttempts: number): void {
@@ -185,6 +215,51 @@ async function revertPostConnectSettings(): Promise<void> {
       await runPrivileged(['dns-restore'])
     } catch { /* best-effort */ }
   }
+}
+
+/**
+ * Snapshot the active session's usage (on-chain baseline + live interface bytes)
+ * before the interface is torn down, so WALLET_SESSIONS keeps showing it while
+ * the chain catches up. Must run while the tunnel is still up.
+ */
+function rememberSessionUsage(): void {
+  if (!activeSessionId) return
+  const live = getTrafficStats()
+  const baseline = (lastKnownSessions as { id: string; downloadBytes?: string; uploadBytes?: string }[])
+    .find((s) => s?.id === activeSessionId)
+  const baseDown = parseInt(baseline?.downloadBytes || '0', 10) || 0
+  const baseUp = parseInt(baseline?.uploadBytes || '0', 10) || 0
+  lastSessionUsage.set(activeSessionId, {
+    downloadBytes: String(baseDown + live.rxBytes),
+    uploadBytes: String(baseUp + live.txBytes),
+  })
+}
+
+/**
+ * Tear down the active tunnel and revert DNS/kill-switch. Exported so the tray
+ * can disconnect via the same path as the IPC handler (single source of truth
+ * for the state cleanup). Broadcasts 'idle', which also refreshes the tray.
+ */
+export async function performDisconnect(): Promise<void> {
+  isIntentionalDisconnect = true
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  reconnectAttempt = 0
+
+  rememberSessionUsage()
+
+  stopWireGuardMonitor()
+  await revertPostConnectSettings()
+  await disconnect()
+  activeV2ray = null
+  activeWg = null
+  activeProtocol = null
+  activeSessionId = null
+  activeNodeInfo = null
+  isIntentionalDisconnect = false
+  sendStateChange('idle')
 }
 
 /** Attempt auto-reconnection using saved session config */
@@ -450,12 +525,17 @@ export function registerIpcHandlers(): void {
         try { await fetchNodes() } catch { /* best-effort */ }
       }
       const sessions = await getActiveSessions()
-      // Enrich sessions with node metadata from saved configs or node cache
+      // Enrich sessions with node metadata from saved configs or node cache, and
+      // bridge the post-disconnect gap: show max(onChain, last-measured) so usage
+      // doesn't collapse to ~0 while the chain settles (see lastSessionUsage).
       const enriched = sessions.map((s) => {
         const saved = loadSessionConfig(s.id)
         const nodeMeta = getNodeMeta(s.nodeAddress)
+        const remembered = lastSessionUsage.get(s.id)
         return {
           ...s,
+          downloadBytes: remembered ? maxUsageBytes(s.downloadBytes, remembered.downloadBytes) : s.downloadBytes,
+          uploadBytes: remembered ? maxUsageBytes(s.uploadBytes, remembered.uploadBytes) : s.uploadBytes,
           nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker,
           nodeCountry: saved?.nodeCountry || nodeMeta.country,
         }
@@ -768,23 +848,7 @@ export function registerIpcHandlers(): void {
 
   // Connection: Disconnect
   handle(IPC.CONNECTION_DISCONNECT, async () => {
-    isIntentionalDisconnect = true
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer)
-      reconnectTimer = null
-    }
-    reconnectAttempt = 0
-
-    stopWireGuardMonitor()
-    await revertPostConnectSettings()
-    await disconnect()
-    activeV2ray = null
-    activeWg = null
-    activeProtocol = null
-    activeSessionId = null
-    activeNodeInfo = null
-    isIntentionalDisconnect = false
-    sendStateChange('idle')
+    await performDisconnect()
   })
 
   // Connection: Status

@@ -8,6 +8,11 @@ TUN_IFACE="sntl-tun"
 TUN_ADDR="198.18.0.1/15"
 RUN_DIR="/run/sentinel-dvpn"
 STATE_FILE="${RUN_DIR}/tun.state"
+# Persistent (non-tmpfs) state. Only the resolv.conf backup lives here: it must
+# survive a crash/reboot-while-connected so DNS can be restored to the user's
+# original (a tmpfs backup would be wiped while the static /etc/resolv.conf the
+# helper wrote survives on disk, stranding DNS on the tunnel resolver).
+PERSIST_DIR="/var/lib/sentinel-dvpn"
 
 # --- Input validation helpers ---
 
@@ -97,6 +102,46 @@ ensure_run_dir() {
     chmod 700 "$RUN_DIR"
     chown root:root "$RUN_DIR"
   fi
+}
+
+# Ensure the persistent state directory exists (survives reboot).
+ensure_persist_dir() {
+  if [[ ! -d "$PERSIST_DIR" ]]; then
+    mkdir -p "$PERSIST_DIR"
+    chmod 700 "$PERSIST_DIR"
+    chown root:root "$PERSIST_DIR"
+  fi
+}
+
+# --- IPv6 kill switch ---
+# The tunnel, the VPN server, and the DNS resolver are all IPv4, so the correct
+# fail-closed behaviour for IPv6 is to permit it ONLY out loopback and the VPN
+# interface (so v6 carried inside the tunnel still works) and drop every other
+# v6 egress — closing the native-IPv6 real-IP leak that an IPv4-only kill switch
+# leaves open. Best-effort: skipped when ip6tables is unavailable (IPv6-disabled
+# host) and never allowed to abort the IPv4 kill switch (callers use `|| ...`).
+CHAIN6="SENTINEL_KILLSWITCH6"
+
+ipv6_available() {
+  command -v ip6tables >/dev/null 2>&1 && ip6tables -S >/dev/null 2>&1
+}
+
+ipv6_killswitch_off() {
+  ip6tables -D OUTPUT -j "$CHAIN6" 2>/dev/null || true
+  ip6tables -F "$CHAIN6" 2>/dev/null || true
+  ip6tables -X "$CHAIN6" 2>/dev/null || true
+}
+
+ipv6_killswitch_on() {
+  local vpn_iface="$1"
+  ipv6_killswitch_off
+  # &&-chained so a partial failure short-circuits and the caller can clean up.
+  ip6tables -N "$CHAIN6" &&
+  ip6tables -A "$CHAIN6" -o lo -j ACCEPT &&
+  ip6tables -A "$CHAIN6" -o "$vpn_iface" -j ACCEPT &&
+  ip6tables -A "$CHAIN6" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT &&
+  ip6tables -A "$CHAIN6" -j DROP &&
+  ip6tables -A OUTPUT -j "$CHAIN6"
 }
 
 case "${1:-}" in
@@ -226,10 +271,13 @@ case "${1:-}" in
     iptables -A "$CHAIN" -d "$REMOTE_HOST/32" -j ACCEPT
     # Allow DHCP client
     iptables -A "$CHAIN" -p udp --dport 67:68 -j ACCEPT
-    # Allow DNS to configured resolver
+    # Allow DNS to the configured resolver ONLY through the tunnel. Scoping to
+    # the VPN interface stops plaintext DNS from egressing the physical NIC
+    # during a tunnel-down window (it is already covered by the "-o $VPN_IFACE"
+    # accept above; the explicit rule documents the intent and the scope).
     if [[ -n "$DNS_IP" ]]; then
-      iptables -A "$CHAIN" -d "$DNS_IP/32" -p udp --dport 53 -j ACCEPT
-      iptables -A "$CHAIN" -d "$DNS_IP/32" -p tcp --dport 53 -j ACCEPT
+      iptables -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p udp --dport 53 -j ACCEPT
+      iptables -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p tcp --dport 53 -j ACCEPT
     fi
     # Allow established/related connections (for the tunnel itself)
     iptables -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -238,6 +286,12 @@ case "${1:-}" in
 
     # Insert jump rule
     iptables -A OUTPUT -j "$CHAIN"
+
+    # IPv6: no v6 server/DNS to whitelist, so block all native v6 egress except
+    # loopback + the tunnel. Best-effort — must never abort the IPv4 kill switch.
+    if ipv6_available; then
+      ipv6_killswitch_on "$VPN_IFACE" || { ipv6_killswitch_off; echo "Warning: IPv6 kill switch setup failed; IPv4 kill switch active" >&2; }
+    fi
 
     # Save state
     ensure_run_dir
@@ -250,42 +304,62 @@ case "${1:-}" in
     iptables -D OUTPUT -j "$CHAIN" 2>/dev/null || true
     iptables -F "$CHAIN" 2>/dev/null || true
     iptables -X "$CHAIN" 2>/dev/null || true
+    # Tear down the IPv6 kill switch too — unconditional: ipv6_killswitch_off is
+    # fully `|| true`-guarded (incl. a missing ip6tables binary), so it's a safe
+    # no-op when nothing was installed, and it can't be skipped if ip6tables
+    # availability transiently flips between connect and disconnect.
+    ipv6_killswitch_off
     rm -f "${RUN_DIR}/killswitch.state"
     ;;
   dns-set)
-    # Set DNS resolver — backs up current resolv.conf
+    # Route DNS through the tunnel: point the system resolver directly at $DNS_IP
+    # (which routes via the VPN interface) by replacing /etc/resolv.conf. This is
+    # resolver-manager-agnostic (systemd-resolved / resolvconf / NetworkManager)
+    # and — unlike the old `resolvectl --interface=all` path, which was invalid and
+    # silently no-op'd — guarantees queries go to $DNS_IP, not a LAN resolver the
+    # kill switch drops. Only used for V2Ray; WireGuard's DNS is owned by wg-quick.
+    #
+    # The prior resolv.conf is snapshotted ONCE per session for an exact restore:
+    # the file/symlink via `cp -P`, or — if there was none — a sentinel marker so
+    # dns-restore returns to the no-file state. The new file is written via a temp
+    # file on the SAME filesystem + atomic rename, so there is never a window with
+    # no /etc/resolv.conf.
     DNS_IP="${2:-}"
     validate_ipv4 "$DNS_IP"
+    ensure_persist_dir
 
-    ensure_run_dir
-
-    # Check if systemd-resolved is running
-    if command -v resolvectl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-      # Use resolvectl for systemd-resolved systems
-      # Save current DNS for restore
-      resolvectl dns 2>/dev/null > "${RUN_DIR}/dns-backup.resolved" || true
-      # Set global DNS
-      resolvectl dns --interface=all "$DNS_IP" 2>/dev/null || true
-    else
-      # Direct resolv.conf modification
-      if [[ ! -f "${RUN_DIR}/resolv.conf.bak" ]]; then
-        cp /etc/resolv.conf "${RUN_DIR}/resolv.conf.bak"
-        chmod 600 "${RUN_DIR}/resolv.conf.bak"
+    BAK="${PERSIST_DIR}/resolv.conf.bak"
+    NONE_MARKER="${PERSIST_DIR}/resolv.conf.none"
+    TMP="/etc/.resolv.conf.sntl-tmp"
+    if [[ ! -e "$BAK" && ! -L "$BAK" && ! -e "$NONE_MARKER" ]]; then
+      if [[ -e /etc/resolv.conf || -L /etc/resolv.conf ]]; then
+        cp -P /etc/resolv.conf "$BAK"
+      else
+        : > "$NONE_MARKER"
       fi
-      echo "nameserver $DNS_IP" > /etc/resolv.conf
     fi
+    printf 'nameserver %s\n' "$DNS_IP" > "$TMP"
+    chmod 644 "$TMP"
+    mv -f "$TMP" /etc/resolv.conf
     ;;
   dns-restore)
-    # Restore original DNS configuration
-    if command -v resolvectl &>/dev/null && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-      # Restart systemd-resolved to restore defaults
-      systemctl restart systemd-resolved 2>/dev/null || true
-      rm -f "${RUN_DIR}/dns-backup.resolved"
-    else
-      if [[ -f "${RUN_DIR}/resolv.conf.bak" ]]; then
-        cp "${RUN_DIR}/resolv.conf.bak" /etc/resolv.conf
-        rm -f "${RUN_DIR}/resolv.conf.bak"
+    # Restore the resolv.conf captured by dns-set — the file/symlink, or the
+    # no-file state. Copy to a temp on the same filesystem then atomically rename
+    # so a copy failure never leaves the host with no resolver. Idempotent no-op
+    # when there's nothing to restore.
+    BAK="${PERSIST_DIR}/resolv.conf.bak"
+    NONE_MARKER="${PERSIST_DIR}/resolv.conf.none"
+    TMP="/etc/.resolv.conf.sntl-tmp"
+    if [[ -e "$BAK" || -L "$BAK" ]]; then
+      # No `2>/dev/null`: a copy failure should surface to the daemon log rather
+      # than silently leaving resolv.conf pinned to the tunnel resolver.
+      if cp -P "$BAK" "$TMP"; then
+        mv -f "$TMP" /etc/resolv.conf
+        rm -f "$BAK"
       fi
+    elif [[ -e "$NONE_MARKER" ]]; then
+      rm -f /etc/resolv.conf
+      rm -f "$NONE_MARKER"
     fi
     ;;
   tun-down)

@@ -51,11 +51,20 @@ const NODES_API = 'https://api.sentnodes.com/v2/nodes'
 const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
 const PUBLIC_RPC_TTL_MS = 60_000
 const RECONNECT_MAX_ATTEMPTS = 5
+// The kill switch drops any DNS that isn't tunnel-routed, so when it's on we
+// need a resolver reachable through the tunnel. A 'system' resolver is usually a
+// LAN/systemd-resolved address that won't route through the tunnel — fall back to
+// this public resolver (in ALLOWED_DNS_RESOLVERS; reached via the tunnel, so the
+// node sees its IP, not yours).
+const DEFAULT_KILLSWITCH_DNS = '1.1.1.1'
 
 let activeWg: Wireguard | null = null
 let activeV2ray: V2Ray | null = null
 let activeSessionId: string | null = null
 let activeNodeInfo: { address: string; moniker: string; country: string; type: 1 | 2; v2raySummary?: string } | null = null
+// True when the user enabled the kill switch but arming it failed — surfaced to
+// the renderer so "protected" is never silently a lie.
+let killSwitchFailed = false
 
 // Cached values returned when VPN is active and RPC is unreachable
 let lastKnownBalance: { denom: string; amount: string }[] = []
@@ -219,13 +228,32 @@ async function handshakeWithPolicy(
 async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promise<void> {
   // New interface/session — clear the speed baseline (finding M10).
   resetTrafficStats()
+  killSwitchFailed = false
 
   const settings = loadSettings()
 
-  // Apply custom DNS
-  if (settings.dnsResolver !== 'system') {
+  // DNS handling differs by protocol:
+  // - WireGuard: wg-quick already manages /etc/resolv.conf (sets the node's
+  //   tunnel-routed DNS and restores the original on `wg-quick down`), and the
+  //   kill switch allows DNS out the WG interface. We must NOT touch resolv.conf
+  //   here — doing so would snapshot wg-quick's version and strand DNS on the node
+  //   resolver after disconnect.
+  // - V2Ray: tun2socks does no DNS setup, so we point the resolver through the
+  //   tunnel ourselves. Under the kill switch a 'system'/LAN resolver isn't
+  //   tunnel-routed (the kill switch drops it), so force a public resolver.
+  const v2rayDnsIp =
+    protocol !== 'v2ray'
+      ? null
+      : settings.dnsResolver !== 'system'
+        ? settings.dnsResolver
+        : settings.killSwitch
+          ? DEFAULT_KILLSWITCH_DNS
+          : null
+
+  // Apply DNS override (routes V2Ray DNS through the tunnel via /etc/resolv.conf)
+  if (v2rayDnsIp) {
     try {
-      await runPrivileged(['dns-set', settings.dnsResolver])
+      await runPrivileged(['dns-set', v2rayDnsIp])
     } catch (err) {
       console.error('Failed to set DNS:', err)
     }
@@ -239,31 +267,34 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
       // while the kill switch is engaged (was hardcoded to a useless 0.0.0.0
       // for WireGuard — see finding H2).
       const remoteHost = (protocol === 'wireguard' ? getWireGuardRemoteHost() : getV2RayRemoteHost()) || '0.0.0.0'
-      const dnsIp = settings.dnsResolver !== 'system' ? settings.dnsResolver : undefined
+      const dnsIp = v2rayDnsIp ?? undefined
       await enableKillSwitch(vpnIface, remoteHost, dnsIp)
     } catch (err) {
       console.error('Failed to enable kill switch:', err)
+      // Don't silently leave the user thinking they're protected — flag it so
+      // the renderer can warn. The connection itself is intentionally not torn
+      // down (a transient daemon hiccup shouldn't drop a working tunnel).
+      killSwitchFailed = true
     }
   }
 }
 
 /** Revert DNS and kill switch on disconnect */
 async function revertPostConnectSettings(): Promise<void> {
-  const settings = loadSettings()
+  killSwitchFailed = false
 
-  // Disable kill switch first (so DNS restore traffic can flow)
-  if (settings.killSwitch) {
-    try {
-      await disableKillSwitch()
-    } catch { /* best-effort */ }
-  }
-
-  // Restore DNS
-  if (settings.dnsResolver !== 'system') {
-    try {
-      await runPrivileged(['dns-restore'])
-    } catch { /* best-effort */ }
-  }
+  // Tear both down UNCONDITIONALLY, regardless of the current settings: the user
+  // may have toggled the kill switch / DNS off mid-session via SETTINGS_SET, but
+  // if they were on at connect time the iptables chain and the resolv.conf
+  // override are still installed. Both helper verbs are idempotent no-ops when
+  // there's nothing to undo, so unconditional teardown is safe and can't strand
+  // the user behind a stale kill switch or a pinned resolv.conf. Kill switch
+  // first, so DNS-restore traffic can flow. (disableKillSwitch swallows its own
+  // errors.)
+  await disableKillSwitch()
+  try {
+    await runPrivileged(['dns-restore'])
+  } catch { /* best-effort */ }
 }
 
 /**
@@ -927,6 +958,7 @@ export function registerIpcHandlers(): void {
       nodeCountry: activeNodeInfo?.country,
       nodeType: activeNodeInfo?.type,
       v2raySummary: activeNodeInfo?.v2raySummary,
+      killSwitchFailed: killSwitchFailed || undefined,
       sessionId: activeSessionId,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,

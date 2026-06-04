@@ -98,6 +98,7 @@ export interface ConnectionStatus {
   nodeCountry?: string
   nodeType?: 1 | 2
   v2raySummary?: string
+  killSwitchFailed?: boolean
   sessionId?: string
   error?: string
   reconnectAttempt?: number

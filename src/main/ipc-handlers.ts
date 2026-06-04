@@ -41,7 +41,7 @@ import {
 } from './vpn-manager'
 import { runPrivileged } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver } from './config-guard'
-import { enableKillSwitch, disableKillSwitch } from './kill-switch'
+import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
@@ -301,6 +301,21 @@ async function revertPostConnectSettings(): Promise<void> {
   try {
     await runPrivileged(['dns-restore'])
   } catch { /* best-effort */ }
+}
+
+/**
+ * On startup, clear a kill-switch chain stranded by a crash/OOM mid-teardown (the
+ * chain otherwise keeps dropping all traffic with the tunnel down — no internet
+ * even after "disconnect"). Gated on the armed marker (so clean launches never
+ * touch root / prompt) AND on no active connection (so we never strip the chain
+ * while a tunnel legitimately persisted across a restart — getConnectionStatus is
+ * true only for a live WG interface or running V2Ray child, not a stale tun).
+ * revertPostConnectSettings is idempotent and clears the marker on success.
+ */
+export async function healStrandedKillSwitch(): Promise<void> {
+  if (isKillSwitchArmed() && !getConnectionStatus().connected) {
+    await revertPostConnectSettings()
+  }
 }
 
 /**

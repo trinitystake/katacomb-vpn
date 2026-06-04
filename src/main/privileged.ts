@@ -9,14 +9,22 @@
 
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
-import { isDaemonAvailable, daemonRequest } from './daemon-client'
+import { isDaemonAvailable, daemonRequest, DaemonUnreachableError } from './daemon-client'
 
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
 
 export async function runPrivileged(args: string[]): Promise<void> {
   if (isDaemonAvailable()) {
-    await runViaDaemon(args)
-    return
+    try {
+      await runViaDaemon(args)
+      return
+    } catch (err) {
+      // Only fall back to pkexec when the daemon is unreachable (dead process,
+      // stale socket after an OOM/crash). A live daemon that *rejected* the op
+      // (validation failure) must propagate — never silently retry it as root.
+      if (!(err instanceof DaemonUnreachableError)) throw err
+      // fall through to the pkexec path below with the same args
+    }
   }
   if (!existsSync(HELPER_PATH)) {
     throw new Error('VPN helper not installed. Please restart the app to set it up.')

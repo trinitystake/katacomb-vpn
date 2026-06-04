@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
 import {
   registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer,
-  performDisconnect, onConnectionStateChanged, getConnectionInfo, type ConnectionInfo,
+  performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
 import { listProviders } from './provider-service'
@@ -241,6 +241,9 @@ app.whenReady().then(() => {
   // path (AppImage / dev).
   if (!isDaemonAvailable()) ensurePolkitSetup()
   detectExistingConnection()
+  // If a previous run left a kill-switch chain stranded (crash/OOM mid-teardown),
+  // clear it now that we know we're not connected. Fire-and-forget, best-effort.
+  void healStrandedKillSwitch().catch(() => { /* best-effort self-heal */ })
   registerIpcHandlers()
   // Seed node cache from disk so the first window gets instant data via
   // nodesGetCached(), then start the 60s background refresh loop.

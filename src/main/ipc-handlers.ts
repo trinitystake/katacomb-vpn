@@ -20,7 +20,7 @@ import { getV2RayClassifications, rememberV2RayClass } from './v2ray-class-cache
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
-import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet } from './settings'
+import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, type AppSettings } from './settings'
 import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
 import {
   connectV2Ray,
@@ -57,6 +57,19 @@ const RECONNECT_MAX_ATTEMPTS = 5
 // this public resolver (in ALLOWED_DNS_RESOLVERS; reached via the tunnel, so the
 // node sees its IP, not yours).
 const DEFAULT_KILLSWITCH_DNS = '1.1.1.1'
+
+/**
+ * The resolver IP to apply for a V2Ray connection, or null for no override
+ * (System Default with the kill switch off). Single source of truth shared by the
+ * connect path (DoH injection into the v2ray config) and applyPostConnectSettings
+ * (resolv.conf override + the kill-switch DNS allowance). A chosen resolver becomes
+ * DoH inside v2ray (see withV2RayDoH); 'system' stays plaintext unless the kill
+ * switch forces a public fallback.
+ */
+function effectiveV2RayResolverIp(settings: AppSettings): string | null {
+  if (settings.dnsResolver !== 'system') return settings.dnsResolver
+  return settings.killSwitch ? DEFAULT_KILLSWITCH_DNS : null
+}
 
 let activeWg: Wireguard | null = null
 let activeV2ray: V2Ray | null = null
@@ -241,14 +254,7 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   // - V2Ray: tun2socks does no DNS setup, so we point the resolver through the
   //   tunnel ourselves. Under the kill switch a 'system'/LAN resolver isn't
   //   tunnel-routed (the kill switch drops it), so force a public resolver.
-  const v2rayDnsIp =
-    protocol !== 'v2ray'
-      ? null
-      : settings.dnsResolver !== 'system'
-        ? settings.dnsResolver
-        : settings.killSwitch
-          ? DEFAULT_KILLSWITCH_DNS
-          : null
+  const v2rayDnsIp = protocol === 'v2ray' ? effectiveV2RayResolverIp(settings) : null
 
   // Apply DNS override (routes V2Ray DNS through the tunnel via /etc/resolv.conf)
   if (v2rayDnsIp) {
@@ -387,7 +393,7 @@ async function attemptReconnect(): Promise<void> {
       if (saved.protocol === 'wireguard') {
         await connectWireGuardFromConfig(saved.configString)
       } else {
-        connectV2RayFromConfig(saved.configString)
+        connectV2RayFromConfig(saved.configString, effectiveV2RayResolverIp(loadSettings()))
         await new Promise((r) => setTimeout(r, 1500))
         const status = getConnectionStatus()
         if (!status.connected) {
@@ -902,10 +908,13 @@ export function registerIpcHandlers(): void {
     }
 
     if (params.protocol === 'v2ray') {
+      // Resolve the DoH resolver up front so it's injected into the v2ray config
+      // (same value applyPostConnectSettings uses for resolv.conf + kill switch).
+      const dohIp = effectiveV2RayResolverIp(loadSettings())
       if (activeV2ray) {
-        connectV2Ray(activeV2ray)
+        connectV2Ray(activeV2ray, dohIp)
       } else if (params.configString) {
-        connectV2RayFromConfig(params.configString)
+        connectV2RayFromConfig(params.configString, dohIp)
       } else {
         throw new Error('No V2Ray instance or config available')
       }

@@ -12,6 +12,7 @@ import {
   filterV2RayMetadata,
   isAllCleartext,
   v2raySecurityBadge,
+  withV2RayDoH,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -245,4 +246,81 @@ test('filterV2RayMetadata does not mutate its input array', () => {
   const snapshot = JSON.parse(JSON.stringify(input))
   filterV2RayMetadata(input)
   assert.deepEqual(input, snapshot)
+})
+
+// --- V2Ray DNS-over-HTTPS injection ---
+//
+// Shaped like the SDK's generated config: a tagged SOCKS "proxy" inbound, a node
+// outbound, and a leastping balancer reached by an inboundTag:["proxy"] rule.
+const SDK_V2RAY = {
+  log: { loglevel: 'none' },
+  inbounds: [
+    { protocol: 'dokodemo-door', listen: '127.0.0.1', port: 12345, tag: 'api' },
+    { protocol: 'socks', listen: '127.0.0.1', port: 1080, settings: { udp: true }, tag: 'proxy' },
+  ],
+  outbounds: [
+    { protocol: 'vmess', settings: { vnext: [{ address: '203.0.113.7', port: 443 }] }, tag: 'node-0' },
+  ],
+  routing: {
+    domainStrategy: 'IPIfNonMatch',
+    balancers: [{ tag: 'balancer', selector: ['node'] }],
+    rules: [
+      { type: 'field', inboundTag: ['api'], outboundTag: 'api' },
+      { type: 'field', inboundTag: ['proxy'], balancerTag: 'balancer' },
+    ],
+  },
+}
+
+test('withV2RayDoH injects a DoH dns block for a known resolver (Quad9)', () => {
+  const out = withV2RayDoH(SDK_V2RAY, '9.9.9.9') as any
+  assert.deepEqual(out.dns.servers, ['https://dns.quad9.net/dns-query'])
+  assert.deepEqual(out.dns.hosts, { 'dns.quad9.net': ['9.9.9.9', '149.112.112.112'] })
+  assert.equal(out.dns.queryStrategy, 'UseIPv4') // TUN is v4-only
+  assert.equal(out.dns.tag, 'dns-module')
+})
+
+test('withV2RayDoH adds the built-in dns outbound and keeps the node outbound first', () => {
+  const out = withV2RayDoH(SDK_V2RAY, '9.9.9.9') as any
+  assert.equal(out.outbounds[0].tag, 'node-0') // default (first) outbound unchanged → tunnelled
+  assert.deepEqual(out.outbounds[out.outbounds.length - 1], { protocol: 'dns', tag: 'dns-out' })
+})
+
+test('withV2RayDoH prepends the port-53 intercept BEFORE the proxy catch-all', () => {
+  const out = withV2RayDoH(SDK_V2RAY, '9.9.9.9') as any
+  // Rule order is load-bearing: client DNS must be caught before the balancer rule.
+  assert.deepEqual(out.routing.rules[0], { type: 'field', inboundTag: ['proxy'], port: 53, outboundTag: 'dns-out' })
+  assert.deepEqual(out.routing.rules[1], { type: 'field', inboundTag: ['dns-module'], balancerTag: 'balancer' })
+  // original rules preserved after the injected ones
+  assert.deepEqual(out.routing.rules.slice(2), SDK_V2RAY.routing.rules)
+})
+
+test('withV2RayDoH maps both Cloudflare IPs to the same DoH host', () => {
+  const out = withV2RayDoH(SDK_V2RAY, '1.0.0.1') as any
+  assert.deepEqual(out.dns.servers, ['https://cloudflare-dns.com/dns-query'])
+  assert.deepEqual(out.dns.hosts, { 'cloudflare-dns.com': ['1.1.1.1', '1.0.0.1'] })
+})
+
+test('withV2RayDoH returns the config unchanged for system/unknown resolver', () => {
+  assert.equal(withV2RayDoH(SDK_V2RAY, 'system'), SDK_V2RAY)
+  assert.equal(withV2RayDoH(SDK_V2RAY, '8.8.4.4'), SDK_V2RAY) // not in the DoH map
+})
+
+test('withV2RayDoH falls back to the first outbound tag when there is no balancer', () => {
+  const noBalancer = {
+    outbounds: [{ protocol: 'vmess', tag: 'node-0' }],
+    routing: { rules: [{ type: 'field', inboundTag: ['proxy'], outboundTag: 'node-0' }] },
+  }
+  const out = withV2RayDoH(noBalancer, '9.9.9.9') as any
+  assert.deepEqual(out.routing.rules[1], { type: 'field', inboundTag: ['dns-module'], outboundTag: 'node-0' })
+})
+
+test('withV2RayDoH does not mutate input and output passes the security guard', () => {
+  const input = JSON.parse(JSON.stringify(SDK_V2RAY))
+  const out = withV2RayDoH(input, '9.9.9.9')
+  // input untouched (pure)
+  assert.equal('dns' in input, false)
+  assert.equal(input.outbounds.length, 1)
+  assert.equal(input.routing.rules.length, 2)
+  // injected DoH config is still safe to spawn
+  assert.doesNotThrow(() => assertSafeV2RayConfig(out))
 })

@@ -276,7 +276,9 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
                   ))}
                 </select>
                 <p className="text-text-tertiary text-xs">
-                  Applied when VPN connects. Prevents DNS leaks to your ISP.
+                  Applied when VPN connects. Prevents DNS leaks to your ISP. On V2Ray
+                  nodes, a chosen resolver is queried over encrypted DNS (DoH), so the
+                  node can't see your lookups. System Default stays plaintext.
                 </p>
               </div>
 

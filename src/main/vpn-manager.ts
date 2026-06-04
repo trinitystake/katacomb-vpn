@@ -9,6 +9,7 @@ import {
   assertSafeWireguardConfig,
   assertSafeV2RayConfig,
   withV2RayDiagnosticLog,
+  withV2RayDoH,
   pinV2RayNodeAddresses,
   sanitizeBypassRoutes,
   extractWireguardEndpointHost,
@@ -356,7 +357,7 @@ export function detectExistingConnection(): void {
   }
 }
 
-export function connectV2Ray(v2ray: V2Ray): void {
+export function connectV2Ray(v2ray: V2Ray, dohResolverIp?: string | null): void {
   const bin = resolveV2RayBinary()
   if (bin === 'v2ray' && !binaryExists('v2ray')) {
     throw new Error('v2ray binary not found. The bundled binary is missing and no system v2ray is installed.')
@@ -373,7 +374,11 @@ export function connectV2Ray(v2ray: V2Ray): void {
     resolveHostToIPv4,
   )
   assertSafeV2RayConfig(cfg)
-  writeFileSync(configFile, JSON.stringify(cfg, null, 2), { mode: 0o600 })
+  // After validating the node-supplied config, inject our DoH block (trusted,
+  // derived only from the allow-listed resolver IP) so OS DNS is re-resolved over
+  // HTTPS inside v2ray and tunnelled to the node — the node never sees the query.
+  const finalCfg = dohResolverIp ? withV2RayDoH(cfg, dohResolverIp) : cfg
+  writeFileSync(configFile, JSON.stringify(finalCfg, null, 2), { mode: 0o600 })
   const child = spawnV2Ray(configFile)
 
   activeChild = child
@@ -445,7 +450,7 @@ export async function connectWireGuardFromConfig(configString: string): Promise<
   activeConfigFile = configFile
 }
 
-export function connectV2RayFromConfig(configString: string): void {
+export function connectV2RayFromConfig(configString: string, dohResolverIp?: string | null): void {
   const bin = resolveV2RayBinary()
   if (bin === 'v2ray' && !binaryExists('v2ray')) {
     throw new Error('v2ray binary not found. The bundled binary is missing and no system v2ray is installed.')
@@ -463,8 +468,10 @@ export function connectV2RayFromConfig(configString: string): void {
   }
   const cfg = pinV2RayNodeAddresses(withV2RayDiagnosticLog(parsed), resolveHostToIPv4)
   assertSafeV2RayConfig(cfg)
+  // Inject DoH after validation (trusted, allow-listed resolver only) — see connectV2Ray.
+  const finalCfg = dohResolverIp ? withV2RayDoH(cfg, dohResolverIp) : cfg
 
-  writeFileSync(V2RAY_CONFIG, JSON.stringify(cfg, null, 2), { mode: 0o600 })
+  writeFileSync(V2RAY_CONFIG, JSON.stringify(finalCfg, null, 2), { mode: 0o600 })
 
   const child = spawnV2Ray(V2RAY_CONFIG)
 

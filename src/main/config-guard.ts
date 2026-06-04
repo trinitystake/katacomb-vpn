@@ -232,6 +232,94 @@ export function assertSafeV2RayConfig(config: unknown): void {
   }
 }
 
+/**
+ * DoH endpoints for each resolver the app allows, keyed by the plaintext resolver
+ * IP the user picks (a subset of ALLOWED_DNS_RESOLVERS). Each entry pairs a
+ * hostname URL (so v2ray validates the TLS certificate against a real name) with
+ * the resolver's IPs pinned in `hosts` — the same "pin so v2ray never re-resolves
+ * through the tunnel" trick as pinV2RayNodeAddresses, which avoids a DNS bootstrap
+ * deadlock (resolving the DoH host would itself need DNS). Resolvers absent here
+ * fall back to plaintext (the caller leaves the config untouched).
+ */
+export const DOH_ENDPOINTS: Record<string, { url: string; host: string; ips: string[] }> = {
+  '1.1.1.1': { url: 'https://cloudflare-dns.com/dns-query', host: 'cloudflare-dns.com', ips: ['1.1.1.1', '1.0.0.1'] },
+  '1.0.0.1': { url: 'https://cloudflare-dns.com/dns-query', host: 'cloudflare-dns.com', ips: ['1.1.1.1', '1.0.0.1'] },
+  '8.8.8.8': { url: 'https://dns.google/dns-query', host: 'dns.google', ips: ['8.8.8.8', '8.8.4.4'] },
+  '9.9.9.9': { url: 'https://dns.quad9.net/dns-query', host: 'dns.quad9.net', ips: ['9.9.9.9', '149.112.112.112'] },
+  '45.90.28.0': { url: 'https://dns.nextdns.io/dns-query', host: 'dns.nextdns.io', ips: ['45.90.28.0', '45.90.30.0'] },
+}
+
+/**
+ * Inject DNS-over-HTTPS into a parsed V2Ray config so the exit node sees only an
+ * opaque HTTPS connection to the resolver, never the plaintext domain. Returns a
+ * new config (pure — input untouched). If `resolverIp` isn't a known DoH endpoint
+ * (e.g. 'system'), the config is returned unchanged → plaintext fallback.
+ *
+ * The mechanism lives entirely inside the v2ray process: a built-in `dns` outbound
+ * answers the OS's UDP-53 queries (forwarded in by tun2socks) using the DoH server
+ * in the `dns` block; that DoH request, tagged `dns-module`, is itself routed
+ * through the node's balancer so it's tunnelled. Two rules are *prepended* — the
+ * port-53 intercept MUST precede the SDK's `inboundTag:["proxy"]` catch-all or DNS
+ * would be proxied raw (plaintext) instead of re-resolved over DoH.
+ */
+export function withV2RayDoH(config: unknown, resolverIp: string): unknown {
+  if (config === null || typeof config !== 'object') return config
+  const endpoint = DOH_ENDPOINTS[resolverIp]
+  if (!endpoint) return config
+
+  const cfg = { ...(config as Record<string, unknown>) }
+
+  const routing = (cfg.routing && typeof cfg.routing === 'object' && !Array.isArray(cfg.routing))
+    ? { ...(cfg.routing as Record<string, unknown>) }
+    : {}
+  const rules = Array.isArray(routing.rules) ? routing.rules : []
+
+  // Where the DNS module's own DoH egress should go: the same balancer the proxy
+  // inbound uses (so DoH is tunnelled through the node), falling back to the first
+  // balancer, then the first outbound. If none can be found we add no egress rule
+  // and let it fall through to the default (first) outbound, which is the node.
+  const tagOf = (o: unknown): string | null =>
+    o !== null && typeof o === 'object' && typeof (o as Record<string, unknown>).tag === 'string'
+      ? ((o as Record<string, unknown>).tag as string)
+      : null
+  let egress: Record<string, unknown> | null = null
+  const proxyRule = rules.find((r) =>
+    r !== null && typeof r === 'object' &&
+    Array.isArray((r as Record<string, unknown>).inboundTag) &&
+    ((r as Record<string, unknown>).inboundTag as unknown[]).includes('proxy') &&
+    typeof (r as Record<string, unknown>).balancerTag === 'string',
+  ) as Record<string, unknown> | undefined
+  if (proxyRule) {
+    egress = { balancerTag: proxyRule.balancerTag }
+  } else if (Array.isArray(routing.balancers) && tagOf(routing.balancers[0])) {
+    egress = { balancerTag: tagOf(routing.balancers[0]) }
+  } else if (Array.isArray(cfg.outbounds) && tagOf(cfg.outbounds[0])) {
+    egress = { outboundTag: tagOf(cfg.outbounds[0]) }
+  }
+
+  // Resolve via DoH; pin the resolver host to its IPs (no bootstrap lookup).
+  // UseIPv4 because the tun2socks TUN is v4-only — AAAA answers would be
+  // unroutable / leak-prone.
+  cfg.dns = {
+    hosts: { [endpoint.host]: endpoint.ips },
+    servers: [endpoint.url],
+    queryStrategy: 'UseIPv4',
+    tag: 'dns-module',
+  }
+
+  const outbounds = Array.isArray(cfg.outbounds) ? [...cfg.outbounds] : []
+  cfg.outbounds = [...outbounds, { protocol: 'dns', tag: 'dns-out' }]
+
+  const newRules: unknown[] = [
+    { type: 'field', inboundTag: ['proxy'], port: 53, outboundTag: 'dns-out' },
+  ]
+  if (egress) newRules.push({ type: 'field', inboundTag: ['dns-module'], ...egress })
+  routing.rules = [...newRules, ...rules]
+  cfg.routing = routing
+
+  return cfg
+}
+
 // --- V2Ray inbound encryption policy ---
 //
 // A node's handshake offers one or more inbounds, each with a proxy protocol

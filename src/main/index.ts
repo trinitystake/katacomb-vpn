@@ -30,8 +30,18 @@ function showWindow(): void {
     createWindow()
     return
   }
+  if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
   mainWindow.focus()
+}
+
+/** Tray left-click: toggle the window — hide it if it's showing, otherwise show it. */
+function toggleWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
+    mainWindow.hide()
+    return
+  }
+  showWindow()
 }
 
 /** Tray "Connect": show the window and let the renderer reconnect to the last session. */
@@ -58,7 +68,7 @@ function createTrayIcon(): void {
   let icon = nativeImage.createFromPath(getIconPath('32x32.png'))
   if (icon.isEmpty()) icon = nativeImage.createFromPath(getIconPath('256x256.png'))
   tray = new Tray(icon)
-  tray.on('click', () => showWindow())
+  tray.on('click', () => toggleWindow())
   refreshTray(getConnectionInfo())
 }
 

@@ -15,7 +15,8 @@ import {
   getPrivKey,
   logout,
 } from './wallet'
-import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession } from './sentinel-service'
+import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
+import { getV2RayClassifications, rememberV2RayClass } from './v2ray-class-cache'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
@@ -54,7 +55,7 @@ const RECONNECT_MAX_ATTEMPTS = 5
 let activeWg: Wireguard | null = null
 let activeV2ray: V2Ray | null = null
 let activeSessionId: string | null = null
-let activeNodeInfo: { address: string; moniker: string; country: string; type: 1 | 2 } | null = null
+let activeNodeInfo: { address: string; moniker: string; country: string; type: 1 | 2; v2raySummary?: string } | null = null
 
 // Cached values returned when VPN is active and RPC is unreachable
 let lastKnownBalance: { denom: string; amount: string }[] = []
@@ -158,12 +159,60 @@ function applySession(
   nodeMoniker: string,
   nodeCountry: string,
   nodeType: 1 | 2,
-  result: { wgInstance: Wireguard | null; v2rayInstance: V2Ray | null },
+  result: { wgInstance: Wireguard | null; v2rayInstance: V2Ray | null; v2raySummary?: string },
 ): void {
   activeSessionId = sessionId
-  activeNodeInfo = { address: nodeAddress, moniker: nodeMoniker, country: nodeCountry, type: nodeType }
+  activeNodeInfo = { address: nodeAddress, moniker: nodeMoniker, country: nodeCountry, type: nodeType, v2raySummary: result.v2raySummary }
   activeWg = result.wgInstance
   activeV2ray = result.v2rayInstance
+}
+
+/**
+ * Run the node handshake with the V2Ray encryption policy enforced. If the node
+ * offers ONLY cleartext (VLess-none) inbounds, performHandshake throws before
+ * any tunnel is brought up; here we auto-cancel the just-created session (refund)
+ * and surface a clear message instead of connecting unencrypted. Either way we
+ * remember the learned protocol/security badge for the node list. `isDeposit`
+ * tailors the refund wording (a direct session locks a deposit; a plan session
+ * draws on a prepaid allocation).
+ */
+async function handshakeWithPolicy(
+  hsParams: Parameters<typeof performHandshake>[0],
+  ctx: {
+    wallet: NonNullable<ReturnType<typeof getWallet>>
+    address: string
+    sessionId: string
+    nodeAddress: string
+    nodeMoniker: string
+    isDeposit: boolean
+  },
+): Promise<Awaited<ReturnType<typeof performHandshake>>> {
+  let result: Awaited<ReturnType<typeof performHandshake>>
+  try {
+    result = await performHandshake(hsParams)
+  } catch (err) {
+    if (err instanceof V2RayPolicyError) {
+      rememberV2RayClass(ctx.nodeAddress, err.badge)
+      let refunded = false
+      try {
+        await endSession({ wallet: ctx.wallet, address: ctx.address, sessionId: ctx.sessionId })
+        refunded = true
+      } catch (refundErr) {
+        console.error('[policy] auto-cancel of rejected session failed:', refundErr)
+      }
+      const okNote = ctx.isDeposit ? ' and your deposit refunded' : ''
+      throw new Error(
+        refunded
+          ? `Node "${ctx.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting. The session was cancelled${okNote}.`
+          : `Node "${ctx.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting. Could not auto-cancel the session — open the Session tab and cancel session #${ctx.sessionId} manually.`,
+      )
+    }
+    throw err
+  }
+  if (result.protocol === 'v2ray' && result.v2raySummary) {
+    rememberV2RayClass(ctx.nodeAddress, result.v2raySummary)
+  }
+  return result
 }
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
@@ -655,6 +704,11 @@ export function registerIpcHandlers(): void {
     return nodesMemoryCache
   })
 
+  // Remembered V2Ray protocol/security badge per node (learned at handshake).
+  handle(IPC.NODES_V2RAY_CLASS, async () => {
+    return getV2RayClassifications()
+  })
+
   handle(IPC.RPC_LIST, async () => {
     return fetchPublicRpcs()
   })
@@ -715,16 +769,20 @@ export function registerIpcHandlers(): void {
     // Resolve remote URL
     const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
 
-    // Perform handshake
-    const result = await performHandshake({
-      sessionId,
-      nodeAddress: params.nodeAddress,
-      nodeType: params.nodeType,
-      remoteUrl,
-      privKey,
-      nodeMoniker: params.nodeMoniker,
-      nodeCountry: params.nodeCountry,
-    })
+    // Perform handshake (enforces the V2Ray encryption policy: rejects a
+    // VLess-none-only node and auto-cancels the session for a refund).
+    const result = await handshakeWithPolicy(
+      {
+        sessionId,
+        nodeAddress: params.nodeAddress,
+        nodeType: params.nodeType,
+        remoteUrl,
+        privKey,
+        nodeMoniker: params.nodeMoniker,
+        nodeCountry: params.nodeCountry,
+      },
+      { wallet, address, sessionId, nodeAddress: params.nodeAddress, nodeMoniker: params.nodeMoniker, isDeposit: true },
+    )
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
@@ -826,8 +884,15 @@ export function registerIpcHandlers(): void {
       const status = getConnectionStatus()
       if (!status.connected) {
         const errMsg = getV2RayError()
+        // When replaying a saved config (reconnect), a failure to start usually
+        // means the node changed its configuration (e.g. switched protocols) or
+        // went offline since the config was saved — point the user at the fix.
+        const fromSavedConfig = !activeV2ray && !!params.configString
+        const hint = fromSavedConfig
+          ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
+          : ''
         throw new Error(
-          'V2Ray process exited immediately after starting.' +
+          'V2Ray process exited immediately after starting.' + hint +
           (errMsg ? `\n\nV2Ray error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
         )
       }
@@ -861,6 +926,7 @@ export function registerIpcHandlers(): void {
       nodeMoniker: activeNodeInfo?.moniker,
       nodeCountry: activeNodeInfo?.country,
       nodeType: activeNodeInfo?.type,
+      v2raySummary: activeNodeInfo?.v2raySummary,
       sessionId: activeSessionId,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,
@@ -1030,15 +1096,18 @@ export function registerIpcHandlers(): void {
 
     const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
 
-    const result = await performHandshake({
-      sessionId,
-      nodeAddress: params.nodeAddress,
-      nodeType: params.nodeType,
-      remoteUrl,
-      privKey,
-      nodeMoniker: params.nodeMoniker,
-      nodeCountry: params.nodeCountry,
-    })
+    const result = await handshakeWithPolicy(
+      {
+        sessionId,
+        nodeAddress: params.nodeAddress,
+        nodeType: params.nodeType,
+        remoteUrl,
+        privKey,
+        nodeMoniker: params.nodeMoniker,
+        nodeCountry: params.nodeCountry,
+      },
+      { wallet, address, sessionId, nodeAddress: params.nodeAddress, nodeMoniker: params.nodeMoniker, isDeposit: false },
+    )
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
@@ -1080,15 +1149,18 @@ export function registerIpcHandlers(): void {
 
     const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
 
-    const result = await performHandshake({
-      sessionId,
-      nodeAddress: params.nodeAddress,
-      nodeType: params.nodeType,
-      remoteUrl,
-      privKey,
-      nodeMoniker: params.nodeMoniker,
-      nodeCountry: params.nodeCountry,
-    })
+    const result = await handshakeWithPolicy(
+      {
+        sessionId,
+        nodeAddress: params.nodeAddress,
+        nodeType: params.nodeType,
+        remoteUrl,
+        privKey,
+        nodeMoniker: params.nodeMoniker,
+        nodeCountry: params.nodeCountry,
+      },
+      { wallet, address, sessionId, nodeAddress: params.nodeAddress, nodeMoniker: params.nodeMoniker, isDeposit: false },
+    )
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 

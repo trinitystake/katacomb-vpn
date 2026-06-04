@@ -97,6 +97,7 @@ export interface ConnectionStatus {
   nodeMoniker?: string
   nodeCountry?: string
   nodeType?: 1 | 2
+  v2raySummary?: string
   sessionId?: string
   error?: string
   reconnectAttempt?: number
@@ -235,6 +236,7 @@ export interface ElectronAPI {
 
   nodesFetch: () => Promise<SentNode[]>
   nodesGetCached: () => Promise<{ nodes: SentNode[]; fetchedAt: number } | null>
+  nodesV2RayClass: () => Promise<Record<string, { badge: string; classifiedAt: number }>>
   onNodesUpdate: (callback: (nodes: SentNode[]) => void) => () => void
   networkGetIp: (includeGeo?: boolean) => Promise<IpInfo>
 

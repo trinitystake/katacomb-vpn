@@ -6,9 +6,11 @@
  * `ip route` (also root). These functions reject anything outside a strict
  * allow-list before it reaches those sinks.
  *
- * No Electron/Node-fs imports here — kept pure so it is unit-testable in
- * isolation (see config-guard.test.ts).
+ * No Electron/Node-fs (or runtime SDK) imports here — kept pure so it is
+ * unit-testable in isolation (see config-guard.test.ts). The single SDK import
+ * is type-only (erased at runtime), so the module stays dependency-free.
  */
+import type { V2RayMetadata } from '@sentinel-official/sentinel-js-sdk'
 
 // WireGuard keys we accept. Anything else (notably the script-executing
 // PostUp/PreUp/PostDown/PreDown, plus Table/SaveConfig/FwMark) is rejected.
@@ -228,4 +230,69 @@ export function assertSafeV2RayConfig(config: unknown): void {
       }
     }
   }
+}
+
+// --- V2Ray inbound encryption policy ---
+//
+// A node's handshake offers one or more inbounds, each with a proxy protocol
+// (VMess/VLess) and transport security (TLS/none). The genuinely-unsafe combo is
+// VLess + none: VLess has no proxy-layer cipher of its own, so without TLS the
+// hop to the node is cleartext at the proxy layer. VMess (AEAD) and any TLS
+// inbound are fine. We prefer encrypted inbounds and reject nodes that offer
+// only cleartext ones.
+//
+// Enum values mirror the Sentinel SDK (ProxyProtocol / TransportSecurity); kept
+// as named constants so this module needs no runtime SDK import. Must match the
+// SDK enums.
+const PROXY_VLESS = 1 // ProxyProtocol.VLess
+const PROXY_VMESS = 2 // ProxyProtocol.VMess
+const SECURITY_NONE = 1 // TransportSecurity.None
+const SECURITY_TLS = 2 // TransportSecurity.TLS
+
+export type V2RayInboundClass = 'acceptable' | 'cleartext'
+
+/**
+ * Classify one V2Ray inbound by whether the hop to the node is protected:
+ * - VMess (carries its own AEAD cipher) or any TLS transport → 'acceptable'.
+ * - VLess with no transport security → 'cleartext'.
+ * Unknown/odd combos default to 'acceptable' — we only drop the known-bad
+ * VLess-none, we don't whitelist.
+ */
+export function classifyV2RayInbound(meta: V2RayMetadata): V2RayInboundClass {
+  if (meta.proxy_protocol === PROXY_VMESS) return 'acceptable'
+  if (meta.transport_security === SECURITY_TLS) return 'acceptable'
+  if (meta.proxy_protocol === PROXY_VLESS && meta.transport_security === SECURITY_NONE) {
+    return 'cleartext'
+  }
+  return 'acceptable'
+}
+
+/**
+ * Keep only acceptable inbounds when at least one exists; otherwise return [] so
+ * the caller can reject the node. "Prefer encrypted": a node that offers any
+ * acceptable inbound is never connected over a VLess-none one. Pure — input
+ * array is not mutated.
+ */
+export function filterV2RayMetadata(metadata: V2RayMetadata[]): V2RayMetadata[] {
+  const acceptable = metadata.filter((m) => classifyV2RayInbound(m) === 'acceptable')
+  return acceptable.length > 0 ? acceptable : []
+}
+
+/** True when the node offers inbounds but every one is cleartext (VLess-none). */
+export function isAllCleartext(metadata: V2RayMetadata[]): boolean {
+  return metadata.length > 0 && metadata.every((m) => classifyV2RayInbound(m) === 'cleartext')
+}
+
+/**
+ * Compact human badge for a set of V2Ray inbounds, e.g. "VMess", "VMess+TLS",
+ * "VLess+TLS", or "VLess ⚠" when the set is cleartext-only. Drives the active
+ * connection bar and the remembered node-list badge.
+ */
+export function v2raySecurityBadge(metadata: V2RayMetadata[]): string {
+  if (metadata.length === 0) return 'unknown'
+  if (isAllCleartext(metadata)) return 'VLess ⚠'
+  const hasVMess = metadata.some((m) => m.proxy_protocol === PROXY_VMESS)
+  const hasTLS = metadata.some((m) => m.transport_security === SECURITY_TLS)
+  const proto = hasVMess ? 'VMess' : 'VLess'
+  return hasTLS ? `${proto}+TLS` : proto
 }

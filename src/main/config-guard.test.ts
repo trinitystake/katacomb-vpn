@@ -8,6 +8,10 @@ import {
   assertSafeV2RayConfig,
   withV2RayDiagnosticLog,
   pinV2RayNodeAddresses,
+  classifyV2RayInbound,
+  filterV2RayMetadata,
+  isAllCleartext,
+  v2raySecurityBadge,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -185,4 +189,60 @@ test('pinV2RayNodeAddresses does not mutate input and output passes the guard', 
   const out = pinV2RayNodeAddresses(input, resolveFixed)
   assert.equal(input.outbounds[0].settings.vnext[0].address, 'oizys.busur.cc') // input untouched
   assert.doesNotThrow(() => assertSafeV2RayConfig(out))
+})
+
+// --- V2Ray inbound encryption policy ---
+//
+// VLess has no proxy-layer cipher: VLess + transport_security=none is the only
+// cleartext-at-the-proxy combo. VMess (AEAD) and any TLS inbound are encrypted.
+// Enum values mirror the SDK: ProxyProtocol VLess=1/VMess=2, TransportSecurity
+// None=1/TLS=2, TransportProtocol TCP=7.
+const VLESS = 1, VMESS = 2, SEC_NONE = 1, SEC_TLS = 2, TCP = 7
+const inbound = (proxy, security) => ({
+  port: '443', proxy_protocol: proxy, transport_protocol: TCP, transport_security: security,
+})
+
+test('classifyV2RayInbound: VMess and any TLS are acceptable, VLess+none is cleartext', () => {
+  assert.equal(classifyV2RayInbound(inbound(VMESS, SEC_NONE)), 'acceptable') // VMess AEAD
+  assert.equal(classifyV2RayInbound(inbound(VMESS, SEC_TLS)), 'acceptable')
+  assert.equal(classifyV2RayInbound(inbound(VLESS, SEC_TLS)), 'acceptable') // TLS wraps it
+  assert.equal(classifyV2RayInbound(inbound(VLESS, SEC_NONE)), 'cleartext')
+})
+
+test('filterV2RayMetadata keeps only acceptable inbounds when any exist', () => {
+  const mixed = [inbound(VLESS, SEC_NONE), inbound(VMESS, SEC_NONE)]
+  const kept = filterV2RayMetadata(mixed)
+  assert.equal(kept.length, 1)
+  assert.equal(kept[0].proxy_protocol, VMESS)
+})
+
+test('filterV2RayMetadata leaves an all-acceptable list intact', () => {
+  const ok = [inbound(VMESS, SEC_NONE), inbound(VLESS, SEC_TLS)]
+  assert.equal(filterV2RayMetadata(ok).length, 2)
+})
+
+test('filterV2RayMetadata returns [] when every inbound is VLess-none', () => {
+  assert.deepEqual(filterV2RayMetadata([inbound(VLESS, SEC_NONE), inbound(VLESS, SEC_NONE)]), [])
+})
+
+test('isAllCleartext is true only for a non-empty all-cleartext set', () => {
+  assert.equal(isAllCleartext([inbound(VLESS, SEC_NONE), inbound(VLESS, SEC_NONE)]), true)
+  assert.equal(isAllCleartext([inbound(VLESS, SEC_NONE), inbound(VMESS, SEC_NONE)]), false)
+  assert.equal(isAllCleartext([]), false)
+})
+
+test('v2raySecurityBadge produces the expected compact label', () => {
+  assert.equal(v2raySecurityBadge([inbound(VMESS, SEC_TLS)]), 'VMess+TLS')
+  assert.equal(v2raySecurityBadge([inbound(VMESS, SEC_NONE)]), 'VMess')
+  assert.equal(v2raySecurityBadge([inbound(VLESS, SEC_TLS)]), 'VLess+TLS')
+  const cleartext = v2raySecurityBadge([inbound(VLESS, SEC_NONE)])
+  assert.match(cleartext, /VLess/)
+  assert.match(cleartext, /⚠/)
+})
+
+test('filterV2RayMetadata does not mutate its input array', () => {
+  const input = [inbound(VLESS, SEC_NONE), inbound(VMESS, SEC_TLS)]
+  const snapshot = JSON.parse(JSON.stringify(input))
+  filterV2RayMetadata(input)
+  assert.deepEqual(input, snapshot)
 })

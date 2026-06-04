@@ -4,6 +4,7 @@ import { useNodes } from '../hooks/useNodes'
 import { useConnection } from '../hooks/useConnection'
 import { useNodeTest } from '../hooks/useNodeTest'
 import { useNavigation } from '../contexts/NavigationContext'
+import { useNodesContext } from '../contexts/NodesContext'
 import NodeFilters from './NodeFilters'
 import ConnectionModal from './ConnectionModal'
 import Spinner from './Spinner'
@@ -38,6 +39,7 @@ const CACHE_TTL = 10 * 60 * 1000
 export default function NodeTable() {
   const { status: connStatus } = useConnection()
   const connectedAddress = connStatus.state === 'connected' ? connStatus.nodeAddress : null
+  const { v2rayClass } = useNodesContext()
   const { results: testResults, testing: testingNodes, batchProgress, testBatch, cancelBatch, testNode } = useNodeTest()
 
   // Derived latency map drives the sort comparator in useNodes.
@@ -187,10 +189,22 @@ export default function NodeTable() {
                 <div className="flex-1 min-w-[140px] truncate text-text-primary">
                   {node.moniker || '—'}
                 </div>
-                <div className="w-[80px] shrink-0">
+                <div className="w-[80px] shrink-0 leading-tight">
                   <span className={node.type === 1 ? 'text-info' : 'text-warning'}>
                     {node.type === 1 ? 'WG' : 'V2Ray'}
                   </span>
+                  {node.type === 2 && (() => {
+                    const badge = v2rayClass[node.address]?.badge
+                    const cleartext = badge?.includes('⚠')
+                    return (
+                      <span
+                        className={`block text-[10px] truncate ${cleartext ? 'text-danger' : 'text-text-tertiary'}`}
+                        title="Last-seen V2Ray protocol/security (from your previous connection)"
+                      >
+                        {badge ?? 'unknown'}
+                      </span>
+                    )
+                  })()}
                 </div>
                 <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
                   {formatPrice(node.gigabytePrices)}

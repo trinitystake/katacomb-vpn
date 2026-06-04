@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
 
   nodesFetch: () => ipcRenderer.invoke(IPC.NODES_FETCH),
   nodesGetCached: () => ipcRenderer.invoke(IPC.NODES_GET_CACHED),
+  nodesV2RayClass: () => ipcRenderer.invoke(IPC.NODES_V2RAY_CLASS),
   onNodesUpdate: (callback: (nodes: unknown[]) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, nodes: unknown[]) => {
       callback(nodes)

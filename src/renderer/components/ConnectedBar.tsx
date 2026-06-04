@@ -40,7 +40,7 @@ export default function ConnectedBar() {
                 ? 'border-info text-info'
                 : 'border-warning text-warning'
             }`}>
-              {status.nodeType === 1 ? 'WG' : 'V2Ray'}
+              {status.nodeType === 1 ? 'WG' : (status.v2raySummary || 'V2Ray')}
             </span>
           )}
           {status.nodeMoniker && (

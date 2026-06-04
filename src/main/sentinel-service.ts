@@ -18,6 +18,7 @@ import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getRpcEndpoint } from './settings'
 import { writeFileAtomic } from './fs-utils'
+import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge } from './config-guard'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -231,6 +232,21 @@ export async function endSession(params: {
   }
 }
 
+/**
+ * Thrown by performHandshake when a V2Ray node offers ONLY cleartext
+ * (VLess-none) inbounds. The connect handlers catch this to auto-cancel the
+ * just-created session (refund) instead of bringing up an unencrypted tunnel.
+ */
+export class V2RayPolicyError extends Error {
+  readonly code = 'VLESS_NONE_REJECTED'
+  readonly badge: string
+  constructor(nodeLabel: string, badge: string) {
+    super(`Node "${nodeLabel}" only offers unencrypted (VLess-none) inbounds`)
+    this.name = 'V2RayPolicyError'
+    this.badge = badge
+  }
+}
+
 export async function performHandshake(params: {
   sessionId: string
   nodeAddress: string
@@ -244,6 +260,7 @@ export async function performHandshake(params: {
   configString: string
   wgInstance: Wireguard | null
   v2rayInstance: V2Ray | null
+  v2raySummary?: string
 }> {
   const { sessionId, nodeAddress, nodeType, remoteUrl, privKey, nodeMoniker, nodeCountry } = params
   const sid = Long.fromString(sessionId, true)
@@ -287,6 +304,21 @@ export async function performHandshake(params: {
     )
 
     const handshakeData = JSON.parse(Buffer.from(result.data, 'base64').toString())
+
+    // Encryption policy: reject a node that offers ONLY cleartext (VLess-none)
+    // inbounds; otherwise drop any VLess-none inbound and keep the encrypted
+    // ones. The SDK's parseConfig builds its leastping balancer over whatever
+    // metadata remains, so filtering here is the single enforcement point — and
+    // it runs before any config is written/persisted or the tunnel is brought up.
+    let v2raySummary: string | undefined
+    if (Array.isArray(handshakeData.metadata)) {
+      if (isAllCleartext(handshakeData.metadata)) {
+        throw new V2RayPolicyError(nodeMoniker || nodeAddress, v2raySecurityBadge(handshakeData.metadata))
+      }
+      handshakeData.metadata = filterV2RayMetadata(handshakeData.metadata)
+      v2raySummary = v2raySecurityBadge(handshakeData.metadata)
+    }
+
     await v2ray.parseConfig(handshakeData, result.addrs)
 
     const configFile = v2ray.writeConfig()
@@ -311,6 +343,6 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'v2ray', configString, wgInstance: null, v2rayInstance: v2ray }
+    return { protocol: 'v2ray', configString, wgInstance: null, v2rayInstance: v2ray, v2raySummary }
   }
 }

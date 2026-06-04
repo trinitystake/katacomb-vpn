@@ -37,22 +37,15 @@ export interface SpeedTestResult {
   error?: string
 }
 
-// In-memory cache: address -> result (10-minute expiry)
+// In-memory cache of the last probe per node, surfaced to the renderer on mount
+// via getAllCachedResults() so the latency column survives navigation. Probes are
+// never served FROM this cache — an explicit Test / Test Nodes click always
+// re-probes (see probeNode), so re-clicking recalculates the latency.
 const probeCache = new Map<string, NodeProbeResult>()
-const CACHE_TTL = 10 * 60 * 1000
+const CACHE_TTL = 10 * 60 * 1000 // results older than this are dropped on read
 
 // Active batch abort controller
 let batchAbort: AbortController | null = null
-
-function getCachedResult(nodeAddress: string): NodeProbeResult | null {
-  const cached = probeCache.get(nodeAddress)
-  if (!cached) return null
-  if (Date.now() - cached.timestamp > CACHE_TTL) {
-    probeCache.delete(nodeAddress)
-    return null
-  }
-  return cached
-}
 
 export function getAllCachedResults(): Record<string, NodeProbeResult> {
   const results: Record<string, NodeProbeResult> = {}
@@ -68,10 +61,6 @@ export function getAllCachedResults(): Record<string, NodeProbeResult> {
 }
 
 export async function probeNode(remoteUrl: string, nodeAddress: string): Promise<NodeProbeResult> {
-  // Check cache first
-  const cached = getCachedResult(nodeAddress)
-  if (cached) return cached
-
   if (typeof remoteUrl !== 'string' || remoteUrl.trim() === '') {
     const result: NodeProbeResult = {
       nodeAddress,

@@ -10,6 +10,8 @@ import NodeTable from './components/NodeTable'
 import WalletPanel from './components/WalletPanel'
 import ConnectedBar from './components/ConnectedBar'
 import IpDisplay from './components/IpDisplay'
+import DisconnectButton from './components/DisconnectButton'
+import StatusBar from './components/StatusBar'
 import ActiveSessions from './components/ActiveSessions'
 import PlanDiscovery from './components/PlanDiscovery'
 import Settings from './components/Settings'
@@ -79,6 +81,7 @@ function AppInner() {
           </div>
           <ConnectedBar />
           <IpDisplay connected={isConnected} />
+          <DisconnectButton />
         </div>
         <div className="flex items-center gap-3">
           <WalletPanel address={wallet.address} name={wallet.name} onLogout={wallet.logout} />
@@ -127,6 +130,8 @@ function AppInner() {
           />
         )}
       </main>
+
+      <StatusBar />
 
       {showBinarySetup && (
         <BinarySetup onDismiss={() => setShowBinarySetup(false)} />

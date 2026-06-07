@@ -16,7 +16,6 @@ import {
   logout,
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
-import { getV2RayClassifications, rememberV2RayClass } from './v2ray-class-cache'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
@@ -193,8 +192,7 @@ function applySession(
  * Run the node handshake with the V2Ray encryption policy enforced. If the node
  * offers ONLY cleartext (VLess-none) inbounds, performHandshake throws before
  * any tunnel is brought up; here we auto-cancel the just-created session (refund)
- * and surface a clear message instead of connecting unencrypted. Either way we
- * remember the learned protocol/security badge for the node list. `isDeposit`
+ * and surface a clear message instead of connecting unencrypted. `isDeposit`
  * tailors the refund wording (a direct session locks a deposit; a plan session
  * draws on a prepaid allocation).
  */
@@ -204,7 +202,6 @@ async function handshakeWithPolicy(
     wallet: NonNullable<ReturnType<typeof getWallet>>
     address: string
     sessionId: string
-    nodeAddress: string
     nodeMoniker: string
     isDeposit: boolean
   },
@@ -214,7 +211,6 @@ async function handshakeWithPolicy(
     result = await performHandshake(hsParams)
   } catch (err) {
     if (err instanceof V2RayPolicyError) {
-      rememberV2RayClass(ctx.nodeAddress, err.badge)
       let refunded = false
       try {
         await endSession({ wallet: ctx.wallet, address: ctx.address, sessionId: ctx.sessionId })
@@ -230,9 +226,6 @@ async function handshakeWithPolicy(
       )
     }
     throw err
-  }
-  if (result.protocol === 'v2ray' && result.v2raySummary) {
-    rememberV2RayClass(ctx.nodeAddress, result.v2raySummary)
   }
   return result
 }
@@ -756,11 +749,6 @@ export function registerIpcHandlers(): void {
     return nodesMemoryCache
   })
 
-  // Remembered V2Ray protocol/security badge per node (learned at handshake).
-  handle(IPC.NODES_V2RAY_CLASS, async () => {
-    return getV2RayClassifications()
-  })
-
   handle(IPC.RPC_LIST, async () => {
     return fetchPublicRpcs()
   })
@@ -833,7 +821,7 @@ export function registerIpcHandlers(): void {
         nodeMoniker: params.nodeMoniker,
         nodeCountry: params.nodeCountry,
       },
-      { wallet, address, sessionId, nodeAddress: params.nodeAddress, nodeMoniker: params.nodeMoniker, isDeposit: true },
+      { wallet, address, sessionId, nodeMoniker: params.nodeMoniker, isDeposit: true },
     )
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
@@ -1100,7 +1088,11 @@ export function registerIpcHandlers(): void {
   // Plan Discovery
   handle(IPC.PLAN_DISCOVER, async (_event, maxCount: number) => {
     assertIntRange(maxCount, 'maxCount', 100, 1000)
-    if (isVpnActive()) throw new Error('Disconnect VPN before discovering plans')
+    // A fresh on-chain rescan needs RPC, which is unreachable while our own
+    // tunnel is up (traffic routes to the node). The renderer disables Rescan
+    // when connected; this is the backstop — return cached plans instead of
+    // throwing a raw error, matching how the other RPC handlers degrade.
+    if (isVpnActive()) return listCachedPlans().plans
     return discoverPlans(maxCount)
   })
 
@@ -1162,7 +1154,7 @@ export function registerIpcHandlers(): void {
         nodeMoniker: params.nodeMoniker,
         nodeCountry: params.nodeCountry,
       },
-      { wallet, address, sessionId, nodeAddress: params.nodeAddress, nodeMoniker: params.nodeMoniker, isDeposit: false },
+      { wallet, address, sessionId, nodeMoniker: params.nodeMoniker, isDeposit: false },
     )
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
@@ -1215,7 +1207,7 @@ export function registerIpcHandlers(): void {
         nodeMoniker: params.nodeMoniker,
         nodeCountry: params.nodeCountry,
       },
-      { wallet, address, sessionId, nodeAddress: params.nodeAddress, nodeMoniker: params.nodeMoniker, isDeposit: false },
+      { wallet, address, sessionId, nodeMoniker: params.nodeMoniker, isDeposit: false },
     )
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)

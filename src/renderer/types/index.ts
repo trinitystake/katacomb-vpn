@@ -1,8 +1,14 @@
+import type { V2RayCategory } from '../utils/v2ray-connection'
+
 export interface SentNode {
   address: string
   moniker: string
   version: string
   type: 1 | 2 // 1=WireGuard, 2=V2Ray
+  // V2Ray proxy/transport/security advertised by the node list API. null for
+  // WireGuard and for V2Ray nodes that don't advertise it. Operator-supplied —
+  // untrusted; the real check happens at handshake (see config-guard.ts).
+  connection: { proxy: string; transport: string; security: string } | null
   api: string
   asn: string
   country: string
@@ -36,6 +42,8 @@ export interface NodeFilter {
   whitelistedOnly: boolean
   hideDuplicates: boolean
   bookmarkedOnly: boolean
+  // Per-connection-category visibility for V2Ray nodes (node-list sub-filter).
+  v2rayConnection: Record<V2RayCategory, boolean>
   search: string
 }
 
@@ -237,7 +245,6 @@ export interface ElectronAPI {
 
   nodesFetch: () => Promise<SentNode[]>
   nodesGetCached: () => Promise<{ nodes: SentNode[]; fetchedAt: number } | null>
-  nodesV2RayClass: () => Promise<Record<string, { badge: string; classifiedAt: number }>>
   onNodesUpdate: (callback: (nodes: SentNode[]) => void) => () => void
   networkGetIp: (includeGeo?: boolean) => Promise<IpInfo>
 

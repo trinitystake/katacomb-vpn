@@ -3,6 +3,7 @@ import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../typ
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useNavigation } from '../contexts/NavigationContext'
+import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
 
 interface Props {
   node: SentNode
@@ -252,6 +253,24 @@ export default function ConnectionModal({ node, onClose }: Props) {
               {node.type === 1 ? 'WireGuard' : 'V2Ray'}
             </span>
           </div>
+          {node.type === 2 && (
+            <div className="flex justify-between">
+              <span className="text-text-secondary">Connection</span>
+              {node.connection ? (
+                <span className={`font-mono text-xs ${isCleartextConnection(node.connection) ? 'text-danger' : 'text-text-primary'}`}>
+                  {node.connection.proxy} / {node.connection.transport} / {node.connection.security}
+                  {' '}({v2rayConnectionBadge(node.connection)})
+                </span>
+              ) : (
+                <span className="text-text-tertiary">unknown (advertised at connect time)</span>
+              )}
+            </div>
+          )}
+          {node.type === 2 && isCleartextConnection(node.connection) && (
+            <div className="text-danger text-xs">
+              Unencrypted at the proxy layer — VLess without TLS.
+            </div>
+          )}
           <div className="flex justify-between">
             <span className="text-text-secondary">Status</span>
             <span className="flex items-center gap-2">

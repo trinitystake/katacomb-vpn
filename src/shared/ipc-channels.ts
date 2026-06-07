@@ -21,7 +21,6 @@ export const IPC = {
   // Nodes
   NODES_FETCH: 'nodes:fetch',
   NODES_GET_CACHED: 'nodes:get-cached',
-  NODES_V2RAY_CLASS: 'nodes:v2ray-class',
 
   // Connection
   CONNECTION_SUBSCRIBE: 'connection:subscribe',

@@ -1,5 +1,14 @@
+import { useEffect, useRef, useState } from 'react'
 import Spinner from './Spinner'
 import type { NodeFilter } from '../types'
+
+const V2RAY_CONNECTION_OPTIONS = [
+  ['vmess', 'VMess'],
+  ['vmess-tls', 'VMess+TLS'],
+  ['vless-tls', 'VLess+TLS'],
+  ['vless-none', 'VLess+none ⚠'],
+  ['unknown', 'Unknown'],
+] as const
 
 interface Props {
   filter: NodeFilter
@@ -30,6 +39,23 @@ export default function NodeFilters({
   onTestBatch,
   onCancelBatch,
 }: Props) {
+  const [connOpen, setConnOpen] = useState(false)
+  const connRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!connOpen) return
+    function handleClickOutside(e: MouseEvent) {
+      if (connRef.current && !connRef.current.contains(e.target as Node)) {
+        setConnOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [connOpen])
+
+  // Highlight the button + show a dot when the list is being narrowed by connection type.
+  const connFiltered = Object.values(filter.v2rayConnection).some((v) => !v)
+
   return (
     <div className="border-b border-border bg-bg-secondary px-4 py-3 space-y-3">
       <div className="flex items-center gap-3 flex-wrap">
@@ -55,6 +81,14 @@ export default function NodeFilters({
           ))}
         </select>
 
+        <input
+          type="text"
+          value={filter.search}
+          onChange={(e) => updateFilter({ search: e.target.value })}
+          placeholder="Search moniker..."
+          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus w-[180px]"
+        />
+
         <div className="flex items-center gap-0.5 border border-border rounded-sm overflow-hidden">
           {(['all', 'wireguard', 'v2ray'] as const).map((t) => (
             <button
@@ -71,13 +105,42 @@ export default function NodeFilters({
           ))}
         </div>
 
-        <input
-          type="text"
-          value={filter.search}
-          onChange={(e) => updateFilter({ search: e.target.value })}
-          placeholder="Search moniker..."
-          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus w-[180px]"
-        />
+        {filter.type === 'v2ray' && (
+          <div ref={connRef} className="relative">
+            <button
+              onClick={() => setConnOpen((o) => !o)}
+              className={`flex items-center gap-1.5 border rounded-sm px-2.5 py-1.5 text-sm transition-colors ${
+                connFiltered
+                  ? 'border-accent text-accent'
+                  : 'bg-bg-tertiary border-border text-text-primary hover:border-border-focus'
+              }`}
+              title="Filter V2Ray nodes by connection type"
+            >
+              {connFiltered && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
+              Connection
+              <span className="text-text-tertiary text-[10px]">▾</span>
+            </button>
+
+            {connOpen && (
+              <div className="absolute left-0 top-full mt-1 z-20 w-44 bg-bg-secondary border border-border rounded-md shadow-overlay p-2 space-y-1">
+                <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-text-tertiary select-none">
+                  Connection types
+                </div>
+                {V2RAY_CONNECTION_OPTIONS.map(([cat, label]) => (
+                  <label key={cat} className="flex items-center gap-2 px-1 py-0.5 text-sm text-text-secondary cursor-pointer select-none rounded-sm hover:bg-bg-hover">
+                    <input
+                      type="checkbox"
+                      checked={filter.v2rayConnection[cat]}
+                      onChange={(e) => updateFilter({ v2rayConnection: { ...filter.v2rayConnection, [cat]: e.target.checked } })}
+                      className="accent-[var(--color-accent)]"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex-1" />
 

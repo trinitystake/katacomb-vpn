@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import type { SentNode, NodeFilter } from '../types'
 import { useNodesContext } from '../contexts/NodesContext'
+import { v2rayConnectionCategory } from '../utils/v2ray-connection'
 
 const DEFAULT_FILTER: NodeFilter = {
   country: '',
@@ -12,6 +13,7 @@ const DEFAULT_FILTER: NodeFilter = {
   whitelistedOnly: false,
   hideDuplicates: true,
   bookmarkedOnly: false,
+  v2rayConnection: { vmess: true, 'vmess-tls': true, 'vless-tls': true, 'vless-none': false, unknown: true },
   search: '',
 }
 
@@ -107,6 +109,8 @@ export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_
     if (filter.residentialOnly) nodes = nodes.filter((n) => n.isResidential)
     if (filter.whitelistedOnly) nodes = nodes.filter((n) => n.isWhitelisted)
     if (filter.hideDuplicates) nodes = nodes.filter((n) => !n.isDuplicate)
+    // V2Ray connection sub-filter: keep a V2Ray node only if its category is enabled.
+    nodes = nodes.filter((n) => n.type !== 2 || filter.v2rayConnection[v2rayConnectionCategory(n.connection)])
     if (filter.bookmarkedOnly) nodes = nodes.filter((n) => bookmarks.has(n.address))
     if (filter.search) {
       const q = filter.search.toLowerCase()

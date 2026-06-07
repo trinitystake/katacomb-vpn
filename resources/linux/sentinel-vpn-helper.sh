@@ -127,21 +127,21 @@ ipv6_available() {
 }
 
 ipv6_killswitch_off() {
-  ip6tables -D OUTPUT -j "$CHAIN6" 2>/dev/null || true
-  ip6tables -F "$CHAIN6" 2>/dev/null || true
-  ip6tables -X "$CHAIN6" 2>/dev/null || true
+  ip6tables -w 5 -D OUTPUT -j "$CHAIN6" 2>/dev/null || true
+  ip6tables -w 5 -F "$CHAIN6" 2>/dev/null || true
+  ip6tables -w 5 -X "$CHAIN6" 2>/dev/null || true
 }
 
 ipv6_killswitch_on() {
   local vpn_iface="$1"
   ipv6_killswitch_off
   # &&-chained so a partial failure short-circuits and the caller can clean up.
-  ip6tables -N "$CHAIN6" &&
-  ip6tables -A "$CHAIN6" -o lo -j ACCEPT &&
-  ip6tables -A "$CHAIN6" -o "$vpn_iface" -j ACCEPT &&
-  ip6tables -A "$CHAIN6" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT &&
-  ip6tables -A "$CHAIN6" -j DROP &&
-  ip6tables -A OUTPUT -j "$CHAIN6"
+  ip6tables -w 5 -N "$CHAIN6" &&
+  ip6tables -w 5 -A "$CHAIN6" -o lo -j ACCEPT &&
+  ip6tables -w 5 -A "$CHAIN6" -o "$vpn_iface" -j ACCEPT &&
+  ip6tables -w 5 -A "$CHAIN6" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT &&
+  ip6tables -w 5 -A "$CHAIN6" -j DROP &&
+  ip6tables -w 5 -A OUTPUT -j "$CHAIN6"
 }
 
 case "${1:-}" in
@@ -256,36 +256,36 @@ case "${1:-}" in
     CHAIN="SENTINEL_KILLSWITCH"
 
     # Flush existing chain if present
-    iptables -D OUTPUT -j "$CHAIN" 2>/dev/null || true
-    iptables -F "$CHAIN" 2>/dev/null || true
-    iptables -X "$CHAIN" 2>/dev/null || true
+    iptables -w 5 -D OUTPUT -j "$CHAIN" 2>/dev/null || true
+    iptables -w 5 -F "$CHAIN" 2>/dev/null || true
+    iptables -w 5 -X "$CHAIN" 2>/dev/null || true
 
     # Create chain
-    iptables -N "$CHAIN"
+    iptables -w 5 -N "$CHAIN"
 
     # Allow loopback
-    iptables -A "$CHAIN" -o lo -j ACCEPT
+    iptables -w 5 -A "$CHAIN" -o lo -j ACCEPT
     # Allow traffic on the VPN interface
-    iptables -A "$CHAIN" -o "$VPN_IFACE" -j ACCEPT
+    iptables -w 5 -A "$CHAIN" -o "$VPN_IFACE" -j ACCEPT
     # Allow traffic to VPN server (needed to maintain the tunnel)
-    iptables -A "$CHAIN" -d "$REMOTE_HOST/32" -j ACCEPT
+    iptables -w 5 -A "$CHAIN" -d "$REMOTE_HOST/32" -j ACCEPT
     # Allow DHCP client
-    iptables -A "$CHAIN" -p udp --dport 67:68 -j ACCEPT
+    iptables -w 5 -A "$CHAIN" -p udp --dport 67:68 -j ACCEPT
     # Allow DNS to the configured resolver ONLY through the tunnel. Scoping to
     # the VPN interface stops plaintext DNS from egressing the physical NIC
     # during a tunnel-down window (it is already covered by the "-o $VPN_IFACE"
     # accept above; the explicit rule documents the intent and the scope).
     if [[ -n "$DNS_IP" ]]; then
-      iptables -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p udp --dport 53 -j ACCEPT
-      iptables -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p tcp --dport 53 -j ACCEPT
+      iptables -w 5 -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p udp --dport 53 -j ACCEPT
+      iptables -w 5 -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p tcp --dport 53 -j ACCEPT
     fi
     # Allow established/related connections (for the tunnel itself)
-    iptables -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -w 5 -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     # Drop everything else
-    iptables -A "$CHAIN" -j DROP
+    iptables -w 5 -A "$CHAIN" -j DROP
 
     # Insert jump rule
-    iptables -A OUTPUT -j "$CHAIN"
+    iptables -w 5 -A OUTPUT -j "$CHAIN"
 
     # IPv6: no v6 server/DNS to whitelist, so block all native v6 egress except
     # loopback + the tunnel. Best-effort — must never abort the IPv4 kill switch.
@@ -299,11 +299,17 @@ case "${1:-}" in
     chmod 600 "${RUN_DIR}/killswitch.state"
     ;;
   killswitch-off)
-    # Disable kill switch — flush chain and remove jump
+    # Disable kill switch — flush chain and remove jump. The `-w 5` lock-wait is
+    # load-bearing: without it, a concurrent xtables-lock holder (NetworkManager,
+    # ufw, docker) makes the `-D OUTPUT` fail, and the `|| true` then swallows it,
+    # leaving the DROP chain jumped from OUTPUT — which black-holes ALL traffic
+    # once the tunnel is gone (a stranded kill switch). `-w 5` waits for the lock
+    # so the removal actually happens. (The `|| true` now only covers the benign
+    # "chain doesn't exist" case.)
     CHAIN="SENTINEL_KILLSWITCH"
-    iptables -D OUTPUT -j "$CHAIN" 2>/dev/null || true
-    iptables -F "$CHAIN" 2>/dev/null || true
-    iptables -X "$CHAIN" 2>/dev/null || true
+    iptables -w 5 -D OUTPUT -j "$CHAIN" 2>/dev/null || true
+    iptables -w 5 -F "$CHAIN" 2>/dev/null || true
+    iptables -w 5 -X "$CHAIN" 2>/dev/null || true
     # Tear down the IPv6 kill switch too — unconditional: ipv6_killswitch_off is
     # fully `|| true`-guarded (incl. a missing ip6tables binary), so it's a safe
     # no-op when nothing was installed, and it can't be skipped if ip6tables

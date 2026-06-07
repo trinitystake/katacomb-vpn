@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePlans } from '../hooks/usePlans'
+import { useConnection } from '../hooks/useConnection'
 import { useNavigation } from '../contexts/NavigationContext'
 import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode } from '../types'
 import Spinner from './Spinner'
@@ -201,6 +202,11 @@ function IconNode({ className = '' }: { className?: string }) {
 export default function PlanDiscovery() {
   const { plansNodeFilter, clearPlansNodeFilter } = useNavigation()
   const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached } = usePlans()
+  // A rescan re-queries the chain over RPC, which is unreachable while OUR tunnel
+  // is up (traffic routes to the Sentinel node). External VPNs like Mullvad don't
+  // trigger this — only this app's own Sentinel tunnel does.
+  const { status: connStatus } = useConnection()
+  const tunnelUp = connStatus.state !== 'idle'
   const [error, setError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [providers, setProviders] = useState<Record<string, ProviderState>>({})
@@ -690,12 +696,14 @@ export default function PlanDiscovery() {
 
             <button
               onClick={handleRescan}
-              disabled={discovering}
-              className="btn btn-primary text-xs px-3 py-2 disabled:opacity-30"
+              disabled={discovering || tunnelUp}
+              className="btn btn-primary text-xs px-3 py-2 disabled:opacity-30 disabled:cursor-not-allowed"
               title={
-                plans.length === 0
-                  ? 'Discover plans on-chain'
-                  : `Rescan plans · last updated ${formatTimeAgo(fetchedAt)}`
+                tunnelUp
+                  ? 'Disconnect to rescan — the chain RPC is unreachable through the tunnel'
+                  : plans.length === 0
+                    ? 'Discover plans on-chain'
+                    : `Rescan plans · last updated ${formatTimeAgo(fetchedAt)}`
               }
             >
               {discovering ? (

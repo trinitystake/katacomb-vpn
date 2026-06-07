@@ -4,12 +4,12 @@ import { useNodes } from '../hooks/useNodes'
 import { useConnection } from '../hooks/useConnection'
 import { useNodeTest } from '../hooks/useNodeTest'
 import { useNavigation } from '../contexts/NavigationContext'
-import { useNodesContext } from '../contexts/NodesContext'
 import NodeFilters from './NodeFilters'
 import ConnectionModal from './ConnectionModal'
 import Spinner from './Spinner'
 import type { SentNode } from '../types'
 import { COUNTRY_CODES } from '../utils/country-codes'
+import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
 
 function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
   if (!prices) return '—'
@@ -39,7 +39,6 @@ const CACHE_TTL = 10 * 60 * 1000
 export default function NodeTable() {
   const { status: connStatus } = useConnection()
   const connectedAddress = connStatus.state === 'connected' ? connStatus.nodeAddress : null
-  const { v2rayClass } = useNodesContext()
   const { results: testResults, testing: testingNodes, batchProgress, testBatch, cancelBatch, testNode } = useNodeTest()
 
   // Derived latency map drives the sort comparator in useNodes.
@@ -194,12 +193,12 @@ export default function NodeTable() {
                     {node.type === 1 ? 'WG' : 'V2Ray'}
                   </span>
                   {node.type === 2 && (() => {
-                    const badge = v2rayClass[node.address]?.badge
-                    const cleartext = badge?.includes('⚠')
+                    const badge = v2rayConnectionBadge(node.connection)
+                    const cleartext = isCleartextConnection(node.connection)
                     return (
                       <span
                         className={`block text-[10px] truncate ${cleartext ? 'text-danger' : 'text-text-tertiary'}`}
-                        title="Last-seen V2Ray protocol/security (from your previous connection)"
+                        title="V2Ray protocol/security advertised by the node (unverified until you connect)"
                       >
                         {badge ?? 'unknown'}
                       </span>

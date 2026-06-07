@@ -8,9 +8,6 @@ interface NodesContextValue {
   refresh: () => Promise<void>
   bookmarks: Set<string>
   toggleBookmark: (nodeAddress: string) => Promise<void>
-  // Remembered V2Ray protocol/security badge per node address (learned at the
-  // last handshake; only knowable post-subscription, cached to hint the list).
-  v2rayClass: Record<string, { badge: string }>
 }
 
 const NodesContext = createContext<NodesContextValue | null>(null)
@@ -20,7 +17,6 @@ export function NodesProvider({ children }: { children: ReactNode }) {
   const [lastFetched, setLastFetched] = useState<Date | null>(null)
   const [loading, setLoading] = useState(false)
   const [bookmarks, setBookmarks] = useState<Set<string>>(new Set())
-  const [v2rayClass, setV2rayClass] = useState<Record<string, { badge: string }>>({})
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -36,8 +32,6 @@ export function NodesProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    const loadV2RayClass = () => window.api.nodesV2RayClass().then(setV2rayClass).catch(() => {})
-
     // Instant paint from disk cache (no network)
     window.api
       .nodesGetCached()
@@ -51,14 +45,10 @@ export function NodesProvider({ children }: { children: ReactNode }) {
         // silent — main will push a fresh list shortly
       })
 
-    loadV2RayClass()
-
-    // Subscribe to main-driven refreshes (60s timer in main process). Refresh
-    // the remembered badges on the same tick so a newly-learned node shows up.
+    // Subscribe to main-driven refreshes (60s timer in main process).
     const off = window.api.onNodesUpdate((nodes) => {
       setAllNodes(nodes)
       setLastFetched(new Date())
-      loadV2RayClass()
     })
 
     return off
@@ -78,8 +68,8 @@ export function NodesProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo(
-    () => ({ allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark, v2rayClass }),
-    [allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark, v2rayClass],
+    () => ({ allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark }),
+    [allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark],
   )
 
   return <NodesContext.Provider value={value}>{children}</NodesContext.Provider>

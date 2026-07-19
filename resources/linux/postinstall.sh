@@ -26,6 +26,16 @@ if [ -f "$POLICY_SRC" ]; then
   chown root:root "$POLICY_DEST"
 fi
 
+# --- Socket access group (finding C1) ---
+# Only members of this group can drive the privileged daemon socket (0660),
+# instead of every local user. The invoking desktop user is added so connect/
+# disconnect stays password-free. Group membership takes effect on their NEXT
+# login; until then the GUI transparently falls back to the pkexec helper.
+groupadd -f sentinel-dvpn
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  usermod -aG sentinel-dvpn "$SUDO_USER" || true
+fi
+
 # --- Persistent root daemon ---
 # Space-free symlink so the systemd unit's ExecStart needs no quoting.
 ln -sfn "$APP_DIR" /opt/sentinel-dvpn

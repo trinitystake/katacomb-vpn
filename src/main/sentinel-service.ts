@@ -16,9 +16,9 @@ import { BrowserWindow, app, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { getRpcEndpoint } from './settings'
+import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
-import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge } from './config-guard'
+import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -46,10 +46,11 @@ function sessionConfigPath(sessionId: string): string {
 
 export function saveSessionConfig(config: SavedSessionConfig): void {
   // Never write tunnel credentials (WG private key / V2Ray UUID) to disk in
-  // plaintext. Without a working keyring we skip persistence entirely —
-  // connecting still works this session, only reconnect-after-restart is lost.
-  if (!safeStorage.isEncryptionAvailable()) {
-    console.warn('[session] OS keyring unavailable — session config not persisted')
+  // plaintext OR under the reversible basic_text backend (finding H1). Without
+  // real keyring encryption we skip persistence entirely — connecting still works
+  // this session, only reconnect-after-restart is lost.
+  if (!isSecureStorageAvailable()) {
+    console.warn('[session] secure OS keyring unavailable — session config not persisted')
     return
   }
   const json = JSON.stringify(config)
@@ -123,17 +124,10 @@ export async function resolveNodeRemoteUrl(
   if (apiField) {
     // apiField is renderer-supplied: parse + constrain it before it becomes the
     // handshake endpoint (which we hit with the wallet private key). Reject
-    // non-http(s) schemes and embedded credentials (finding M5).
-    const url = apiField.startsWith('http') ? apiField : `https://${apiField}`
-    let parsed: URL
-    try { parsed = new URL(url) } catch { throw new Error('Invalid node API endpoint') }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new Error('Node API endpoint must use http(s)')
-    }
-    if (parsed.username || parsed.password) {
-      throw new Error('Node API endpoint must not contain credentials')
-    }
-    return url
+    // non-http(s) schemes and embedded credentials (finding M5) — shared with the
+    // node-probe path (finding M3).
+    if (!isSafeNodeApiUrl(apiField)) throw new Error('Invalid node API endpoint')
+    return apiField.startsWith('http') ? apiField : `https://${apiField}`
   }
 
   throw new Error('Cannot resolve node remote address')

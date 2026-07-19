@@ -13,6 +13,7 @@ import {
   isAllCleartext,
   v2raySecurityBadge,
   withV2RayDoH,
+  isSafeNodeApiUrl,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -61,6 +62,35 @@ test('assertSafeWireguardConfig rejects a key outside any section', () => {
   assert.throws(() => assertSafeWireguardConfig('PostUp = x\n[Interface]\nPrivateKey = a'), /not allowed|invalid/i)
 })
 
+// Value-format hardening: keep shell/control chars and garbage out of allow-listed
+// keys, without rejecting legitimate SDK output.
+test('assertSafeWireguardConfig accepts multi-value AllowedIPs incl. IPv6', () => {
+  const cfg = CLEAN_WG.replace('AllowedIPs = 0.0.0.0/0', 'AllowedIPs = 0.0.0.0/0, ::/0')
+  assert.doesNotThrow(() => assertSafeWireguardConfig(cfg))
+})
+
+test('assertSafeWireguardConfig accepts a hostname Endpoint', () => {
+  const cfg = CLEAN_WG.replace('Endpoint = 203.0.113.7:51820', 'Endpoint = node.example.org:51820')
+  assert.doesNotThrow(() => assertSafeWireguardConfig(cfg))
+})
+
+test('assertSafeWireguardConfig rejects a non-numeric MTU', () => {
+  assert.throws(() => assertSafeWireguardConfig(CLEAN_WG.replace('MTU = 1420', 'MTU = huge')), /number|invalid/i)
+})
+
+test('assertSafeWireguardConfig rejects an Endpoint with no port / shell metacharacters', () => {
+  assert.throws(() => assertSafeWireguardConfig(CLEAN_WG.replace('Endpoint = 203.0.113.7:51820', 'Endpoint = 203.0.113.7')), /host:port|invalid/i)
+  assert.throws(() => assertSafeWireguardConfig(CLEAN_WG.replace('Endpoint = 203.0.113.7:51820', 'Endpoint = 203.0.113.7:22; reboot')), /host:port|invalid/i)
+})
+
+test('assertSafeWireguardConfig rejects a key value with illegal characters', () => {
+  assert.throws(() => assertSafeWireguardConfig(CLEAN_WG.replace(/PrivateKey = .*/, 'PrivateKey = not a key!')), /key|invalid/i)
+})
+
+test('assertSafeWireguardConfig rejects AllowedIPs carrying a command substitution', () => {
+  assert.throws(() => assertSafeWireguardConfig(CLEAN_WG.replace('AllowedIPs = 0.0.0.0/0', 'AllowedIPs = 0.0.0.0/0, $(reboot)')), /malformed|invalid/i)
+})
+
 test('extractWireguardEndpointHost returns the host before the port', () => {
   assert.equal(extractWireguardEndpointHost(CLEAN_WG), '203.0.113.7')
 })
@@ -99,6 +129,22 @@ test('sanitizeBypassRoutes drops invalid entries and caps the list', () => {
   assert.deepEqual(sanitizeBypassRoutes(['10.0.0.0/8', '0.0.0.0/0', 'junk']), ['10.0.0.0/8'])
   assert.deepEqual(sanitizeBypassRoutes(['  192.168.0.0/16  ']), ['192.168.0.0/16'])
   assert.equal(sanitizeBypassRoutes(Array(200).fill('10.0.0.0/8')).length <= 64, true)
+})
+
+// M3: node-supplied probe/handshake URLs must be http(s) with no embedded creds.
+test('isSafeNodeApiUrl accepts http(s) and bare host:port', () => {
+  assert.equal(isSafeNodeApiUrl('https://node.example.org:8585'), true)
+  assert.equal(isSafeNodeApiUrl('http://203.0.113.7:1234'), true)
+  assert.equal(isSafeNodeApiUrl('203.0.113.7:8585'), true) // scheme-less → https
+})
+
+test('isSafeNodeApiUrl rejects non-http schemes, credentials, and non-strings', () => {
+  assert.equal(isSafeNodeApiUrl('file:///etc/passwd'), false)
+  assert.equal(isSafeNodeApiUrl('ftp://node/x'), false)
+  assert.equal(isSafeNodeApiUrl('https://user:pass@node/x'), false)
+  assert.equal(isSafeNodeApiUrl(''), false)
+  assert.equal(isSafeNodeApiUrl(undefined), false)
+  assert.equal(isSafeNodeApiUrl(42), false)
 })
 
 // C2: V2Ray config is spawned as a child process; node operators are untrusted.

@@ -9,6 +9,20 @@ import ProgressSteps from './ProgressSteps'
 const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited sentinel set by the provider
 const PLAN_DISCOVERY_MAX = 500
 
+/**
+ * Return a node/provider-supplied website URL only if it's a safe external scheme
+ * (http/https/mailto); otherwise null so we render it as plain text. Defense-in-
+ * depth behind the main-process openExternal allow-list (finding L1).
+ */
+function safeExternalHref(url: string): string | null {
+  try {
+    const scheme = new URL(url).protocol
+    return scheme === 'https:' || scheme === 'http:' || scheme === 'mailto:' ? url : null
+  } catch {
+    return null
+  }
+}
+
 function formatBytes(bytes: string): string {
   const n = Number(bytes)
   if (!isFinite(n) || n <= 0) return '0 B'
@@ -1072,15 +1086,19 @@ function PlanDetail({
                   )}
                 </div>
                 {hasProviderInfo && provider.website && (
-                  <a
-                    href={provider.website}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="text-accent hover:underline text-xs break-all inline-flex items-center gap-1"
-                  >
-                    {provider.website}
-                    <IconExternal className="w-3 h-3 shrink-0" />
-                  </a>
+                  safeExternalHref(provider.website) ? (
+                    <a
+                      href={safeExternalHref(provider.website)!}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-accent hover:underline text-xs break-all inline-flex items-center gap-1"
+                    >
+                      {provider.website}
+                      <IconExternal className="w-3 h-3 shrink-0" />
+                    </a>
+                  ) : (
+                    <div className="text-text-tertiary text-xs break-all">{provider.website}</div>
+                  )
                 )}
               </>
             )}

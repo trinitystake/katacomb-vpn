@@ -30,6 +30,32 @@ function settingsPath(): string {
   return join(app.getPath('userData'), 'settings.json')
 }
 
+/**
+ * True only when the OS keyring provides *real* encryption. On Linux without a
+ * libsecret/kwallet keyring, Electron's safeStorage silently selects the
+ * `basic_text` backend, which "encrypts" with a hardcoded key — so the seed
+ * `.enc` files would be trivially reversible by anyone who can read them. We
+ * refuse to PERSIST secrets in that case (finding H1). Reads intentionally stay
+ * on the looser `isEncryptionAvailable()` so a wallet saved under a real backend
+ * still loads even if the keyring is transiently unavailable.
+ */
+export function isSecureStorageAvailable(): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false
+  // getSelectedStorageBackend is Linux-only (the app's only target); a non-Linux
+  // or 'unknown' backend is treated as acceptable — only the known-insecure
+  // basic_text is rejected.
+  try {
+    return safeStorage.getSelectedStorageBackend() !== 'basic_text'
+  } catch {
+    return true
+  }
+}
+
+const INSECURE_STORAGE_MESSAGE =
+  'Secure storage is unavailable: no OS keyring (GNOME Keyring / KWallet) was found, ' +
+  'so the seed phrase can only be stored with reversible encryption. Refusing to save it. ' +
+  'Install and unlock a keyring (e.g. gnome-keyring / libsecret) and try again.'
+
 export function loadSettings(): AppSettings {
   const path = settingsPath()
   if (!existsSync(path)) return { ...DEFAULT_SETTINGS }
@@ -88,8 +114,8 @@ function saveWalletIndex(wallets: WalletEntry[]): void {
 }
 
 export function addWalletEntry(name: string, address: string, mnemonic: string, accountIndex = 0): WalletEntry {
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('OS keyring encryption is not available')
+  if (!isSecureStorageAvailable()) {
+    throw new Error(INSECURE_STORAGE_MESSAGE)
   }
 
   const id = randomUUID()
@@ -167,7 +193,10 @@ export function migrateOldWallet(): void {
     return
   }
 
-  if (!safeStorage.isEncryptionAvailable()) return
+  // Re-encrypting under the insecure basic_text backend would persist the seed
+  // reversibly (finding H1) — leave the old file untouched so it can migrate once
+  // a real keyring is available.
+  if (!isSecureStorageAvailable()) return
 
   try {
     const encrypted = readFileSync(oldPath)

@@ -23,6 +23,10 @@ if [ "$1" != "upgrade" ]; then
   rm -f "$HELPER"
   rm -f /usr/share/polkit-1/actions/com.sentinel.dvpn.policy
 
+  # Remove the socket-access group (finding C1). Best-effort — harmless if it has
+  # members or is already gone.
+  groupdel sentinel-dvpn 2>/dev/null || true
+
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
   fi

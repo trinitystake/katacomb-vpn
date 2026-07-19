@@ -283,6 +283,11 @@ export async function getActiveSessions(): Promise<SessionInfo[]> {
 }
 
 export function logout(): void {
+  // We zero the private-key bytes (a Uint8Array is mutable), but the mnemonic held
+  // inside state.wallet is a JS string — immutable and GC-managed, so it cannot be
+  // reliably scrubbed from the V8 heap here and may persist until garbage
+  // collection (and could surface in a swap file or core dump). Accepted limitation
+  // of the runtime; the seed is never written to disk unencrypted (finding L3).
   state.wallet = null
   state.address = null
   if (state.privKey) {

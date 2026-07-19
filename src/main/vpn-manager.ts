@@ -44,7 +44,13 @@ function resolveBundled(name: string): string {
     }
     return bundled
   }
-  return name // fall back to system PATH
+  // No bundled binary present — fall back to system PATH. That binary is NOT
+  // integrity-checked (unknown provenance); this is a supported path for system
+  // v2ray installs (see BinarySetup), but warn so an operator notices if the
+  // bundled binary was unexpectedly removed to force this fallback (finding M1).
+  // The root daemon path (daemon-core.resolveTun2Socks) fails closed instead.
+  console.warn(`[binary] bundled ${name} not found — using unverified system PATH binary`)
+  return name
 }
 
 function resolveV2RayBinary(): string {
@@ -69,7 +75,7 @@ export function binaryExists(name: string): boolean {
   // Only allow simple binary names (no paths, no shell metacharacters)
   if (!/^[a-zA-Z0-9._-]+$/.test(name)) return false
   try {
-    execSync(`which ${name}`, { stdio: 'ignore' })
+    execFileSync('which', [name], { stdio: 'ignore' }) // execFile, no shell (finding L4)
     return true
   } catch {
     return false
@@ -153,13 +159,15 @@ function isTunUp(): boolean {
  */
 function resolveHostToIPv4(host: string): string | null {
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return host
-  // Validate hostname before passing to shell (no shell metacharacters)
+  // Validate hostname first, then use execFile (no shell) so injection-safety is
+  // structural rather than relying only on the regex (finding L4).
   if (!/^[a-zA-Z0-9._-]+$/.test(host)) return null
   try {
-    const resolved = execSync(`getent ahostsv4 '${host}' | head -1 | awk '{print $1}'`, {
-      stdio: 'pipe', timeout: 5000,
-    }).toString().trim()
-    if (resolved && /^\d+\.\d+\.\d+\.\d+$/.test(resolved)) return resolved
+    const out = execFileSync('getent', ['ahostsv4', host], { stdio: 'pipe', timeout: 5000 }).toString()
+    for (const line of out.split('\n')) {
+      const ip = line.trim().split(/\s+/)[0]
+      if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip
+    }
   } catch { /* ignore */ }
   return null
 }

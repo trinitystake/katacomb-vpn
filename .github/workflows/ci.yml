@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      # Blocking gate for anything critical. Kept separate from the high-severity
+      # report below because the transitive `elliptic` advisory (GHSA-848j-6mx2-7j84,
+      # high, no upstream fix — dormant fallback under the Sentinel SDK's native
+      # secp256k1) would otherwise make every run red.
+      - name: Security audit (critical, blocking)
+        run: npm audit --omit=dev --audit-level=critical
+
+      # Informational: surfaces new high/moderate/low advisories without failing the
+      # build. Review these on each run; drop the elliptic exception once the Sentinel
+      # SDK moves off it.
+      - name: Security audit (full report, non-blocking)
+        run: npm audit --omit=dev || true

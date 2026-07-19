@@ -23,9 +23,67 @@ const WG_PEER_KEYS = new Set([
   'persistentkeepalive',
 ])
 
+// Value shapes for the allow-listed keys. Hosts allow letters (hostnames), digits,
+// dots/colons (IPv6), underscores and hyphens — but NOT whitespace, commas-in-item,
+// or shell/control characters. List fields (address/allowedips/dns) are split on
+// commas first. This is format hardening behind the key allow-list; it deliberately
+// stays lenient enough to never reject legitimate SDK-generated configs (incl.
+// full-tunnel `AllowedIPs = 0.0.0.0/0, ::/0`).
+const WG_HOST_OR_CIDR = /^\[?[A-Za-z0-9.:_-]+\]?(\/\d{1,3})?$/
+const WG_ENDPOINT = /^\[?[A-Za-z0-9.:_-]+\]?:\d{1,5}$/
+// Any base64 string — we only care that keys carry no shell/control characters,
+// not that they're a specific length (a valid-shaped wrong key just fails the
+// handshake harmlessly; enforcing 44 chars would false-reject test fixtures and
+// any future key sizing).
+const WG_KEY = /^[A-Za-z0-9+/]+={0,2}$/
+const WG_UINT = /^\d{1,7}$/
+
+function assertWgListValue(key: string, value: string): void {
+  for (const raw of value.split(',')) {
+    const item = raw.trim()
+    if (item === '') continue
+    if (!WG_HOST_OR_CIDR.test(item)) {
+      throw new Error(`WireGuard config: "${key}" entry "${item}" is malformed`)
+    }
+  }
+}
+
+/**
+ * Throw if the VALUE for an allow-listed WireGuard key is malformed. Complements
+ * the key allow-list: keeps shell/control characters and other garbage out of the
+ * root-owned wg-quick config even for keys that are permitted (finding: config
+ * value-format validation, defense-in-depth behind C1).
+ */
+function assertSafeWireguardValue(key: string, value: string): void {
+  const v = value.trim()
+  switch (key) {
+    case 'mtu':
+    case 'listenport':
+    case 'persistentkeepalive':
+      if (!WG_UINT.test(v)) throw new Error(`WireGuard config: "${key}" must be a number`)
+      break
+    case 'privatekey':
+    case 'publickey':
+    case 'presharedkey':
+      if (!WG_KEY.test(v)) throw new Error(`WireGuard config: "${key}" is not a valid key`)
+      break
+    case 'endpoint':
+      if (!WG_ENDPOINT.test(v)) throw new Error(`WireGuard config: "${key}" must be host:port`)
+      break
+    case 'address':
+    case 'allowedips':
+    case 'dns':
+      assertWgListValue(key, value)
+      break
+    default:
+      break
+  }
+}
+
 /**
  * Throw if a WireGuard config string contains any directive outside the
- * allow-list. This is the guard for the wg-quick `PostUp` root-exec LPE.
+ * allow-list, or an allow-listed key whose value is malformed. This is the guard
+ * for the wg-quick `PostUp` root-exec LPE, plus value-format hardening.
  */
 export function assertSafeWireguardConfig(config: string): void {
   let section: 'interface' | 'peer' | null = null
@@ -56,6 +114,7 @@ export function assertSafeWireguardConfig(config: string): void {
     if (!allowed.has(key)) {
       throw new Error(`WireGuard config: key "${key}" in [${section}] is not allowed`)
     }
+    assertSafeWireguardValue(key, line.slice(eq + 1).trim())
   }
 }
 
@@ -118,6 +177,27 @@ export const ALLOWED_DNS_RESOLVERS = new Set([
 
 export function isAllowedDnsResolver(ip: string): boolean {
   return ALLOWED_DNS_RESOLVERS.has(ip)
+}
+
+/**
+ * True if `remoteUrl` is a safe node API / probe endpoint: http(s) only (after an
+ * optional scheme-less `host:port` form), with no embedded credentials. Mirrors the
+ * check in sentinel-service.resolveNodeRemoteUrl so the node-probe IPC path gets the
+ * same guarantee as the handshake path (finding M3).
+ */
+export function isSafeNodeApiUrl(remoteUrl: unknown): boolean {
+  if (typeof remoteUrl !== 'string' || remoteUrl.trim() === '') return false
+  const s = remoteUrl.trim()
+  // If it declares a scheme it must be http(s); anything else (file:, ftp:, …) is
+  // rejected rather than silently https-prefixed into a look-alike host. A
+  // scheme-less `host:port` is treated as https.
+  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)
+  if (hasScheme && !/^https?:\/\//i.test(s)) return false
+  let parsed: URL
+  try { parsed = new URL(hasScheme ? s : `https://${s}`) } catch { return false }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
+  if (parsed.username || parsed.password) return false
+  return true
 }
 
 /** Strict IPv4 literal (octets 0-255). */

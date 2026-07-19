@@ -39,7 +39,7 @@ import {
   isBinaryAvailable,
 } from './vpn-manager'
 import { runPrivileged } from './privileged'
-import { isAllowedBypassCidr, isAllowedDnsResolver } from './config-guard'
+import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
@@ -1027,6 +1027,11 @@ export function registerIpcHandlers(): void {
   // Node Testing: Single probe
   handle(IPC.NODE_TEST_PROBE, async (_event, params: { nodeAddress: string; remoteUrl: string }) => {
     assertString(params.nodeAddress, 'nodeAddress')
+    // A non-empty remoteUrl must be a safe http(s) endpoint (finding M3); empty is
+    // allowed and handled gracefully by probeNode ("No API endpoint").
+    if (typeof params.remoteUrl === 'string' && params.remoteUrl !== '' && !isSafeNodeApiUrl(params.remoteUrl)) {
+      throw new Error('Invalid node probe URL')
+    }
     return probeNode(params.remoteUrl, params.nodeAddress)
   })
 
@@ -1035,6 +1040,10 @@ export function registerIpcHandlers(): void {
     if (!Array.isArray(nodes) || nodes.length === 0) throw new Error('Invalid nodes array')
     for (const n of nodes) {
       assertString(n.nodeAddress, 'nodeAddress')
+      // Same http(s)-only guard as the single probe (finding M3); empty is allowed.
+      if (typeof n.remoteUrl === 'string' && n.remoteUrl !== '' && !isSafeNodeApiUrl(n.remoteUrl)) {
+        throw new Error('Invalid node probe URL')
+      }
     }
     startBatch(nodes)
   })

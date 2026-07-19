@@ -16,5 +16,19 @@ RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=2
 
+# Conservative hardening (finding: systemd daemon confinement). These do NOT
+# interfere with the daemon's work (spawning wg-quick/iptables/ip/tun2socks via
+# the helper, writing /etc/resolv.conf, binding its AF_UNIX socket). Intentionally
+# omitted: ProtectSystem/ProtectKernelModules (would block wg-quick's modprobe and
+# the /etc/resolv.conf rewrite), RestrictAddressFamilies (ip/iptables need
+# AF_NETLINK), and a CapabilityBoundingSet (wg-quick needs broad caps) — those
+# require on-target verification before enabling.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
 [Install]
 WantedBy=multi-user.target

@@ -49,6 +49,11 @@ function usagePercent(downloaded: string, max: string): number {
   return Math.min(100, (d / m) * 100)
 }
 
+function timePercent(elapsedSeconds: number, maxSeconds: number | null): number {
+  if (!maxSeconds || maxSeconds <= 0 || elapsedSeconds <= 0) return 0
+  return Math.min(100, (elapsedSeconds / maxSeconds) * 100)
+}
+
 export default function ActiveSessions({ sessions, loading, refreshing, refresh }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -179,8 +184,21 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             const uploadBytes = isConnectedSession
               ? String(parseInt(session.uploadBytes || '0', 10) + liveStats.txBytes)
               : session.uploadBytes
-            const pct = usagePercent(downloadBytes, session.maxBytes)
-            const hasTimeSub = session.maxDurationSeconds !== null && session.maxDurationSeconds > 0
+            const dataPct = usagePercent(downloadBytes, session.maxBytes)
+            // A session is metered on data (per-GB, maxBytes>0), on time
+            // (per-hour, maxDuration>0), or both (plan). Show a gauge only for a
+            // cap that exists, so the bar tracks the metric that's actually billed.
+            const maxBytesNum = parseInt(session.maxBytes, 10)
+            const hasByteCap = !isNaN(maxBytesNum) && maxBytesNum > 0
+            const hasTimeCap = session.maxDurationSeconds !== null && session.maxDurationSeconds > 0
+            // On-chain `duration` (elapsed) isn't settled for a live session, so
+            // derive elapsed from wall-clock since startAt — the same reason bytes
+            // use the live interface counter above. Recomputes each render (1s
+            // while connected) so the time gauge ticks.
+            const elapsedSeconds = session.startAt
+              ? Math.max(0, Math.floor((Date.now() - new Date(session.startAt).getTime()) / 1000))
+              : (session.durationSeconds ?? 0)
+            const timePct = timePercent(elapsedSeconds, session.maxDurationSeconds)
 
             return (
               <div
@@ -244,33 +262,49 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                   </span>
                 </div>
 
-                {/* Row 3: Data usage bar */}
-                <div className="mb-2">
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="text-text-secondary">
-                      Data: {formatBytes(downloadBytes)} / {formatBytes(session.maxBytes)}
-                      {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
-                    </span>
-                    <span className={`font-mono ${pct > 90 ? 'text-danger' : pct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
-                      {pct.toFixed(1)}%
-                    </span>
+                {/* Row 3: Data usage bar — only when the session is byte-metered (per-GB) */}
+                {hasByteCap && (
+                  <div className="mb-2">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-text-secondary">
+                        Data: {formatBytes(downloadBytes)} / {formatBytes(session.maxBytes)}
+                        {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
+                      </span>
+                      <span className={`font-mono ${dataPct > 90 ? 'text-danger' : dataPct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
+                        {dataPct.toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
+                      <div
+                        className={`h-full transition-all rounded-full ${
+                          dataPct > 90 ? 'bg-danger' : dataPct > 70 ? 'bg-warning' : 'bg-info'
+                        }`}
+                        style={{ width: `${dataPct}%` }}
+                      />
+                    </div>
                   </div>
-                  <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
-                    <div
-                      className={`h-full transition-all rounded-full ${
-                        pct > 90 ? 'bg-danger' : pct > 70 ? 'bg-warning' : 'bg-info'
-                      }`}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                </div>
+                )}
 
-                {/* Row 4: Time info (if hourly sub) */}
-                {hasTimeSub && (
-                  <div className="flex items-center gap-4 text-xs mb-2">
-                    <span className="text-text-secondary">
-                      Time: {formatDuration(session.durationSeconds)} / {formatDuration(session.maxDurationSeconds)}
-                    </span>
+                {/* Row 4: Time usage bar — only when the session is time-metered (per-hour) */}
+                {hasTimeCap && (
+                  <div className="mb-2">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-text-secondary">
+                        Time: {formatDuration(elapsedSeconds)} / {formatDuration(session.maxDurationSeconds)}
+                        {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
+                      </span>
+                      <span className={`font-mono ${timePct > 90 ? 'text-danger' : timePct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
+                        {timePct.toFixed(1)}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
+                      <div
+                        className={`h-full transition-all rounded-full ${
+                          timePct > 90 ? 'bg-danger' : timePct > 70 ? 'bg-warning' : 'bg-info'
+                        }`}
+                        style={{ width: `${timePct}%` }}
+                      />
+                    </div>
                   </div>
                 )}
 
@@ -282,6 +316,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                   {session.priceDenom && session.priceValue && (
                     <span>
                       Price: <span className="font-mono">{(parseInt(session.priceValue, 10) / 1e6).toFixed(2)}</span> P2P
+                    </span>
+                  )}
+                  {!hasByteCap && (
+                    <span>
+                      Down: <span className="font-mono">{formatBytes(downloadBytes)}</span>
                     </span>
                   )}
                   <span>

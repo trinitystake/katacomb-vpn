@@ -44,6 +44,7 @@ Strict Electron security isolation with three process boundaries:
 - `config-guard.ts`: **pure validators for untrusted-node data** — `assertSafeWireguardConfig` (allow-list keys, reject `PostUp`/`PreUp`/… so a node config can't run shell as root via `wg-quick`), `assertSafeV2RayConfig`, `isAllowedBypassCidr`/`sanitizeBypassRoutes` (reject `0.0.0.0/x` split-tunnel routes), `extractWireguardEndpointHost`. Unit-tested; see the node-trust invariant below.
 - `fs-utils.ts`: `writeFileAtomic(path, data, mode=0o600)` (temp + rename). Use it for all settings/wallet/session/cache writes — never `writeFileSync` directly for persisted state.
 - `kill-switch.ts`: iptables-based kill switch (helper `killswitch-on`/`killswitch-off`); `traffic-stats.ts`, `node-tester.ts`, `plan-service.ts`/`provider-service.ts` and their `*-cache.ts`, `nodes-cache.ts` round out the main process.
+- `async-utils.ts` (`withTimeout`), `connect-decisions.ts` (pure refund-message + reconnect/backoff decisions), `tx-utils.ts` (`broadcastOrTimeout`): the **Electron-free, unit-tested** reliability helpers. Keep new pure decision logic here rather than inline in the Electron-coupled modules, so it stays testable under the native runner.
 
 ### Privilege Escalation
 
@@ -91,6 +92,24 @@ through `config-guard.ts` first. `vpn-manager.ts` enforces this at the sinks
 node-derived data to disk or hands it to the helper without a `config-guard` check.
 Likewise, tunnel credentials are only persisted when `safeStorage` is available —
 never fall back to writing them in plaintext.
+
+### Reliability invariants (do not regress)
+
+The connect path spends real on-chain funds, so these are enforced and must hold:
+- **Refund on any failure.** Any flow that creates an on-chain session
+  (`subscribeToNode` / `subscribeToPlan` / `startSessionWithExistingSubscription`)
+  MUST run its resolve-endpoint + handshake through `establishSessionOrRefund`
+  (`ipc-handlers.ts`), which auto-cancels (refunds) the just-created session on *any*
+  failure. Never create a session and then handshake without that wrapper.
+- **Serialize tunnel ops.** `CONNECTION_CONNECT`, `performDisconnect`, and the reconnect
+  timer body run inside `withConnectionLock` (a mutex) and are guarded by
+  `connectionEpoch` (bumped on disconnect, so an in-flight reconnect can't resurrect a
+  tunnel the user tore down). Never add a tunnel bring-up/tear-down that bypasses both.
+  Note `ipc-handlers`' `desiredProtocol` (intended) is deliberately distinct from
+  `vpn-manager`'s `activeProtocol` (actual, cleared on interface drop) — don't merge them.
+- **Bound every wait.** RPC connects go through `withTimeout`; session-creating broadcasts
+  go through `broadcastOrTimeout` and set a `timeoutHeight`. `provider-service.ts` is the
+  reference for the timeout pattern.
 
 ### Vite Bundling (Critical)
 

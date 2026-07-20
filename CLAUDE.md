@@ -24,7 +24,7 @@ extension (required by the native runner). No linter is configured; `tsc` is
 
 ## Architecture
 
-Sentinel dVPN desktop client: Electron 33 + React 18 + TypeScript + Vite + Tailwind CSS 3. Connects to the Sentinel blockchain (Cosmos SDK) to subscribe to decentralized VPN nodes and establish WireGuard/V2Ray tunnels. Linux-only target.
+Sentinel dVPN desktop client: Electron 41 + React 18 + TypeScript + Vite + Tailwind CSS 3. Connects to the Sentinel blockchain (Cosmos SDK) to subscribe to decentralized VPN nodes and establish WireGuard/V2Ray tunnels. Linux-only target.
 
 ### Process Separation
 

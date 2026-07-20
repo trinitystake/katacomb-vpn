@@ -19,6 +19,7 @@ import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
 import { withTimeout } from './async-utils'
+import { broadcastOrTimeout } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
@@ -29,6 +30,13 @@ const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 const HANDSHAKE_TIMEOUT_MS = 15_000
 // Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
 const RPC_CONNECT_TIMEOUT_MS = 10_000
+// Blocks of validity for a session-creating tx (~6s/block on Sentinel → ~3 min).
+// Past this height the chain rejects the tx, so it can't confirm long after we've
+// stopped polling (finding H2).
+const TX_TIMEOUT_HEIGHT_OFFSET = 30
+const SESSION_TX_TIMEOUT_MESSAGE =
+  'The transaction timed out before confirmation. It may still be processing — check ' +
+  'the Session tab shortly and cancel any unexpected session to reclaim your funds.'
 
 // --- Session config persistence ---
 
@@ -191,7 +199,13 @@ export async function subscribeToNode(params: {
     }
 
     const msg = nodeStartSession(msgArgs as unknown as Parameters<typeof nodeStartSession>[0])
-    const tx = await client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app')
+    // Bound how late this money tx can land: set a timeoutHeight so the chain rejects
+    // it past the window rather than confirming after we've stopped polling (H2).
+    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
+    const tx = await broadcastOrTimeout(
+      client.signAndBroadcast(address, [msg], 'auto', 'sentinel-dvpn-app', timeoutHeight),
+      SESSION_TX_TIMEOUT_MESSAGE,
+    )
 
     if (tx.code !== 0) {
       throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)

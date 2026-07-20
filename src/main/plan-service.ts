@@ -13,6 +13,7 @@ import {
 import { BrowserWindow } from 'electron'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
+import { broadcastOrTimeout } from './tx-utils'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
@@ -34,6 +35,11 @@ const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 const PAGE_SIZE = 50
 // Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
 const RPC_CONNECT_TIMEOUT_MS = 10_000
+// A session-creating tx may confirm after we stop polling — surface that instead of a
+// raw CosmJS TimeoutError so the user can check the Session tab (finding H2).
+const TX_TIMEOUT_MESSAGE =
+  'The transaction timed out before confirmation. It may still be processing — check ' +
+  'the Session tab shortly and cancel any unexpected session.'
 
 type SentinelPlan = {
   id: Long
@@ -286,12 +292,15 @@ export async function startSessionWithExistingSubscription(params: {
     'RPC connect',
   )
   try {
-    const tx = await client.subscriptionStartSession({
-      from: address,
-      id: Long.fromString(subscriptionId, true),
-      nodeAddress,
-      memo: 'sentinel-dvpn-app: subscription start session',
-    } as Parameters<typeof client.subscriptionStartSession>[0])
+    const tx = await broadcastOrTimeout(
+      client.subscriptionStartSession({
+        from: address,
+        id: Long.fromString(subscriptionId, true),
+        nodeAddress,
+        memo: 'sentinel-dvpn-app: subscription start session',
+      } as Parameters<typeof client.subscriptionStartSession>[0]),
+      TX_TIMEOUT_MESSAGE,
+    )
 
     if (tx.code !== 0) {
       throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
@@ -328,14 +337,17 @@ export async function subscribeToPlan(params: {
     'RPC connect',
   )
   try {
-    const tx = await client.planStartSession({
-      from: address,
-      id: Long.fromString(planId, true),
-      denom,
-      renewalPricePolicy: RenewalPricePolicy.RENEWAL_PRICE_POLICY_ALWAYS,
-      nodeAddress,
-      memo: 'sentinel-dvpn-app: plan start session',
-    } as Parameters<typeof client.planStartSession>[0])
+    const tx = await broadcastOrTimeout(
+      client.planStartSession({
+        from: address,
+        id: Long.fromString(planId, true),
+        denom,
+        renewalPricePolicy: RenewalPricePolicy.RENEWAL_PRICE_POLICY_ALWAYS,
+        nodeAddress,
+        memo: 'sentinel-dvpn-app: plan start session',
+      } as Parameters<typeof client.planStartSession>[0]),
+      TX_TIMEOUT_MESSAGE,
+    )
 
     if (tx.code !== 0) {
       throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)

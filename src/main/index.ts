@@ -8,6 +8,7 @@ import {
   performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
+import { sweepStaleSessionFiles } from './sentinel-service'
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
 import { IPC } from '../shared/ipc-channels'
@@ -254,6 +255,8 @@ app.whenReady().then(() => {
   // If a previous run left a kill-switch chain stranded (crash/OOM mid-teardown),
   // clear it now that we know we're not connected. Fire-and-forget, best-effort.
   void healStrandedKillSwitch().catch(() => { /* best-effort self-heal */ })
+  // Drop stale session credential files left by non-endSession exit paths (finding L4).
+  sweepStaleSessionFiles()
   registerIpcHandlers()
   // Seed node cache from disk so the first window gets instant data via
   // nodesGetCached(), then start the 60s background refresh loop.

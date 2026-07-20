@@ -14,7 +14,7 @@ import {
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow, app, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
-import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
+import { readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
@@ -97,6 +97,28 @@ export function loadSessionConfig(sessionId: string): SavedSessionConfig | null 
 function deleteSessionConfig(sessionId: string): void {
   const path = sessionConfigPath(sessionId)
   if (existsSync(path)) unlinkSync(path)
+}
+
+/**
+ * Delete session config files older than maxAgeMs (default 7 days). endSession
+ * removes a file on a clean cancel, but other exit paths (disconnect, quit, expiry)
+ * leave the encrypted WG key / V2Ray UUID behind to accumulate — this sweeps the
+ * strays on startup (finding L4). Age-based on purpose: an on-chain diff could sweep
+ * every reconnect config on a transient RPC failure (getActiveSessions returns [] on
+ * error), so we never touch recent files.
+ */
+export function sweepStaleSessionFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
+  const now = Date.now()
+  try {
+    const dir = getSessionsDir()
+    for (const file of readdirSync(dir)) {
+      if (!/^session-\d+\.json$/.test(file)) continue
+      const path = join(dir, file)
+      try {
+        if (now - statSync(path).mtimeMs > maxAgeMs) unlinkSync(path)
+      } catch { /* ignore individual files */ }
+    }
+  } catch { /* sessions dir missing / unreadable */ }
 }
 
 function sendProgress(step: string, detail: string): void {
@@ -371,6 +393,9 @@ export async function performHandshake(params: {
     let configString = ''
     if (configFile && existsSync(configFile)) {
       configString = readFileSync(configFile, 'utf-8')
+      // Drop the SDK's temp config once we've read it — it holds the V2Ray UUID and
+      // the tunnel is spawned from a freshly written config later, not this file (L5).
+      try { unlinkSync(configFile) } catch { /* best-effort */ }
     }
     if (!configString) {
       throw new Error('V2Ray handshake succeeded but failed to read config file')

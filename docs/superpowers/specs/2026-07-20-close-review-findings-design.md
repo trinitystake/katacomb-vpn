@@ -74,12 +74,16 @@ green + reasoned confirmation each caller already handles a thrown/timed-out con
 - **H2** — set an explicit `timeoutHeight` on session-creating broadcasts and treat
   CosmJS `TimeoutError` distinctly (poll for a late-landed session and offer to cancel).
 
-## Batch 4 — Data/seed lifecycle + UX (outline)
+## Batch 4 — Data/seed lifecycle (M5 + L4 + L5 + L6; L7 deferred)
 
-- **M5** — auto-clear the copied mnemonic from the clipboard (and on unmount).
-- **L4** — startup sweep of `sessions/session-*.json` files whose id is no longer active.
-- **L5** — clean up root-side runtime residue (daemon `/run/.../sntl0.conf`,
-  `SECURE_TMPDIR`, SDK-written temp config).
-- **L6** — zero `state.privKey` before reassigning on wallet switch/restore.
-- **L7** — give the renderer polling hooks a stale/error surface (lift the `IpDisplay`
-  pattern) instead of silent catches.
+- **M5** — clipboard auto-clear 30s after copy (+ clear the pending timer on unmount).
+- **L4** — startup sweep of `sessions/session-*.json` files older than 7 days.
+  Age-based, NOT on-chain-diffed on purpose: `getActiveSessions` returns `[]` on a
+  transient RPC failure, which would otherwise sweep every reconnect config.
+- **L5** — unlink the root-owned daemon WG config on `wireguard_down` (holds the WG
+  private key) + drop the SDK's temp v2ray config after persisting it. (`SECURE_TMPDIR`
+  dir removal skipped — low value, and `killAllTunnels` isn't strictly quit-only.)
+- **L6** — `setPrivKey()` zeros the previous key bytes before reassigning on wallet
+  switch / restore / import.
+- **L7** — DEFERRED: needs renderer UX design (where a stale/error indicator surfaces);
+  hook state that nothing displays would be dead code.

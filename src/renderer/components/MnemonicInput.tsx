@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import englishWordlist from 'bip39/src/wordlists/english.json'
 
 const wordSet = new Set<string>(englishWordlist)
@@ -18,6 +18,10 @@ export default function MnemonicInput({ onImport }: Props) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
+  const copyClearTimer = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (copyClearTimer.current !== null) window.clearTimeout(copyClearTimer.current)
+  }, [])
 
   function validateMnemonic(value: string): string | null {
     const trimmed = value.trim()
@@ -75,6 +79,12 @@ export default function MnemonicInput({ onImport }: Props) {
 
   function handleCopy() {
     navigator.clipboard.writeText(generatedMnemonic)
+    // Don't let the seed linger on the clipboard — clear it after 30s (finding M5).
+    if (copyClearTimer.current !== null) window.clearTimeout(copyClearTimer.current)
+    copyClearTimer.current = window.setTimeout(() => {
+      navigator.clipboard.writeText('').catch(() => {})
+      copyClearTimer.current = null
+    }, 30_000)
   }
 
   function handleBack() {

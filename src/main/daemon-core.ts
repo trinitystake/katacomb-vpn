@@ -142,6 +142,9 @@ export function handleRequest(req: DaemonRequest, deps: DaemonDeps): DaemonRespo
 
       case 'wireguard_down':
         deps.runHelper(['down'])
+        // Remove the root-owned WG config (holds the private key). It lives on tmpfs
+        // but otherwise persists until the next connect overwrites it (finding L5).
+        try { if (existsSync(WG_CONFIG_PATH)) unlinkSync(WG_CONFIG_PATH) } catch { /* best-effort */ }
         return reply()
 
       case 'tun_up': {

@@ -44,6 +44,14 @@ const state: WalletState = {
   activeWalletId: null,
 }
 
+// Zero the previous private-key bytes before replacing them, so a wallet switch/
+// restore/import doesn't leave the old key lingering in the heap until GC (finding
+// L6). logout() also scrubs; this covers the reassignment paths.
+function setPrivKey(next: Uint8Array | null): void {
+  if (state.privKey && state.privKey !== next) state.privKey.fill(0)
+  state.privKey = next
+}
+
 export function hasStoredWallet(): boolean {
   migrateOldWallet()
   const settings = loadSettings()
@@ -71,7 +79,7 @@ export async function importWallet(mnemonic: string, name?: string, accountIndex
 
   state.wallet = wallet
   state.address = account.address
-  state.privKey = privKey
+  setPrivKey(privKey)
   state.activeWalletId = entry.id
 
   return account.address
@@ -97,7 +105,7 @@ export async function restoreWallet(): Promise<string | null> {
 
     state.wallet = wallet
     state.address = account.address
-    state.privKey = privKey
+    setPrivKey(privKey)
     state.activeWalletId = settings.activeWalletId
 
     // Update address in wallet index if it was blank (migration)
@@ -130,7 +138,7 @@ export async function switchWallet(walletId: string): Promise<string | null> {
 
     state.wallet = wallet
     state.address = account.address
-    state.privKey = privKey
+    setPrivKey(privKey)
     state.activeWalletId = walletId
 
     return account.address

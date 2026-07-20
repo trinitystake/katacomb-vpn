@@ -17,6 +17,7 @@ import {
 import { verifyBinaryIntegrity } from './binary-integrity'
 import { runPrivileged } from './privileged'
 import { loadSettings } from './settings'
+import { parseDefaultRoute, v2rayRunArgs, firstIPv4FromGetent } from './vpn-parse'
 
 const WG_IFACE = 'sntl0'
 
@@ -164,10 +165,7 @@ function resolveHostToIPv4(host: string): string | null {
   if (!/^[a-zA-Z0-9._-]+$/.test(host)) return null
   try {
     const out = execFileSync('getent', ['ahostsv4', host], { stdio: 'pipe', timeout: 5000 }).toString()
-    for (const line of out.split('\n')) {
-      const ip = line.trim().split(/\s+/)[0]
-      if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip
-    }
+    return firstIPv4FromGetent(out)
   } catch { /* ignore */ }
   return null
 }
@@ -194,9 +192,7 @@ function extractV2RayRemoteHost(): string | null {
 function getDefaultRoute(): { gateway: string; iface: string } | null {
   try {
     const output = execSync('ip route show default', { stdio: 'pipe' }).toString().trim()
-    const gwMatch = output.match(/default via (\S+)/)
-    const ifMatch = output.match(/dev (\S+)/)
-    if (gwMatch && ifMatch) return { gateway: gwMatch[1], iface: ifMatch[1] }
+    return parseDefaultRoute(output)
   } catch { /* ignore */ }
   return null
 }
@@ -288,7 +284,7 @@ function v2rayArgs(bin: string, configFile: string): string[] {
     major = isBundled ? 5 : probeV2RayVersion(bin)
     v2rayVersionCache.set(bin, major)
   }
-  return major >= 5 ? ['run', '-config', configFile] : ['-config', configFile]
+  return v2rayRunArgs(major, configFile)
 }
 
 /** Spawn v2ray process and wait briefly to confirm it stays alive */

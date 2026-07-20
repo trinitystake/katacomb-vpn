@@ -1,6 +1,7 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync } from 'fs'
 import { join } from 'path'
+import { writeFileAtomic } from './fs-utils'
 
 export interface CachedPlan {
   id: string
@@ -38,7 +39,7 @@ function loadFromDisk(): CacheFile | null {
 
 function saveToDisk(cache: CacheFile): void {
   try {
-    writeFileSync(cachePath(), JSON.stringify(cache), { mode: 0o600 })
+    writeFileAtomic(cachePath(), JSON.stringify(cache))
   } catch {
     // best-effort
   }

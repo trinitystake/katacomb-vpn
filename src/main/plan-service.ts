@@ -12,6 +12,7 @@ import {
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow } from 'electron'
 import { getRpcEndpoint } from './settings'
+import { withTimeout } from './async-utils'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
@@ -31,6 +32,8 @@ function enrichPlans(plans: CachedPlan[], providers: ProviderInfo[]): EnrichedPl
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 const PAGE_SIZE = 50
+// Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
+const RPC_CONNECT_TIMEOUT_MS = 10_000
 
 type SentinelPlan = {
   id: Long
@@ -75,7 +78,7 @@ function sendDiscoverProgress(done: number, total: number, phase: 'connecting' |
 
 export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
   sendDiscoverProgress(0, maxCount, 'connecting')
-  const client = await SentinelClient.connect(getRpcEndpoint())
+  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
     sendDiscoverProgress(0, maxCount, 'fetching')
     const results: CachedPlan[] = []
@@ -135,7 +138,7 @@ export async function listNodesForPlan(planId: string): Promise<string[]> {
     return cached.addresses
   }
 
-  const client = await SentinelClient.connect(getRpcEndpoint())
+  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
     const addresses: string[] = []
     let nextKey: Uint8Array = new Uint8Array()
@@ -225,7 +228,7 @@ type SentinelSubscription = {
 }
 
 export async function queryPlanAllocations(walletAddress: string): Promise<PlanAllocationInfo[]> {
-  const client = await SentinelClient.connect(getRpcEndpoint())
+  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
     const resp = await client.sentinelQuery?.subscription.subscriptionsForAccount(walletAddress, {
       key: new Uint8Array(),
@@ -277,9 +280,11 @@ export async function startSessionWithExistingSubscription(params: {
   nodeAddress: string
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, subscriptionId, nodeAddress } = params
-  const client = await SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, {
-    gasPrice: GAS_PRICE,
-  })
+  const client = await withTimeout(
+    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
   try {
     const tx = await client.subscriptionStartSession({
       from: address,
@@ -317,9 +322,11 @@ export async function subscribeToPlan(params: {
   nodeAddress: string
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, planId, denom, nodeAddress } = params
-  const client = await SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, {
-    gasPrice: GAS_PRICE,
-  })
+  const client = await withTimeout(
+    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
   try {
     const tx = await client.planStartSession({
       from: address,

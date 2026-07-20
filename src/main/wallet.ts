@@ -17,6 +17,7 @@ import {
   updateWalletAddress,
 } from './settings'
 import { WALLET_PREFIX } from '../shared/chain-constants'
+import { withTimeout } from './async-utils'
 
 // BIP-44 path for Cosmos SDK chains (coin type 118). Varying the account
 // segment yields a different address from the same seed, the way Keplr /
@@ -25,6 +26,9 @@ const COSMOS_COIN_TYPE = 118
 function cosmosHdPath(accountIndex: number) {
   return stringToPath(`m/44'/${COSMOS_COIN_TYPE}'/${accountIndex}'/0/0`)
 }
+
+// Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
+const RPC_CONNECT_TIMEOUT_MS = 10_000
 
 interface WalletState {
   wallet: DirectSecp256k1HdWallet | null
@@ -183,10 +187,13 @@ export function getPrivKey(): Uint8Array | null {
 export async function getBalance(): Promise<{ denom: string; amount: string }[]> {
   if (!state.address) return []
 
-  const client = await SentinelClient.connect(getRpcEndpoint())
-  const balances = await client.getAllBalances(state.address)
-  client.disconnect()
-  return balances.map((b) => ({ denom: b.denom, amount: b.amount }))
+  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  try {
+    const balances = await client.getAllBalances(state.address)
+    return balances.map((b) => ({ denom: b.denom, amount: b.amount }))
+  } finally {
+    client.disconnect()
+  }
 }
 
 export interface SessionInfo {
@@ -262,21 +269,24 @@ export async function getActiveSessions(): Promise<SessionInfo[]> {
   if (!state.address) return []
 
   try {
-    const client = await SentinelClient.connect(getRpcEndpoint())
-    const result = await client.sentinelQuery?.session.sessionsForAccount(state.address, {
-      key: new Uint8Array(),
-      offset: Long.fromNumber(0, true),
-      limit: Long.fromNumber(20, true),
-      countTotal: true,
-      reverse: false,
-    })
-    client.disconnect()
+    const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+    try {
+      const result = await client.sentinelQuery?.session.sessionsForAccount(state.address, {
+        key: new Uint8Array(),
+        offset: Long.fromNumber(0, true),
+        limit: Long.fromNumber(20, true),
+        countTotal: true,
+        reverse: false,
+      })
 
-    if (!result || !result.sessions) return []
+      if (!result || !result.sessions) return []
 
-    return result.sessions
-      .map((s: { typeUrl: string; value: Uint8Array }) => decodeSession(s))
-      .filter((s): s is SessionInfo => s !== null && s.status === 'active')
+      return result.sessions
+        .map((s: { typeUrl: string; value: Uint8Array }) => decodeSession(s))
+        .filter((s): s is SessionInfo => s !== null && s.status === 'active')
+    } finally {
+      client.disconnect()
+    }
   } catch {
     return []
   }

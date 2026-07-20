@@ -27,6 +27,8 @@ const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 // to the handshake POST (the SDK's axios call has no timeout), which would wedge
 // the paid connect flow forever — bound the wait so it fails into the refund path.
 const HANDSHAKE_TIMEOUT_MS = 15_000
+// Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
+const RPC_CONNECT_TIMEOUT_MS = 10_000
 
 // --- Session config persistence ---
 
@@ -103,7 +105,7 @@ interface OnChainNode {
 }
 
 async function queryNodeOnChain(nodeAddress: string): Promise<OnChainNode> {
-  const client = await SentinelClient.connect(getRpcEndpoint())
+  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
     const result = await client.sentinelQuery?.node.node(nodeAddress)
     if (!result) throw new Error('Node not found on chain')
@@ -150,10 +152,21 @@ export async function subscribeToNode(params: {
 
   // Step 1: Create signing client and fetch on-chain prices
   sendProgress('1/5', 'Creating signing client...')
-  const [client, onChainNode] = await Promise.all([
+  // Start the signing client and the on-chain price query in parallel. If the query
+  // rejects, disconnect the client spun up alongside it so it can't leak (finding L1).
+  const clientPromise = withTimeout(
     SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    queryNodeOnChain(nodeAddress),
-  ])
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
+  let onChainNode: OnChainNode
+  try {
+    onChainNode = await queryNodeOnChain(nodeAddress)
+  } catch (err) {
+    clientPromise.then((c) => c.disconnect(), () => {})
+    throw err
+  }
+  const client = await clientPromise
 
   try {
     // Find the matching on-chain Price for the selected denom and subscription type
@@ -209,9 +222,11 @@ export async function endSession(params: {
   sessionId: string
 }): Promise<void> {
   const { wallet, address, sessionId } = params
-  const client = await SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, {
-    gasPrice: GAS_PRICE,
-  })
+  const client = await withTimeout(
+    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
 
   try {
     const msg = sessionCancel({

@@ -468,7 +468,7 @@ async function attemptReconnect(): Promise<void> {
 }
 
 async function fetchNodes(): Promise<unknown[]> {
-  const response = await net.fetch(NODES_API)
+  const response = await net.fetch(NODES_API, { signal: AbortSignal.timeout(15000) })
   if (!response.ok) throw new Error(`Node API returned ${response.status}`)
   const json = await response.json() as { success: boolean; data: unknown[] }
   if (!json.success || !Array.isArray(json.data)) {
@@ -523,7 +523,7 @@ async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
   if (publicRpcCache && Date.now() - publicRpcCache.fetchedAt < PUBLIC_RPC_TTL_MS) {
     return publicRpcCache.list
   }
-  const response = await net.fetch(PUBLIC_RPC_API)
+  const response = await net.fetch(PUBLIC_RPC_API, { signal: AbortSignal.timeout(15000) })
   if (!response.ok) throw new Error(`Public RPC API returned ${response.status}`)
   const json = await response.json() as { success: boolean; data?: { publicRPC?: PublicRpcEntry[] } }
   if (!json.success || !Array.isArray(json.data?.publicRPC)) {
@@ -689,6 +689,11 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     if (!wallet || !address) {
       throw new Error('Wallet not loaded.')
+    }
+    // Ending a session needs the chain, which is unreachable while our own tunnel is
+    // up (traffic routes to the node) — fail fast instead of hanging (finding M2).
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before ending a session — the chain is unreachable through the tunnel.')
     }
     await endSession({ wallet, address, sessionId })
   })

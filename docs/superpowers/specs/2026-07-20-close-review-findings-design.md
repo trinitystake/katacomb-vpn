@@ -53,16 +53,21 @@ green + reasoned confirmation each caller already handles a thrown/timed-out con
 `writeFileAtomic` (`fs-utils.ts`), `isVpnActive` (`vpn-manager.ts`), existing
 `AbortSignal.timeout` sites as the template.
 
-## Batch 2 — Connection lifecycle (outline; detail when reached)
+## Batch 2 — Connection lifecycle (M1 + M4 + L8; M6 deferred)
 
-- **M1** — serialize connect/subscribe/disconnect/reconnect behind a single in-flight
-  operation guard (mutex) so overlapping ops can't orphan a v2ray child.
-- **M4** — on `bringUpV2RayTunnel()` failure in the connect path, tear the v2ray child
-  down so state stays consistent.
-- **M6** — surface a swallowed `killswitch-off` teardown failure to the renderer
-  (extend the existing `killSwitchFailed` flag pattern; do NOT add systemd teardown).
-- **L8** — collapse the duplicated `activeProtocol` (vpn-manager vs ipc-handlers) to a
-  single source of truth.
+- **M1** — `withConnectionLock(fn)`, a promise-chain mutex serializing the tunnel-
+  affecting ops (`CONNECTION_CONNECT`, `performDisconnect`, the reconnect timer body)
+  so overlapping ops can't orphan a v2ray child. Composes with the shipped H4 epoch:
+  the lock prevents concurrent execution, the epoch invalidates a reconnect queued
+  behind a disconnect. Reentrancy avoided by locking inside `performDisconnect`/the
+  connect body (tray + `cleanupOnQuit` callers don't nest). `CONNECTION_SUBSCRIBE`
+  stays unlocked (it preps state, doesn't spawn a tunnel).
+- **M4** — in the `CONNECTION_CONNECT` v2ray branch, if `bringUpV2RayTunnel()` throws,
+  `await disconnect()` to tear the running v2ray child down before rethrowing.
+- **L8** — collapse the duplicated `activeProtocol` to a single source of truth
+  (vpn-manager owns process truth; ipc-handlers reads it), IF it can be done without
+  destabilizing the WG-monitor gating — otherwise flag and defer.
+- **M6** — DEFERRED (self-heals on next launch; UX plumbing not worth it now).
 
 ## Batch 3 — Money robustness (outline)
 

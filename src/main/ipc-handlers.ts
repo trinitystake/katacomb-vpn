@@ -124,6 +124,17 @@ let isIntentionalDisconnect = false
 // of performDisconnect, so a reconnect body resolving afterward would miss it.
 let connectionEpoch = 0
 
+// Serializes the tunnel-affecting ops (connect / disconnect / reconnect) so they
+// can't interleave and orphan a child process (finding M1). Composes with
+// connectionEpoch: the lock prevents concurrent execution; the epoch invalidates a
+// reconnect that was queued behind a disconnect.
+let connectionLock: Promise<unknown> = Promise.resolve()
+function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = connectionLock.then(fn, fn)
+  connectionLock = run.then(() => {}, () => {})
+  return run
+}
+
 // Active protocol + WireGuard liveness monitor. V2Ray has a process exit
 // callback; WireGuard has no process to watch, so we poll the interface and
 // trigger the same auto-reconnect path when it drops.
@@ -348,6 +359,8 @@ function rememberSessionUsage(): void {
  * for the state cleanup). Broadcasts 'idle', which also refreshes the tray.
  */
 export async function performDisconnect(): Promise<void> {
+  // Signal intent synchronously — before acquiring the lock — so an in-flight
+  // reconnect bails at its next epoch check even while a connect still holds the lock.
   isIntentionalDisconnect = true
   connectionEpoch++
   if (reconnectTimer) {
@@ -356,18 +369,20 @@ export async function performDisconnect(): Promise<void> {
   }
   reconnectAttempt = 0
 
-  rememberSessionUsage()
+  return withConnectionLock(async () => {
+    rememberSessionUsage()
 
-  stopWireGuardMonitor()
-  await revertPostConnectSettings()
-  await disconnect()
-  activeV2ray = null
-  activeWg = null
-  activeProtocol = null
-  activeSessionId = null
-  activeNodeInfo = null
-  isIntentionalDisconnect = false
-  sendStateChange('idle')
+    stopWireGuardMonitor()
+    await revertPostConnectSettings()
+    await disconnect()
+    activeV2ray = null
+    activeWg = null
+    activeProtocol = null
+    activeSessionId = null
+    activeNodeInfo = null
+    isIntentionalDisconnect = false
+    sendStateChange('idle')
+  })
 }
 
 /**
@@ -416,54 +431,58 @@ async function attemptReconnect(): Promise<void> {
   // Clear any prior timer before scheduling (guards against a double-schedule from
   // overlapping triggers, e.g. the WG monitor and the v2ray exit callback).
   if (reconnectTimer) clearTimeout(reconnectTimer)
-  reconnectTimer = setTimeout(async () => {
-    // Disconnected (or a newer lifecycle began) during the backoff delay.
-    if (connectionEpoch !== myEpoch) return
-    try {
-      const savedSessionId = activeSessionId
-      if (!savedSessionId) return
+  reconnectTimer = setTimeout(() => {
+    // Take the connection lock so the reconnect can't race a user connect/disconnect (M1).
+    void withConnectionLock(async () => {
+      // Disconnected (or a newer lifecycle began) while queued for the lock or during
+      // the backoff delay.
+      if (connectionEpoch !== myEpoch) return
+      try {
+        const savedSessionId = activeSessionId
+        if (!savedSessionId) return
 
-      const saved = loadSessionConfig(savedSessionId)
-      if (!saved) {
-        console.log('[reconnect] No saved config, cannot reconnect')
-        await teardownToIdle(true)
-        return
-      }
-
-      // Re-establish the tunnel
-      if (saved.protocol === 'wireguard') {
-        await connectWireGuardFromConfig(saved.configString)
-      } else {
-        connectV2RayFromConfig(saved.configString, effectiveV2RayResolverIp(loadSettings()))
-        await new Promise((r) => setTimeout(r, 1500))
-        const status = getConnectionStatus()
-        if (!status.connected) {
-          throw new Error('V2Ray failed to start on reconnect')
+        const saved = loadSessionConfig(savedSessionId)
+        if (!saved) {
+          console.log('[reconnect] No saved config, cannot reconnect')
+          await teardownToIdle(true)
+          return
         }
-        await bringUpV2RayTunnel()
+
+        // Re-establish the tunnel
+        if (saved.protocol === 'wireguard') {
+          await connectWireGuardFromConfig(saved.configString)
+        } else {
+          connectV2RayFromConfig(saved.configString, effectiveV2RayResolverIp(loadSettings()))
+          await new Promise((r) => setTimeout(r, 1500))
+          const status = getConnectionStatus()
+          if (!status.connected) {
+            throw new Error('V2Ray failed to start on reconnect')
+          }
+          await bringUpV2RayTunnel()
+        }
+
+        // The user disconnected while we were bringing the tunnel up — undo it and
+        // stay silent (performDisconnect already broadcast idle). Never resurrect a
+        // tunnel the user explicitly tore down.
+        if (connectionEpoch !== myEpoch) {
+          await teardownToIdle(false)
+          return
+        }
+
+        // Apply post-connect settings
+        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
+
+        activeProtocol = saved.protocol as 'wireguard' | 'v2ray'
+        if (activeProtocol === 'wireguard') startWireGuardMonitor()
+
+        console.log('[reconnect] Success')
+        reconnectAttempt = 0
+        sendStateChange('connected')
+      } catch (err) {
+        console.error('[reconnect] Failed:', err)
+        attemptReconnect()
       }
-
-      // The user disconnected while we were bringing the tunnel up — undo it and
-      // stay silent (performDisconnect already broadcast idle). Never resurrect a
-      // tunnel the user explicitly tore down.
-      if (connectionEpoch !== myEpoch) {
-        await teardownToIdle(false)
-        return
-      }
-
-      // Apply post-connect settings
-      await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
-
-      activeProtocol = saved.protocol as 'wireguard' | 'v2ray'
-      if (activeProtocol === 'wireguard') startWireGuardMonitor()
-
-      console.log('[reconnect] Success')
-      reconnectAttempt = 0
-      sendStateChange('connected')
-    } catch (err) {
-      console.error('[reconnect] Failed:', err)
-      attemptReconnect()
-    }
+    })
   }, decision.delayMs)
 }
 
@@ -935,66 +954,76 @@ export function registerIpcHandlers(): void {
     if (params.configString !== undefined && typeof params.configString !== 'string') {
       throw new Error('Invalid configString')
     }
-    if (params.protocol === 'wireguard') {
-      if (activeWg) {
-        await connectWireGuard(activeWg)
-      } else if (params.configString) {
-        await connectWireGuardFromConfig(params.configString)
-      } else {
-        throw new Error('No WireGuard instance or config available')
+    // Serialize tunnel bring-up against disconnect/reconnect so overlapping ops
+    // can't orphan a child process (finding M1).
+    return withConnectionLock(async () => {
+      if (params.protocol === 'wireguard') {
+        if (activeWg) {
+          await connectWireGuard(activeWg)
+        } else if (params.configString) {
+          await connectWireGuardFromConfig(params.configString)
+        } else {
+          throw new Error('No WireGuard instance or config available')
+        }
+
+        // Apply DNS and kill switch if enabled
+        await applyPostConnectSettings('wireguard')
+
+        activeProtocol = 'wireguard'
+        startWireGuardMonitor()
+        sendStateChange('connected')
+        return { protocol: 'wireguard' }
       }
 
-      // Apply DNS and kill switch if enabled
-      await applyPostConnectSettings('wireguard')
+      if (params.protocol === 'v2ray') {
+        // Resolve the DoH resolver up front so it's injected into the v2ray config
+        // (same value applyPostConnectSettings uses for resolv.conf + kill switch).
+        const dohIp = effectiveV2RayResolverIp(loadSettings())
+        if (activeV2ray) {
+          connectV2Ray(activeV2ray, dohIp)
+        } else if (params.configString) {
+          connectV2RayFromConfig(params.configString, dohIp)
+        } else {
+          throw new Error('No V2Ray instance or config available')
+        }
 
-      activeProtocol = 'wireguard'
-      startWireGuardMonitor()
-      sendStateChange('connected')
-      return { protocol: 'wireguard' }
-    }
+        // Wait briefly and verify the v2ray process didn't crash on startup
+        await new Promise((r) => setTimeout(r, 1500))
+        const status = getConnectionStatus()
+        if (!status.connected) {
+          const errMsg = getV2RayError()
+          // When replaying a saved config (reconnect), a failure to start usually
+          // means the node changed its configuration (e.g. switched protocols) or
+          // went offline since the config was saved — point the user at the fix.
+          const fromSavedConfig = !activeV2ray && !!params.configString
+          const hint = fromSavedConfig
+            ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
+            : ''
+          throw new Error(
+            'V2Ray process exited immediately after starting.' + hint +
+            (errMsg ? `\n\nV2Ray error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
+          )
+        }
 
-    if (params.protocol === 'v2ray') {
-      // Resolve the DoH resolver up front so it's injected into the v2ray config
-      // (same value applyPostConnectSettings uses for resolv.conf + kill switch).
-      const dohIp = effectiveV2RayResolverIp(loadSettings())
-      if (activeV2ray) {
-        connectV2Ray(activeV2ray, dohIp)
-      } else if (params.configString) {
-        connectV2RayFromConfig(params.configString, dohIp)
-      } else {
-        throw new Error('No V2Ray instance or config available')
+        // V2Ray is running — bring up the TUN interface. If this fails the child is
+        // still running, so tear it down rather than orphan a SOCKS proxy (finding M4).
+        try {
+          await bringUpV2RayTunnel()
+        } catch (err) {
+          await disconnect()
+          throw err
+        }
+
+        // Apply DNS and kill switch if enabled
+        await applyPostConnectSettings('v2ray')
+
+        activeProtocol = 'v2ray'
+        sendStateChange('connected')
+        return { protocol: 'v2ray' }
       }
 
-      // Wait briefly and verify the v2ray process didn't crash on startup
-      await new Promise((r) => setTimeout(r, 1500))
-      const status = getConnectionStatus()
-      if (!status.connected) {
-        const errMsg = getV2RayError()
-        // When replaying a saved config (reconnect), a failure to start usually
-        // means the node changed its configuration (e.g. switched protocols) or
-        // went offline since the config was saved — point the user at the fix.
-        const fromSavedConfig = !activeV2ray && !!params.configString
-        const hint = fromSavedConfig
-          ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
-          : ''
-        throw new Error(
-          'V2Ray process exited immediately after starting.' + hint +
-          (errMsg ? `\n\nV2Ray error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
-        )
-      }
-
-      // V2Ray is running — now bring up TUN interface to route all traffic through it
-      await bringUpV2RayTunnel()
-
-      // Apply DNS and kill switch if enabled
-      await applyPostConnectSettings('v2ray')
-
-      activeProtocol = 'v2ray'
-      sendStateChange('connected')
-      return { protocol: 'v2ray' }
-    }
-
-    throw new Error('No active VPN instance')
+      throw new Error('No active VPN instance')
+    })
   })
 
   // Connection: Disconnect

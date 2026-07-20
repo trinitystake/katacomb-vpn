@@ -16,6 +16,8 @@ import {
   logout,
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
+import { withTimeout } from './async-utils'
+import { sessionFailureMessage, decideReconnect } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
@@ -50,6 +52,9 @@ const NODES_API = 'https://api.sentnodes.com/v2/nodes'
 const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
 const PUBLIC_RPC_TTL_MS = 60_000
 const RECONNECT_MAX_ATTEMPTS = 5
+// Bound the refund (endSession) so a slow RPC during the failure path can't itself
+// hang the connect flow — see establishSessionOrRefund (finding H1).
+const REFUND_TIMEOUT_MS = 10_000
 // The kill switch drops any DNS that isn't tunnel-routed, so when it's on we
 // need a resolver reachable through the tunnel. A 'system' resolver is usually a
 // LAN/systemd-resolved address that won't route through the tunnel — fall back to
@@ -112,6 +117,12 @@ let publicRpcCache: { list: PublicRpcEntry[]; fetchedAt: number } | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempt = 0
 let isIntentionalDisconnect = false
+// Bumped every time the connection lifecycle ends (a disconnect). An in-flight
+// reconnect captures it and bails if it changes mid-flight, so a user disconnect
+// can never be undone by a reconnect that completes after it (finding H4).
+// isIntentionalDisconnect alone is insufficient — it's reset to false at the end
+// of performDisconnect, so a reconnect body resolving afterward would miss it.
+let connectionEpoch = 0
 
 // Active protocol + WireGuard liveness monitor. V2Ray has a process exit
 // callback; WireGuard has no process to watch, so we poll the interface and
@@ -189,45 +200,47 @@ function applySession(
 }
 
 /**
- * Run the node handshake with the V2Ray encryption policy enforced. If the node
- * offers ONLY cleartext (VLess-none) inbounds, performHandshake throws before
- * any tunnel is brought up; here we auto-cancel the just-created session (refund)
- * and surface a clear message instead of connecting unencrypted. `isDeposit`
- * tailors the refund wording (a direct session locks a deposit; a plan session
- * draws on a prepaid allocation).
+ * After a session is created on-chain (funds locked), resolve the node's endpoint
+ * and run the handshake. On ANY failure between session creation and a live
+ * tunnel — an unresolvable endpoint, a timed-out/garbage handshake, or the V2Ray
+ * VLess-none policy rejection — auto-cancel the just-created session (a bounded
+ * refund) and throw an actionable, session-id-bearing message instead of orphaning
+ * the deposit/allocation (finding H1). `isDeposit` tailors the refund wording (a
+ * direct session locks a deposit; a plan session draws on a prepaid allocation).
  */
-async function handshakeWithPolicy(
-  hsParams: Parameters<typeof performHandshake>[0],
-  ctx: {
-    wallet: NonNullable<ReturnType<typeof getWallet>>
-    address: string
-    sessionId: string
-    nodeMoniker: string
-    isDeposit: boolean
-  },
-): Promise<Awaited<ReturnType<typeof performHandshake>>> {
-  let result: Awaited<ReturnType<typeof performHandshake>>
+async function establishSessionOrRefund(params: {
+  sessionId: string
+  nodeAddress: string
+  nodeType: 1 | 2
+  apiField: string
+  nodeMoniker: string
+  nodeCountry: string
+  wallet: NonNullable<ReturnType<typeof getWallet>>
+  address: string
+  privKey: Uint8Array
+  isDeposit: boolean
+}): Promise<Awaited<ReturnType<typeof performHandshake>>> {
+  const { sessionId, nodeAddress, nodeType, apiField, nodeMoniker, nodeCountry, wallet, address, privKey, isDeposit } = params
   try {
-    result = await performHandshake(hsParams)
+    const remoteUrl = await resolveNodeRemoteUrl(nodeAddress, apiField)
+    return await performHandshake({ sessionId, nodeAddress, nodeType, remoteUrl, privKey, nodeMoniker, nodeCountry })
   } catch (err) {
-    if (err instanceof V2RayPolicyError) {
-      let refunded = false
-      try {
-        await endSession({ wallet: ctx.wallet, address: ctx.address, sessionId: ctx.sessionId })
-        refunded = true
-      } catch (refundErr) {
-        console.error('[policy] auto-cancel of rejected session failed:', refundErr)
-      }
-      const okNote = ctx.isDeposit ? ' and your deposit refunded' : ''
-      throw new Error(
-        refunded
-          ? `Node "${ctx.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting. The session was cancelled${okNote}.`
-          : `Node "${ctx.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting. Could not auto-cancel the session — open the Session tab and cancel session #${ctx.sessionId} manually.`,
-      )
+    let refunded = false
+    try {
+      await withTimeout(endSession({ wallet, address, sessionId }), REFUND_TIMEOUT_MS, 'refund')
+      refunded = true
+    } catch (refundErr) {
+      console.error('[connect] auto-cancel of failed session failed:', refundErr)
     }
-    throw err
+    throw new Error(sessionFailureMessage({
+      refunded,
+      isDeposit,
+      sessionId,
+      nodeMoniker,
+      reason: err instanceof Error ? err.message : String(err),
+      policyRejected: err instanceof V2RayPolicyError,
+    }))
   }
-  return result
 }
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
@@ -336,6 +349,7 @@ function rememberSessionUsage(): void {
  */
 export async function performDisconnect(): Promise<void> {
   isIntentionalDisconnect = true
+  connectionEpoch++
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
@@ -356,31 +370,55 @@ export async function performDisconnect(): Promise<void> {
   sendStateChange('idle')
 }
 
-/** Attempt auto-reconnection using saved session config */
+/**
+ * Tear the tunnel down and return to idle. `broadcast` controls whether we emit
+ * 'idle' — the give-up / no-config paths do (nothing else told the renderer),
+ * but the epoch-drift path does NOT, because the performDisconnect that bumped
+ * the epoch already broadcast idle. Don't strand the user behind a DROP-all kill
+ * switch / overridden DNS; revert is idempotent.
+ */
+async function teardownToIdle(broadcast: boolean): Promise<void> {
+  reconnectAttempt = 0
+  await revertPostConnectSettings()
+  await disconnect()
+  stopWireGuardMonitor()
+  activeProtocol = null
+  if (broadcast) sendStateChange('idle')
+}
+
+/**
+ * Attempt auto-reconnection using saved session config. The retry/give-up/abort
+ * decision is the pure decideReconnect; the timer body is guarded by connectionEpoch
+ * so a disconnect during the backoff delay OR mid-bring-up can never leave a tunnel
+ * up after the user disconnected (finding H4).
+ */
 async function attemptReconnect(): Promise<void> {
-  if (!activeSessionId || isIntentionalDisconnect) return
+  const decision = decideReconnect({
+    attempt: reconnectAttempt,
+    maxAttempts: RECONNECT_MAX_ATTEMPTS,
+    autoReconnect: loadSettings().autoReconnect,
+    intentional: isIntentionalDisconnect,
+    hasSession: !!activeSessionId,
+  })
 
-  const settings = loadSettings()
-  if (!settings.autoReconnect) return
-
-  reconnectAttempt++
-  if (reconnectAttempt > RECONNECT_MAX_ATTEMPTS) {
+  if (decision.action === 'abort') return
+  if (decision.action === 'give-up') {
     console.log('[reconnect] Max attempts reached, giving up')
-    reconnectAttempt = 0
-    // Don't strand the user behind a DROP-all kill switch / overridden DNS.
-    await revertPostConnectSettings()
-    await disconnect()
-    stopWireGuardMonitor()
-    activeProtocol = null
-    sendStateChange('idle')
+    await teardownToIdle(true)
     return
   }
 
-  const delay = Math.min(Math.pow(2, reconnectAttempt) * 1000, 60000)
-  console.log(`[reconnect] Attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS} in ${delay}ms`)
+  reconnectAttempt = decision.attempt
+  const myEpoch = connectionEpoch
+  console.log(`[reconnect] Attempt ${reconnectAttempt}/${RECONNECT_MAX_ATTEMPTS} in ${decision.delayMs}ms`)
   sendReconnecting(reconnectAttempt, RECONNECT_MAX_ATTEMPTS)
 
+  // Clear any prior timer before scheduling (guards against a double-schedule from
+  // overlapping triggers, e.g. the WG monitor and the v2ray exit callback).
+  if (reconnectTimer) clearTimeout(reconnectTimer)
   reconnectTimer = setTimeout(async () => {
+    // Disconnected (or a newer lifecycle began) during the backoff delay.
+    if (connectionEpoch !== myEpoch) return
     try {
       const savedSessionId = activeSessionId
       if (!savedSessionId) return
@@ -388,12 +426,7 @@ async function attemptReconnect(): Promise<void> {
       const saved = loadSessionConfig(savedSessionId)
       if (!saved) {
         console.log('[reconnect] No saved config, cannot reconnect')
-        reconnectAttempt = 0
-        await revertPostConnectSettings()
-        await disconnect()
-        stopWireGuardMonitor()
-        activeProtocol = null
-        sendStateChange('idle')
+        await teardownToIdle(true)
         return
       }
 
@@ -410,6 +443,14 @@ async function attemptReconnect(): Promise<void> {
         await bringUpV2RayTunnel()
       }
 
+      // The user disconnected while we were bringing the tunnel up — undo it and
+      // stay silent (performDisconnect already broadcast idle). Never resurrect a
+      // tunnel the user explicitly tore down.
+      if (connectionEpoch !== myEpoch) {
+        await teardownToIdle(false)
+        return
+      }
+
       // Apply post-connect settings
       await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
 
@@ -423,7 +464,7 @@ async function attemptReconnect(): Promise<void> {
       console.error('[reconnect] Failed:', err)
       attemptReconnect()
     }
-  }, delay)
+  }, decision.delayMs)
 }
 
 async function fetchNodes(): Promise<unknown[]> {
@@ -806,23 +847,20 @@ export function registerIpcHandlers(): void {
       denom: params.denom,
     })
 
-    // Resolve remote URL
-    const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
-
-    // Perform handshake (enforces the V2Ray encryption policy: rejects a
-    // VLess-none-only node and auto-cancels the session for a refund).
-    const result = await handshakeWithPolicy(
-      {
-        sessionId,
-        nodeAddress: params.nodeAddress,
-        nodeType: params.nodeType,
-        remoteUrl,
-        privKey,
-        nodeMoniker: params.nodeMoniker,
-        nodeCountry: params.nodeCountry,
-      },
-      { wallet, address, sessionId, nodeMoniker: params.nodeMoniker, isDeposit: true },
-    )
+    // Resolve the node endpoint + handshake. On ANY failure the just-created
+    // session is auto-cancelled (refund) instead of orphaning the deposit (H1).
+    const result = await establishSessionOrRefund({
+      sessionId,
+      nodeAddress: params.nodeAddress,
+      nodeType: params.nodeType,
+      apiField: params.apiField,
+      nodeMoniker: params.nodeMoniker,
+      nodeCountry: params.nodeCountry,
+      wallet,
+      address,
+      privKey,
+      isDeposit: true,
+    })
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
@@ -1151,20 +1189,18 @@ export function registerIpcHandlers(): void {
       nodeAddress: params.nodeAddress,
     })
 
-    const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
-
-    const result = await handshakeWithPolicy(
-      {
-        sessionId,
-        nodeAddress: params.nodeAddress,
-        nodeType: params.nodeType,
-        remoteUrl,
-        privKey,
-        nodeMoniker: params.nodeMoniker,
-        nodeCountry: params.nodeCountry,
-      },
-      { wallet, address, sessionId, nodeMoniker: params.nodeMoniker, isDeposit: false },
-    )
+    const result = await establishSessionOrRefund({
+      sessionId,
+      nodeAddress: params.nodeAddress,
+      nodeType: params.nodeType,
+      apiField: params.apiField,
+      nodeMoniker: params.nodeMoniker,
+      nodeCountry: params.nodeCountry,
+      wallet,
+      address,
+      privKey,
+      isDeposit: false,
+    })
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
@@ -1204,20 +1240,18 @@ export function registerIpcHandlers(): void {
       nodeAddress: params.nodeAddress,
     })
 
-    const remoteUrl = await resolveNodeRemoteUrl(params.nodeAddress, params.apiField)
-
-    const result = await handshakeWithPolicy(
-      {
-        sessionId,
-        nodeAddress: params.nodeAddress,
-        nodeType: params.nodeType,
-        remoteUrl,
-        privKey,
-        nodeMoniker: params.nodeMoniker,
-        nodeCountry: params.nodeCountry,
-      },
-      { wallet, address, sessionId, nodeMoniker: params.nodeMoniker, isDeposit: false },
-    )
+    const result = await establishSessionOrRefund({
+      sessionId,
+      nodeAddress: params.nodeAddress,
+      nodeType: params.nodeType,
+      apiField: params.apiField,
+      nodeMoniker: params.nodeMoniker,
+      nodeCountry: params.nodeCountry,
+      wallet,
+      address,
+      privKey,
+      isDeposit: false,
+    })
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 

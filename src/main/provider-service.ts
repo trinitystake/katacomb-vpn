@@ -2,6 +2,7 @@ import { SentinelClient, Status } from '@sentinel-official/sentinel-js-sdk'
 import Long from 'long'
 import { getRpcEndpoint } from './settings'
 import { isVpnActive } from './vpn-manager'
+import { withTimeout } from './async-utils'
 import {
   getCachedProviders,
   isCacheFresh,
@@ -36,22 +37,6 @@ function toInfo(p: RawProvider): ProviderInfo {
 
 const CONNECT_TIMEOUT_MS = 10_000
 const QUERY_TIMEOUT_MS = 10_000
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-    p.then(
-      (v) => {
-        clearTimeout(t)
-        resolve(v)
-      },
-      (e) => {
-        clearTimeout(t)
-        reject(e)
-      },
-    )
-  })
-}
 
 let sharedClient: SentinelClient | null = null
 let sharedClientEndpoint: string | null = null

@@ -18,10 +18,15 @@ import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
+import { withTimeout } from './async-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
+// A node in this app's threat model may accept the TLS connection but never reply
+// to the handshake POST (the SDK's axios call has no timeout), which would wedge
+// the paid connect flow forever — bound the wait so it fails into the refund path.
+const HANDSHAKE_TIMEOUT_MS = 15_000
 
 // --- Session config persistence ---
 
@@ -241,6 +246,23 @@ export class V2RayPolicyError extends Error {
   }
 }
 
+/**
+ * Decode the base64 JSON body from an (untrusted) node handshake response. Both
+ * protocol branches funnel through here so the shape check on adversarial node
+ * data is a single enforcement point. Returns `any` to match the SDK's loosely
+ * typed config objects consumed by wg/v2ray parseConfig.
+ */
+function parseHandshakeData(result: { data?: unknown }): any {
+  if (!result || typeof result.data !== 'string') {
+    throw new Error('Node returned an invalid handshake response')
+  }
+  try {
+    return JSON.parse(Buffer.from(result.data, 'base64').toString())
+  } catch {
+    throw new Error('Node returned an unparseable handshake response')
+  }
+}
+
 export async function performHandshake(params: {
   sessionId: string
   nodeAddress: string
@@ -264,14 +286,13 @@ export async function performHandshake(params: {
   if (nodeType === 1) {
     // WireGuard
     const wg = new Wireguard()
-    const result = await sdkHandshake(
-      sid,
-      { public_key: wg.publicKey },
-      privKey,
-      remoteUrl
+    const result = await withTimeout(
+      sdkHandshake(sid, { public_key: wg.publicKey }, privKey, remoteUrl),
+      HANDSHAKE_TIMEOUT_MS,
+      'node handshake',
     )
 
-    const handshakeData = JSON.parse(Buffer.from(result.data, 'base64').toString())
+    const handshakeData = parseHandshakeData(result)
     await wg.parseConfig(handshakeData, result.addrs)
 
     const configString = wg.buildConfigString() || ''
@@ -290,14 +311,13 @@ export async function performHandshake(params: {
   } else {
     // V2Ray
     const v2ray = new V2Ray()
-    const result = await sdkHandshake(
-      sid,
-      { uuid: v2ray.getKey() },
-      privKey,
-      remoteUrl
+    const result = await withTimeout(
+      sdkHandshake(sid, { uuid: v2ray.getKey() }, privKey, remoteUrl),
+      HANDSHAKE_TIMEOUT_MS,
+      'node handshake',
     )
 
-    const handshakeData = JSON.parse(Buffer.from(result.data, 'base64').toString())
+    const handshakeData = parseHandshakeData(result)
 
     // Encryption policy: reject a node that offers ONLY cleartext (VLess-none)
     // inbounds; otherwise drop any VLess-none inbound and keep the encrypted

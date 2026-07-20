@@ -31,7 +31,6 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
-  const [disconnecting, setDisconnecting] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
@@ -192,19 +191,6 @@ export default function ConnectionModal({ node, onClose }: Props) {
   function handleSeePlansForNode() {
     goToPlansForNode(node.address)
     onClose()
-  }
-
-  async function handleDisconnect() {
-    setDisconnecting(true)
-    try {
-      await window.api.connectionDisconnect()
-      setTunnelConnected(false)
-      setSessionId(null)
-      setCurrentStep(null)
-      onClose()
-    } finally {
-      setDisconnecting(false)
-    }
   }
 
   const title = tunnelConnected
@@ -465,8 +451,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </p>
             )}
 
-            <button onClick={handleDisconnect} disabled={disconnecting} className="btn btn-danger w-full flex items-center justify-center gap-2 disabled:opacity-50">
-              {disconnecting ? <><Spinner className="text-white" /> Disconnecting...</> : 'Disconnect'}
+            <button onClick={onClose} className="btn btn-primary w-full">
+              Done
             </button>
           </div>
         )}

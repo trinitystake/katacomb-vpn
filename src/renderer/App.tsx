@@ -84,7 +84,7 @@ function AppInner() {
           <DisconnectButton />
         </div>
         <div className="flex items-center gap-3">
-          <WalletPanel address={wallet.address} name={wallet.name} onLogout={wallet.logout} />
+          <WalletPanel address={wallet.address} name={wallet.name} onLogout={wallet.logout} connected={isConnected} />
           <button
             onClick={() => setShowSettings(true)}
             className="text-text-secondary hover:text-accent text-sm transition-colors"
@@ -94,6 +94,16 @@ function AppInner() {
           </button>
         </div>
       </header>
+
+      {connStatus.killSwitchTeardownFailed && (
+        <div className="px-5 py-1.5 bg-danger-subtle border-b border-danger text-danger text-xs flex items-center gap-2">
+          <span aria-hidden>⚠</span>
+          <span>
+            The kill switch could not be turned off — all traffic may still be blocked.
+            If you have no internet, restart Sentinel dVPN to restore it.
+          </span>
+        </div>
+      )}
 
       {/* Main tabs */}
       <nav className="flex border-b border-border bg-bg-secondary px-5 shrink-0">

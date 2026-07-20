@@ -41,13 +41,16 @@ export async function enableKillSwitch(vpnInterface: string, remoteHost: string,
 }
 
 /** Disable kill switch — flush rules and restore normal traffic */
-export async function disableKillSwitch(): Promise<void> {
+export async function disableKillSwitch(): Promise<boolean> {
   try {
     await runPrivileged(['killswitch-off'])
     // Clear the marker only after a confirmed teardown; if killswitch-off failed
     // (e.g. daemon dead), leave it so the next launch's self-heal retries.
     clearKillSwitchArmed()
+    return true
   } catch {
-    // Best-effort — chain may not exist
+    // Chain may still be installed (e.g. daemon dead) — report so the caller can
+    // warn the user their traffic may be blocked until the next-launch self-heal.
+    return false
   }
 }

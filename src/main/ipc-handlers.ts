@@ -82,6 +82,10 @@ let activeNodeInfo: { address: string; moniker: string; country: string; type: 1
 // True when the user enabled the kill switch but arming it failed — surfaced to
 // the renderer so "protected" is never silently a lie.
 let killSwitchFailed = false
+// True when a kill-switch TEARDOWN failed while it was armed — the DROP-all chain may
+// still be blocking traffic until the next-launch self-heal. Surfaced so the renderer
+// can warn even in the idle state (finding M6).
+let killSwitchTeardownFailed = false
 
 // Cached values returned when VPN is active and RPC is unreachable
 let lastKnownBalance: { denom: string; amount: string }[] = []
@@ -135,16 +139,19 @@ function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-// Active protocol + WireGuard liveness monitor. V2Ray has a process exit
-// callback; WireGuard has no process to watch, so we poll the interface and
-// trigger the same auto-reconnect path when it drops.
-let activeProtocol: 'wireguard' | 'v2ray' | null = null
+// The protocol we INTEND to be connected with for the current session. Distinct
+// from vpn-manager's own `activeProtocol` (actual process/interface truth, which
+// getConnectionStatus() clears the instant the interface drops): this one must
+// survive a WG interface drop so the liveness monitor below knows to reconnect
+// (finding L8 — the two are not duplication, so they're named apart, not merged).
+// V2Ray has a process exit callback; WireGuard has no process to watch, so we poll.
+let desiredProtocol: 'wireguard' | 'v2ray' | null = null
 let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
 
 function startWireGuardMonitor(): void {
   if (wgMonitorTimer) return
   wgMonitorTimer = setInterval(() => {
-    if (activeProtocol !== 'wireguard' || isIntentionalDisconnect || reconnectAttempt > 0) return
+    if (desiredProtocol !== 'wireguard' || isIntentionalDisconnect || reconnectAttempt > 0) return
     if (!activeSessionId) return
     if (!isWireGuardUp()) {
       console.log('[vpn] WireGuard interface dropped, attempting reconnect...')
@@ -259,6 +266,7 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   // New interface/session — clear the speed baseline (finding M10).
   resetTrafficStats()
   killSwitchFailed = false
+  killSwitchTeardownFailed = false
 
   const settings = loadSettings()
 
@@ -312,9 +320,12 @@ async function revertPostConnectSettings(): Promise<void> {
   // override are still installed. Both helper verbs are idempotent no-ops when
   // there's nothing to undo, so unconditional teardown is safe and can't strand
   // the user behind a stale kill switch or a pinned resolv.conf. Kill switch
-  // first, so DNS-restore traffic can flow. (disableKillSwitch swallows its own
-  // errors.)
-  await disableKillSwitch()
+  // first, so DNS-restore traffic can flow. If the kill switch WAS armed and its
+  // teardown fails, the DROP-all chain persists until the next-launch self-heal —
+  // flag it so the renderer can warn the user their internet may be blocked (M6).
+  const wasArmed = isKillSwitchArmed()
+  const teardownOk = await disableKillSwitch()
+  killSwitchTeardownFailed = wasArmed && !teardownOk
   try {
     await runPrivileged(['dns-restore'])
   } catch { /* best-effort */ }
@@ -377,7 +388,7 @@ export async function performDisconnect(): Promise<void> {
     await disconnect()
     activeV2ray = null
     activeWg = null
-    activeProtocol = null
+    desiredProtocol = null
     activeSessionId = null
     activeNodeInfo = null
     isIntentionalDisconnect = false
@@ -397,7 +408,7 @@ async function teardownToIdle(broadcast: boolean): Promise<void> {
   await revertPostConnectSettings()
   await disconnect()
   stopWireGuardMonitor()
-  activeProtocol = null
+  desiredProtocol = null
   if (broadcast) sendStateChange('idle')
 }
 
@@ -472,8 +483,8 @@ async function attemptReconnect(): Promise<void> {
         // Apply post-connect settings
         await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
 
-        activeProtocol = saved.protocol as 'wireguard' | 'v2ray'
-        if (activeProtocol === 'wireguard') startWireGuardMonitor()
+        desiredProtocol = saved.protocol as 'wireguard' | 'v2ray'
+        if (desiredProtocol === 'wireguard') startWireGuardMonitor()
 
         console.log('[reconnect] Success')
         reconnectAttempt = 0
@@ -969,7 +980,7 @@ export function registerIpcHandlers(): void {
         // Apply DNS and kill switch if enabled
         await applyPostConnectSettings('wireguard')
 
-        activeProtocol = 'wireguard'
+        desiredProtocol = 'wireguard'
         startWireGuardMonitor()
         sendStateChange('connected')
         return { protocol: 'wireguard' }
@@ -1017,7 +1028,7 @@ export function registerIpcHandlers(): void {
         // Apply DNS and kill switch if enabled
         await applyPostConnectSettings('v2ray')
 
-        activeProtocol = 'v2ray'
+        desiredProtocol = 'v2ray'
         sendStateChange('connected')
         return { protocol: 'v2ray' }
       }
@@ -1043,6 +1054,7 @@ export function registerIpcHandlers(): void {
       nodeType: activeNodeInfo?.type,
       v2raySummary: activeNodeInfo?.v2raySummary,
       killSwitchFailed: killSwitchFailed || undefined,
+      killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
       sessionId: activeSessionId,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,

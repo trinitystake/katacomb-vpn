@@ -5,9 +5,10 @@ interface Props {
   address: string | null
   name: string | null
   onLogout: () => void
+  connected: boolean
 }
 
-export default function WalletPanel({ address, name, onLogout }: Props) {
+export default function WalletPanel({ address, name, onLogout, connected }: Props) {
   const [balance, setBalance] = useState<string | null>(null)
   const [sessions, setSessions] = useState<{ id: string; nodeAddress: string; status: string }[]>([])
   const [copied, setCopied] = useState(false)
@@ -129,12 +130,20 @@ export default function WalletPanel({ address, name, onLogout }: Props) {
             <div className="flex justify-between items-center">
               <span className="text-text-secondary">Balance</span>
               <div className="flex items-center gap-2">
+                {connected && (
+                  <span
+                    className="text-text-tertiary text-xs"
+                    title="Connected to the VPN — the chain is unreachable through the tunnel, so this is the balance from before you connected."
+                  >
+                    cached
+                  </span>
+                )}
                 <span className="text-success font-mono">{balance || '...'} P2P</span>
                 <button
                   onClick={refresh}
-                  disabled={refreshing}
+                  disabled={refreshing || connected}
                   className="text-text-secondary hover:text-accent transition-colors disabled:opacity-50"
-                  title="Refresh balance"
+                  title={connected ? 'Balance refresh is unavailable while connected (RPC routes through the tunnel)' : 'Refresh balance'}
                   aria-label="Refresh balance"
                 >
                   {refreshing ? (

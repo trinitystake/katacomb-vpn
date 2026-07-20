@@ -43,9 +43,10 @@ linux:
   category: Network
   icon: build/icons
   desktop:
-    Name: Sentinel dVPN
-    Comment: Decentralized VPN Client
-    Categories: Network;VPN;Security;
+    entry:
+      Name: Sentinel dVPN
+      Comment: Decentralized VPN Client
+      Categories: Network;VPN;Security;
 deb:
   depends:
     - wireguard-tools

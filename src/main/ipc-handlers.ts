@@ -28,6 +28,7 @@ import {
   connectWireGuard,
   connectWireGuardFromConfig,
   connectV2RayFromConfig,
+  connectXRayFromConfig,
   disconnect,
   getConnectionStatus,
   isVpnActive,
@@ -77,8 +78,11 @@ function effectiveV2RayResolverIp(settings: AppSettings): string | null {
 
 let activeWg: Wireguard | null = null
 let activeV2ray: V2Ray | null = null
+// Xray has no SDK instance (we build its config ourselves), so we hold the built
+// config string across the subscribe→connect handoff, mirroring activeWg/activeV2ray.
+let activeXrayConfig: string | null = null
 let activeSessionId: string | null = null
-let activeNodeInfo: { address: string; moniker: string; country: string; type: 1 | 2; v2raySummary?: string } | null = null
+let activeNodeInfo: { address: string; moniker: string; country: string; type: number; v2raySummary?: string } | null = null
 // True when the user enabled the kill switch but arming it failed — surfaced to
 // the renderer so "protected" is never silently a lie.
 let killSwitchFailed = false
@@ -145,7 +149,7 @@ function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
 // survive a WG interface drop so the liveness monitor below knows to reconnect
 // (finding L8 — the two are not duplication, so they're named apart, not merged).
 // V2Ray has a process exit callback; WireGuard has no process to watch, so we poll.
-let desiredProtocol: 'wireguard' | 'v2ray' | null = null
+let desiredProtocol: 'wireguard' | 'v2ray' | 'xray' | null = null
 let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
 
 function startWireGuardMonitor(): void {
@@ -208,13 +212,14 @@ function applySession(
   nodeAddress: string,
   nodeMoniker: string,
   nodeCountry: string,
-  nodeType: 1 | 2,
-  result: { wgInstance: Wireguard | null; v2rayInstance: V2Ray | null; v2raySummary?: string },
+  nodeType: number,
+  result: { protocol: string; configString: string; wgInstance: Wireguard | null; v2rayInstance: V2Ray | null; v2raySummary?: string },
 ): void {
   activeSessionId = sessionId
   activeNodeInfo = { address: nodeAddress, moniker: nodeMoniker, country: nodeCountry, type: nodeType, v2raySummary: result.v2raySummary }
   activeWg = result.wgInstance
   activeV2ray = result.v2rayInstance
+  activeXrayConfig = result.protocol === 'xray' ? result.configString : null
 }
 
 /**
@@ -229,7 +234,7 @@ function applySession(
 async function establishSessionOrRefund(params: {
   sessionId: string
   nodeAddress: string
-  nodeType: 1 | 2
+  nodeType: number
   apiField: string
   nodeMoniker: string
   nodeCountry: string
@@ -262,7 +267,7 @@ async function establishSessionOrRefund(params: {
 }
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
-async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promise<void> {
+async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray'): Promise<void> {
   // New interface/session — clear the speed baseline (finding M10).
   resetTrafficStats()
   killSwitchFailed = false
@@ -279,7 +284,8 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray'): Promis
   // - V2Ray: tun2socks does no DNS setup, so we point the resolver through the
   //   tunnel ourselves. Under the kill switch a 'system'/LAN resolver isn't
   //   tunnel-routed (the kill switch drops it), so force a public resolver.
-  const v2rayDnsIp = protocol === 'v2ray' ? effectiveV2RayResolverIp(settings) : null
+  // xray uses the same tun2socks path as v2ray, so it needs the same tunnelled DNS.
+  const v2rayDnsIp = (protocol === 'v2ray' || protocol === 'xray') ? effectiveV2RayResolverIp(settings) : null
 
   // Apply DNS override (routes V2Ray DNS through the tunnel via /etc/resolv.conf)
   if (v2rayDnsIp) {
@@ -388,6 +394,7 @@ export async function performDisconnect(): Promise<void> {
     await disconnect()
     activeV2ray = null
     activeWg = null
+    activeXrayConfig = null
     desiredProtocol = null
     activeSessionId = null
     activeNodeInfo = null
@@ -463,11 +470,17 @@ async function attemptReconnect(): Promise<void> {
         if (saved.protocol === 'wireguard') {
           await connectWireGuardFromConfig(saved.configString)
         } else {
-          connectV2RayFromConfig(saved.configString, effectiveV2RayResolverIp(loadSettings()))
+          // v2ray and xray share the child-process + tun2socks bring-up.
+          const dohIp = effectiveV2RayResolverIp(loadSettings())
+          if (saved.protocol === 'xray') {
+            connectXRayFromConfig(saved.configString, dohIp)
+          } else {
+            connectV2RayFromConfig(saved.configString, dohIp)
+          }
           await new Promise((r) => setTimeout(r, 1500))
           const status = getConnectionStatus()
           if (!status.connected) {
-            throw new Error('V2Ray failed to start on reconnect')
+            throw new Error('Proxy failed to start on reconnect')
           }
           await bringUpV2RayTunnel()
         }
@@ -481,9 +494,9 @@ async function attemptReconnect(): Promise<void> {
         }
 
         // Apply post-connect settings
-        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray')
+        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray' | 'xray')
 
-        desiredProtocol = saved.protocol as 'wireguard' | 'v2ray'
+        desiredProtocol = saved.protocol as 'wireguard' | 'v2ray' | 'xray'
         if (desiredProtocol === 'wireguard') startWireGuardMonitor()
 
         console.log('[reconnect] Success')
@@ -834,7 +847,7 @@ export function registerIpcHandlers(): void {
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
-    nodeType: 1 | 2
+    nodeType: number
     apiField: string
     type: 'gigabytes' | 'hours'
     amount: number
@@ -844,7 +857,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2) throw new Error('Invalid nodeType: must be 1 or 2')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4) throw new Error('Unsupported nodeType: only WireGuard (1), V2Ray (2) and XRAY (4) are connectable')
     assertString(params.apiField, 'apiField')
     if (params.type !== 'gigabytes' && params.type !== 'hours') throw new Error('Invalid type')
     assertNumber(params.amount, 'amount', 1, 1000)
@@ -937,7 +950,7 @@ export function registerIpcHandlers(): void {
       address: saved.nodeAddress,
       moniker: saved.nodeMoniker || nodeMeta.moniker || '',
       country: saved.nodeCountry || nodeMeta.country || '',
-      type: saved.protocol === 'wireguard' ? 1 : 2,
+      type: saved.protocol === 'wireguard' ? 1 : saved.protocol === 'xray' ? 4 : 2,
     }
 
     return {
@@ -956,11 +969,11 @@ export function registerIpcHandlers(): void {
 
   // Connection: Connect (establish tunnel — from SDK instance or raw config)
   handle(IPC.CONNECTION_CONNECT, async (_event, params: {
-    protocol: 'wireguard' | 'v2ray'
+    protocol: 'wireguard' | 'v2ray' | 'xray'
     configString?: string
   }) => {
-    if (params.protocol !== 'wireguard' && params.protocol !== 'v2ray') {
-      throw new Error('Invalid protocol: must be wireguard or v2ray')
+    if (params.protocol !== 'wireguard' && params.protocol !== 'v2ray' && params.protocol !== 'xray') {
+      throw new Error('Invalid protocol: must be wireguard, v2ray or xray')
     }
     if (params.configString !== undefined && typeof params.configString !== 'string') {
       throw new Error('Invalid configString')
@@ -1031,6 +1044,47 @@ export function registerIpcHandlers(): void {
         desiredProtocol = 'v2ray'
         sendStateChange('connected')
         return { protocol: 'v2ray' }
+      }
+
+      if (params.protocol === 'xray') {
+        // Xray reuses the v2ray tunnel path (child process + tun2socks). The config
+        // is the one built during the handshake (activeXrayConfig), or a saved config
+        // on manual reconnect (params.configString).
+        const dohIp = effectiveV2RayResolverIp(loadSettings())
+        const xrayConfig = params.configString ?? activeXrayConfig
+        if (!xrayConfig) {
+          throw new Error('No Xray config available')
+        }
+        connectXRayFromConfig(xrayConfig, dohIp)
+
+        // Wait briefly and verify the xray process didn't crash on startup
+        await new Promise((r) => setTimeout(r, 1500))
+        const status = getConnectionStatus()
+        if (!status.connected) {
+          const errMsg = getV2RayError()
+          const fromSavedConfig = !activeXrayConfig && !!params.configString
+          const hint = fromSavedConfig
+            ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
+            : ''
+          throw new Error(
+            'Xray process exited immediately after starting.' + hint +
+            (errMsg ? `\n\nXray error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
+          )
+        }
+
+        // Xray is running — bring up the TUN interface (same tun2socks path as v2ray).
+        try {
+          await bringUpV2RayTunnel()
+        } catch (err) {
+          await disconnect()
+          throw err
+        }
+
+        await applyPostConnectSettings('xray')
+
+        desiredProtocol = 'xray'
+        sendStateChange('connected')
+        return { protocol: 'xray' }
       }
 
       throw new Error('No active VPN instance')
@@ -1210,7 +1264,7 @@ export function registerIpcHandlers(): void {
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
-    nodeType: 1 | 2
+    nodeType: number
     apiField: string
   }) => {
     assertString(params.planId, 'planId')
@@ -1219,7 +1273,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2) throw new Error('Invalid nodeType')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4) throw new Error('Unsupported nodeType')
     assertString(params.apiField, 'apiField')
 
     const wallet = getWallet()
@@ -1263,7 +1317,7 @@ export function registerIpcHandlers(): void {
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
-    nodeType: 1 | 2
+    nodeType: number
     apiField: string
   }) => {
     assertString(params.subscriptionId, 'subscriptionId')
@@ -1271,7 +1325,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2) throw new Error('Invalid nodeType')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4) throw new Error('Unsupported nodeType')
     assertString(params.apiField, 'apiField')
 
     const wallet = getWallet()

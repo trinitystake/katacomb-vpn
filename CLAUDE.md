@@ -126,6 +126,55 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 - `@` alias maps to `src/renderer/`.
 - Types for renderer in `src/renderer/types/index.ts` — includes `ElectronAPI` interface matching preload bridge and `declare global` for `window.api`.
 
+### Node protocol types
+
+`SentNode.type` is a **numeric** protocol tag from the `api.sentnodes.com/v2/nodes`
+feed: `0`=unknown, `1`=WireGuard, `2`=V2Ray, `3`=OpenVPN, `4`=XRAY, `5`=AmneziaWG,
+`6`=Hysteria2. **Each node runs exactly ONE protocol** — a node's own `/info`
+endpoint reports a single `service_type` (verified against dvpnx master + live
+v9.0.0 nodes). The v9.0.0 "six protocols" marketing means six protocol *types*
+exist across the network, NOT six per node; multi-protocol operators register
+several separate nodes. Do not build a per-node "protocols array" model — there's
+no aggregator field for it.
+
+`src/renderer/utils/protocols.ts` is the **single source of truth** for protocol
+label / short badge / semantic color / `supported` flag — use `protocolMeta(type)`
+and `isProtocolSupported(type)` instead of inline `type === 1 ? …` ternaries (which
+assume a two-protocol world). The Nodes-tab protocol filter is a single-select
+`<select>` in `NodeFilters.tsx` driven by `PROTOCOL_FILTER_OPTIONS`; `NodeFilter.type`
+is `'all' | ProtocolType`.
+
+**Connectable: WireGuard (1), V2Ray (2), XRAY (4).** OpenVPN/AmneziaWG/Hysteria2
+(3/5/6) are identify-and-filter only — the connect UI disables them
+(`isProtocolSupported`) and the main-process IPC guards (`nodeType` not in `{1,2,4}`
+→ throw) are the enforcement. Each additional protocol needs its own pinned binary,
+config generation/validation, and (for root-run ones) a privileged daemon op.
+
+**XRAY** is the VLESS+Reality protocol and reuses almost the entire V2Ray path: it's
+a v2ray-core fork that reads the **same JSON config**, so it runs through the same
+`config-guard` transforms (`pinV2RayNodeAddresses`/`withV2RayDiagnosticLog`/
+`assertSafeV2RayConfig`/`withV2RayDoH`), the same tun2socks routing (`bringUpTun`),
+and the same child-process lifecycle (`spawnV2Ray` — generalized to take a
+bin/args/logName; `isChildProxy()` narrows v2ray+xray together at the branch sites).
+What differs:
+- The bundled Sentinel SDK **cannot** build Reality configs — its `V2RayMetadata`
+  type has no `flow`/`reality_*` fields and `V2Ray.parseConfig` ignores them — so
+  `src/main/xray-config.ts` (`buildXRayConfig`, pure + unit-tested) builds the xray
+  VLESS+Reality JSON from the node's handshake metadata. Enum decode confirmed via the
+  aggregator: `proxy_protocol 1=vless`, `transport_protocol 1=tcp`, `transport_security
+  1=none/2=tls/3=reality`, `flow 2=xtls-rprx-vision`. It only ever selects reality/tls
+  entries (never `none`), which is what keeps an xray tunnel from being cleartext.
+- The handshake reuses the generic `sdkHandshake(sid, { uuid }, …)` (VLESS peer
+  material is a UUID, same as V2Ray); `performHandshake`'s `nodeType === 4` branch
+  generates the uuid from an SDK `V2Ray` instance purely for that.
+- A separate **`xray`** binary is bundled in `resources/linux/v2ray/` (Xray-core
+  official release, SHA-pinned in `binary-integrity.ts` — vendor + verify checksum +
+  update the pin when upgrading). `extraResources` ships everything under that dir.
+
+v9.0.0 nodes expose a `service_metadata` array on `/info` (Xray Reality keys,
+Hysteria2 obfs, transport variants) that the SDK's `NodeInfo` type lacks — the xray
+path reads the equivalent from the handshake response, not `/info`.
+
 ## Working Principles (for LLM contributors)
 
 This codebase follows Karpathy-style discipline. Apply these in order of precedence:

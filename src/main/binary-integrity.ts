@@ -9,6 +9,9 @@ import { readFileSync } from 'fs'
 export const BUNDLED_HASHES: Record<string, string> = {
   v2ray: '751f52a3d9324c993953b7ebb6aab79e77115542a8ca1ef83078cb215c03dea8',
   tun2socks: '42ce074a9a225825ef5e3f21b3657af7ed25187f7cd4e6d11e0646d5d166eb04',
+  // Xray-core v26.3.27 (official XTLS/Xray-core Xray-linux-64.zip release, zip
+  // SHA2-256 23cd9af9…f7c8ae verified against the published .dgst).
+  xray: '8255dd939c34cf966cc91517b6324dd3c8d0bcf49ffac8beca049a38c46845ed',
 }
 
 /** Verify a bundled binary's SHA-256 hash matches the expected value. */

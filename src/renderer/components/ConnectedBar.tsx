@@ -1,4 +1,5 @@
 import { useConnection } from '../hooks/useConnection'
+import { protocolMeta } from '../utils/protocols'
 
 export default function ConnectedBar() {
   const { status } = useConnection()
@@ -19,13 +20,13 @@ export default function ConnectedBar() {
       ) : (
         <>
           <span className="status-dot status-dot-active" />
-          {status.nodeType && (
+          {status.nodeType !== undefined && (
             <span className={`px-1.5 py-0.5 border text-xs rounded-sm ${
               status.nodeType === 1
                 ? 'border-info text-info'
                 : 'border-warning text-warning'
             }`}>
-              {status.nodeType === 1 ? 'WG' : (status.v2raySummary || 'V2Ray')}
+              {status.nodeType === 2 ? (status.v2raySummary || protocolMeta(2).short) : protocolMeta(status.nodeType).short}
             </span>
           )}
           {status.killSwitchFailed && (

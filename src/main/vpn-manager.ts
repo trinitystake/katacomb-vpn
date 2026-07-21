@@ -58,6 +58,10 @@ function resolveV2RayBinary(): string {
   return resolveBundled('v2ray')
 }
 
+function resolveXRayBinary(): string {
+  return resolveBundled('xray')
+}
+
 function resolveTun2Socks(): string {
   return resolveBundled('tun2socks')
 }
@@ -66,7 +70,13 @@ const TUN_IFACE = 'sntl-tun'
 const SOCKS_ADDR = '127.0.0.1:1080'
 
 let activeChild: ChildProcess | null = null
-let activeProtocol: 'wireguard' | 'v2ray' | null = null
+let activeProtocol: 'wireguard' | 'v2ray' | 'xray' | null = null
+
+// v2ray and xray are both child-process + tun2socks tunnels with identical
+// lifecycle handling — this narrows the two together at the branch sites.
+function isChildProxy(p: typeof activeProtocol): boolean {
+  return p === 'v2ray' || p === 'xray'
+}
 let activeConfigFile: string | null = null
 let v2rayStderr = ''
 let tunActive = false
@@ -287,14 +297,23 @@ function v2rayArgs(bin: string, configFile: string): string[] {
   return v2rayRunArgs(major, configFile)
 }
 
-/** Spawn v2ray process and wait briefly to confirm it stays alive */
-function spawnV2Ray(configFile: string): ChildProcess {
-  const bin = resolveV2RayBinary()
-  const args = v2rayArgs(bin, configFile)
+/**
+ * Spawn the proxy child (v2ray by default; xray when overridden) and monitor it.
+ * xray reuses this whole lifecycle — same stdout/stderr capture, log file, and
+ * exit handler that tears down the TUN — differing only in binary, CLI args, and
+ * log filename.
+ */
+function spawnV2Ray(
+  configFile: string,
+  opts?: { bin?: string; args?: string[]; logName?: string },
+): ChildProcess {
+  const bin = opts?.bin ?? resolveV2RayBinary()
+  const args = opts?.args ?? v2rayArgs(bin, configFile)
+  const logName = opts?.logName ?? 'v2ray.log'
 
-  // Set V2RAY_LOCATION_ASSET so v2ray can find geoip/geosite if bundled alongside
+  // Set V2RAY/XRAY_LOCATION_ASSET so the core can find geoip/geosite if bundled alongside
   const binDir = join(bin, '..')
-  const env = { ...process.env, V2RAY_LOCATION_ASSET: binDir }
+  const env = { ...process.env, V2RAY_LOCATION_ASSET: binDir, XRAY_LOCATION_ASSET: binDir }
 
   // Capture both stdout and stderr — V2Ray v4 outputs errors to stdout
   const child = spawn(bin, args, {
@@ -302,14 +321,14 @@ function spawnV2Ray(configFile: string): ChildProcess {
     env,
   })
 
-  // Persist v2ray's own output to a stable, user-readable file. The in-memory
+  // Persist the core's own output to a stable, user-readable file. The in-memory
   // ring buffer below only survives while the process is alive and is only
   // surfaced if it exits — but the failure we hit (process alive, outbound to
   // the node wedged) never exits, so the file is the only way to see why.
   // Truncated per spawn so it always holds the current session.
-  const logPath = join(app.getPath('userData'), 'v2ray.log')
+  const logPath = join(app.getPath('userData'), logName)
   try {
-    writeFileSync(logPath, `# v2ray session started ${new Date().toISOString()}\n`, { mode: 0o600 })
+    writeFileSync(logPath, `# ${logName} session started ${new Date().toISOString()}\n`, { mode: 0o600 })
   } catch { /* logging is best-effort */ }
 
   v2rayStderr = ''
@@ -484,14 +503,52 @@ export function connectV2RayFromConfig(configString: string, dohResolverIp?: str
   activeConfigFile = V2RAY_CONFIG
 }
 
+/**
+ * Connect an XRAY (VLESS + Reality) tunnel from a config string. xray-core reads the
+ * same JSON as v2ray, so this reuses the entire V2Ray path — the untrusted-config
+ * guard, node-address pinning, DoH injection, and tun2socks routing — differing only
+ * in the binary (xray) and its CLI. The config is built by xray-config.ts (the SDK
+ * can't emit Reality) in the handshake, or reloaded from a saved session on reconnect.
+ */
+export function connectXRayFromConfig(configString: string, dohResolverIp?: string | null): void {
+  const bin = resolveXRayBinary()
+  if (bin === 'xray' && !binaryExists('xray')) {
+    throw new Error('xray binary not found. The bundled binary is missing and no system xray is installed.')
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(configString)
+  } catch {
+    throw new Error(
+      'Invalid Xray config. This session was saved with an older version. ' +
+      'Please end this session and create a new subscription.'
+    )
+  }
+  // Same untrusted-node-config treatment as v2ray: pin endpoints to IPs (no DNS
+  // deadlock through the tunnel), force diagnostic logging to stderr, then validate
+  // (reject log file-paths / non-loopback inbounds) before spawn.
+  const cfg = pinV2RayNodeAddresses(withV2RayDiagnosticLog(parsed), resolveHostToIPv4)
+  assertSafeV2RayConfig(cfg)
+  const finalCfg = dohResolverIp ? withV2RayDoH(cfg, dohResolverIp) : cfg
+
+  writeFileSync(V2RAY_CONFIG, JSON.stringify(finalCfg, null, 2), { mode: 0o600 })
+
+  const child = spawnV2Ray(V2RAY_CONFIG, { bin, args: ['run', '-c', V2RAY_CONFIG], logName: 'xray.log' })
+
+  activeChild = child
+  activeProtocol = 'xray'
+  activeConfigFile = V2RAY_CONFIG
+}
+
 export async function disconnect(): Promise<void> {
   // Tear down tun2socks TUN interface first (before killing V2Ray)
   if (tunActive || isTunUp()) {
     await bringDownTun()
   }
 
-  // Kill V2Ray process if running
-  if (activeProtocol === 'v2ray' && activeChild) {
+  // Kill the proxy child (v2ray/xray) if running
+  if (isChildProxy(activeProtocol) && activeChild) {
     try {
       activeChild.kill('SIGTERM')
     } catch { /* ignore */ }
@@ -514,13 +571,13 @@ export async function disconnect(): Promise<void> {
 }
 
 export function getConnectionStatus(): { connected: boolean; protocol: string | null } {
-  // V2Ray: check if our spawned process is still running
-  if (activeProtocol === 'v2ray' && activeChild && activeChild.exitCode === null) {
-    return { connected: true, protocol: 'v2ray' }
+  // V2Ray/Xray: check if our spawned process is still running
+  if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) {
+    return { connected: true, protocol: activeProtocol }
   }
 
-  // V2Ray process exited unexpectedly — clean up stale state
-  if (activeProtocol === 'v2ray') {
+  // Proxy process exited unexpectedly — clean up stale state
+  if (isChildProxy(activeProtocol)) {
     activeProtocol = null
     activeConfigFile = null
     activeChild = null
@@ -545,7 +602,7 @@ export function getConnectionStatus(): { connected: boolean; protocol: string | 
 export function isVpnActive(): boolean {
   if (isWireGuardUp()) return true
   if (isTunUp()) return true
-  if (activeProtocol === 'v2ray' && activeChild && activeChild.exitCode === null) return true
+  if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) return true
   return false
 }
 

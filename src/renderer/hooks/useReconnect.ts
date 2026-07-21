@@ -18,7 +18,7 @@ export function useReconnect(): (session: SessionInfo) => Promise<ReconnectOutco
     try {
       const res = await window.api.connectionReconnect({ sessionId: session.id })
       await window.api.connectionConnect({
-        protocol: res.protocol as 'wireguard' | 'v2ray',
+        protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray',
         configString: res.configString,
       })
       return { ok: true }

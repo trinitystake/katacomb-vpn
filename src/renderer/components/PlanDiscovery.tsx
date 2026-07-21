@@ -5,6 +5,7 @@ import { useNavigation } from '../contexts/NavigationContext'
 import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode } from '../types'
 import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
+import { protocolMeta, isProtocolSupported } from '../utils/protocols'
 
 const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited sentinel set by the provider
 const PLAN_DISCOVERY_MAX = 500
@@ -1350,11 +1351,9 @@ function PlanDetail({
                               {node.city ? `, ${node.city}` : ''}
                             </div>
                             <div
-                              className={`text-[10px] font-medium ${
-                                node.type === 1 ? 'text-info' : 'text-warning'
-                              }`}
+                              className={`text-[10px] font-medium ${protocolMeta(node.type).color}`}
                             >
-                              {node.type === 1 ? 'WireGuard' : 'V2Ray'}
+                              {protocolMeta(node.type).label}
                             </div>
                           </>
                         ) : (
@@ -1491,7 +1490,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
       })
       setSessionId(res.sessionId)
       setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' })
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' })
       setTunnelConnected(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
@@ -1588,12 +1587,8 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
                           {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
                         </span>
                         {node && (
-                          <span
-                            className={`text-[10px] font-medium ${
-                              node.type === 1 ? 'text-info' : 'text-warning'
-                            }`}
-                          >
-                            {node.type === 1 ? 'WireGuard' : 'V2Ray'}
+                          <span className={`text-[10px] font-medium ${protocolMeta(node.type).color}`}>
+                            {protocolMeta(node.type).label}
                           </span>
                         )}
                       </div>
@@ -1622,11 +1617,16 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
 
             <button
               onClick={handleConnect}
-              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy)}
+              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy) || !isProtocolSupported(selected.node.type)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Connect via Existing Plan
             </button>
+            {selected?.node && !isProtocolSupported(selected.node.type) && (
+              <div className="text-xs text-warning text-center pt-2">
+                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a WireGuard or V2Ray node.
+              </div>
+            )}
           </>
         )}
 
@@ -1770,7 +1770,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
       })
       setSessionId(res.sessionId)
       setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' })
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' })
       setTunnelConnected(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
@@ -1880,12 +1880,8 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
                           {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
                         </span>
                         {node && (
-                          <span
-                            className={`text-[10px] font-medium ${
-                              node.type === 1 ? 'text-info' : 'text-warning'
-                            }`}
-                          >
-                            {node.type === 1 ? 'WireGuard' : 'V2Ray'}
+                          <span className={`text-[10px] font-medium ${protocolMeta(node.type).color}`}>
+                            {protocolMeta(node.type).label}
                           </span>
                         )}
                       </div>
@@ -1914,11 +1910,16 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
 
             <button
               onClick={handleConnect}
-              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy)}
+              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy) || !isProtocolSupported(selected.node.type)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Subscribe & Connect
             </button>
+            {selected?.node && !isProtocolSupported(selected.node.type) && (
+              <div className="text-xs text-warning text-center pt-2">
+                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a WireGuard or V2Ray node.
+              </div>
+            )}
           </>
         )}
 

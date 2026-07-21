@@ -4,6 +4,7 @@ import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useNavigation } from '../contexts/NavigationContext'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
+import { protocolMeta, isProtocolSupported } from '../utils/protocols'
 
 interface Props {
   node: SentNode
@@ -177,7 +178,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
       setCurrentStep('5/5')
       await window.api.connectionConnect({
-        protocol: protocol as 'wireguard' | 'v2ray',
+        protocol: protocol as 'wireguard' | 'v2ray' | 'xray',
       })
 
       setTunnelConnected(true)
@@ -235,8 +236,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Type</span>
-            <span className={node.type === 1 ? 'text-info' : 'text-warning'}>
-              {node.type === 1 ? 'WireGuard' : 'V2Ray'}
+            <span className={protocolMeta(node.type).color}>
+              {protocolMeta(node.type).label}
             </span>
           </div>
           {node.type === 2 && (
@@ -385,11 +386,17 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             <button
               onClick={handleSubscribe}
-              disabled={!active || (!matchingAllocation && !selectedPrice)}
+              disabled={!active || !isProtocolSupported(node.type) || (!matchingAllocation && !selectedPrice)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {matchingAllocation ? 'Connect via Plan' : 'Subscribe & Connect'}
             </button>
+
+            {!isProtocolSupported(node.type) && (
+              <div className="text-xs text-warning text-center pt-1">
+                {protocolMeta(node.type).label} isn't supported by this client yet — this node is shown for filtering only.
+              </div>
+            )}
 
             {!matchingAllocation && compatiblePlans && compatiblePlans.length > 0 && (
               <div className="text-xs text-text-tertiary text-center pt-1">
@@ -436,7 +443,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
               <div className="flex justify-between">
                 <span className="text-text-secondary">Protocol</span>
-                <span className="text-text-primary">{node.type === 1 ? 'WireGuard' : 'V2Ray'}</span>
+                <span className="text-text-primary">{protocolMeta(node.type).label}</span>
               </div>
             </div>
 

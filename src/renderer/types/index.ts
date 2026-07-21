@@ -1,10 +1,14 @@
 import type { V2RayCategory } from '../utils/v2ray-connection'
+import type { ProtocolType } from '../utils/protocols'
 
 export interface SentNode {
   address: string
   moniker: string
   version: string
-  type: 1 | 2 // 1=WireGuard, 2=V2Ray
+  // Numeric protocol tag from the node-list API. 0=unknown, 1=WireGuard,
+  // 2=V2Ray, 3=OpenVPN, 4=XRAY, 5=AmneziaWG, 6=Hysteria2 (see utils/protocols.ts).
+  // Only 1/2 are connectable; the rest are identify/filter-only for now.
+  type: number
   // V2Ray proxy/transport/security advertised by the node list API. null for
   // WireGuard and for V2Ray nodes that don't advertise it. Operator-supplied —
   // untrusted; the real check happens at handshake (see config-guard.ts).
@@ -35,7 +39,7 @@ export interface NodePrice {
 export interface NodeFilter {
   country: string
   city: string
-  type: 'all' | 'wireguard' | 'v2ray'
+  type: 'all' | ProtocolType
   activeOnly: boolean
   healthyOnly: boolean
   residentialOnly: boolean
@@ -51,7 +55,7 @@ export interface SubscribeParams {
   nodeAddress: string
   nodeMoniker: string
   nodeCountry: string
-  nodeType: 1 | 2
+  nodeType: number
   apiField: string
   type: 'gigabytes' | 'hours'
   amount: number
@@ -64,7 +68,7 @@ export interface ReconnectParams {
 }
 
 export interface ConnectParams {
-  protocol: 'wireguard' | 'v2ray'
+  protocol: 'wireguard' | 'v2ray' | 'xray'
   configString?: string
 }
 
@@ -104,7 +108,7 @@ export interface ConnectionStatus {
   nodeAddress?: string
   nodeMoniker?: string
   nodeCountry?: string
-  nodeType?: 1 | 2
+  nodeType?: number
   v2raySummary?: string
   killSwitchFailed?: boolean
   killSwitchTeardownFailed?: boolean
@@ -258,7 +262,7 @@ export interface ElectronAPI {
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
-    nodeType: 1 | 2
+    nodeType: number
     apiField: string
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planStartSessionFromSub: (params: {
@@ -266,7 +270,7 @@ export interface ElectronAPI {
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
-    nodeType: 1 | 2
+    nodeType: number
     apiField: string
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planNodes: (planId: string) => Promise<string[]>

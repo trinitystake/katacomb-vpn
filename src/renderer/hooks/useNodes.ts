@@ -102,8 +102,7 @@ export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_
 
     if (filter.country) nodes = nodes.filter((n) => n.country === filter.country)
     if (filter.city) nodes = nodes.filter((n) => n.city === filter.city)
-    if (filter.type === 'wireguard') nodes = nodes.filter((n) => n.type === 1)
-    if (filter.type === 'v2ray') nodes = nodes.filter((n) => n.type === 2)
+    if (filter.type !== 'all') nodes = nodes.filter((n) => n.type === filter.type)
     if (filter.activeOnly) nodes = nodes.filter((n) => n.isActive)
     if (filter.healthyOnly) nodes = nodes.filter((n) => n.isHealthy)
     if (filter.residentialOnly) nodes = nodes.filter((n) => n.isResidential)

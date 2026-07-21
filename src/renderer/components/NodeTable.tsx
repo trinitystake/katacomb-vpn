@@ -10,6 +10,7 @@ import Spinner from './Spinner'
 import type { SentNode } from '../types'
 import { COUNTRY_CODES } from '../utils/country-codes'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
+import { protocolMeta } from '../utils/protocols'
 
 function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
   if (!prices) return '—'
@@ -189,8 +190,8 @@ export default function NodeTable() {
                   {node.moniker || '—'}
                 </div>
                 <div className="w-[80px] shrink-0 leading-tight">
-                  <span className={node.type === 1 ? 'text-info' : 'text-warning'}>
-                    {node.type === 1 ? 'WG' : 'V2Ray'}
+                  <span className={protocolMeta(node.type).color}>
+                    {protocolMeta(node.type).short}
                   </span>
                   {node.type === 2 && (() => {
                     const badge = v2rayConnectionBadge(node.connection)

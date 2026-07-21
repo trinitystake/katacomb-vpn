@@ -6,6 +6,15 @@ set -euo pipefail
 ALLOWED_IFACE="sntl0"
 TUN_IFACE="sntl-tun"
 TUN_ADDR="198.18.0.1/15"
+# tun2socks terminates TCP in a userspace netstack and advertises MSS = MTU-40 to
+# local apps. With no explicit MTU, its default is too large for the proxy-wrapped
+# path (V2Ray/Xray add TLS/VLESS overhead to a possibly-far node), so big TLS
+# handshakes (e.g. Chrome's large ClientHello to sites like eBay) stall while
+# smaller ones succeed. A conservative MTU makes those fit. Set here so it applies
+# at tun2socks startup — setting it on the interface afterward is ignored (the
+# netstack caches MTU at creation). Lower to 1280 (IPv6 min, always deliverable)
+# if a site still stalls; raise toward 1500 only if throughput matters more.
+TUN_MTU="1400"
 RUN_DIR="/run/sentinel-dvpn"
 STATE_FILE="${RUN_DIR}/tun.state"
 # Persistent (non-tmpfs) state. Only the resolv.conf backup lives here: it must
@@ -192,8 +201,10 @@ case "${1:-}" in
     # Clean up any previous state
     ip link delete "$TUN_IFACE" 2>/dev/null || true
 
-    # Spawn tun2socks fully detached
-    nohup "$TUN2SOCKS_BIN" -device "tun://$TUN_IFACE" -proxy "socks5://$SOCKS_ADDR" -loglevel silent \
+    # Spawn tun2socks fully detached. -mtu is set at startup so the netstack
+    # advertises a proxy-safe MSS (see TUN_MTU above) — fixes TLS handshakes that
+    # stall on some sites through the tunnel.
+    nohup "$TUN2SOCKS_BIN" -device "tun://$TUN_IFACE" -proxy "socks5://$SOCKS_ADDR" -mtu "$TUN_MTU" -loglevel silent \
       </dev/null >/dev/null 2>&1 &
     TUN2SOCKS_PID=$!
 

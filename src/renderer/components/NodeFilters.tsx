@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Spinner from './Spinner'
 import type { NodeFilter } from '../types'
+import { PROTOCOL_FILTER_OPTIONS, type ProtocolType } from '../utils/protocols'
 
 const V2RAY_CONNECTION_OPTIONS = [
   ['vmess', 'VMess'],
@@ -89,23 +90,21 @@ export default function NodeFilters({
           className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus w-[180px]"
         />
 
-        <div className="flex items-center gap-0.5 border border-border rounded-sm overflow-hidden">
-          {(['all', 'wireguard', 'v2ray'] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => updateFilter({ type: t })}
-              className={`px-2.5 py-1.5 text-sm transition-colors ${
-                filter.type === t
-                  ? 'bg-accent-subtle text-accent'
-                  : 'text-text-secondary hover:text-text-primary'
-              }`}
-            >
-              {t === 'all' ? 'All' : t === 'wireguard' ? 'WG' : 'V2Ray'}
-            </button>
+        <select
+          value={filter.type === 'all' ? 'all' : String(filter.type)}
+          onChange={(e) => {
+            const v = e.target.value
+            updateFilter({ type: v === 'all' ? 'all' : (Number(v) as ProtocolType) })
+          }}
+          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus min-w-[140px]"
+        >
+          <option value="all">All Protocols</option>
+          {PROTOCOL_FILTER_OPTIONS.map((p) => (
+            <option key={p.value} value={p.value}>{p.label}</option>
           ))}
-        </div>
+        </select>
 
-        {filter.type === 'v2ray' && (
+        {filter.type === 2 && (
           <div ref={connRef} className="relative">
             <button
               onClick={() => setConnOpen((o) => !o)}

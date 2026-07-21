@@ -21,6 +21,7 @@ import { writeFileAtomic } from './fs-utils'
 import { withTimeout } from './async-utils'
 import { broadcastOrTimeout } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
+import { buildXRayConfig } from './xray-config'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -42,8 +43,8 @@ const SESSION_TX_TIMEOUT_MESSAGE =
 
 interface SavedSessionConfig {
   sessionId: string
-  protocol: 'wireguard' | 'v2ray'
-  configString: string // WG config or V2Ray JSON config
+  protocol: 'wireguard' | 'v2ray' | 'xray'
+  configString: string // WG config, or V2Ray/Xray JSON config
   nodeAddress: string
   nodeMoniker?: string
   nodeCountry?: string
@@ -317,7 +318,7 @@ function parseHandshakeData(result: { data?: unknown }): any {
 export async function performHandshake(params: {
   sessionId: string
   nodeAddress: string
-  nodeType: 1 | 2
+  nodeType: number
   remoteUrl: string
   privKey: Uint8Array
   nodeMoniker?: string
@@ -359,6 +360,35 @@ export async function performHandshake(params: {
     })
 
     return { protocol: 'wireguard', configString, wgInstance: wg, v2rayInstance: null }
+  } else if (nodeType === 4) {
+    // XRAY (VLESS + Reality). The SDK can't build Reality configs (its V2Ray parser
+    // has no flow/reality_* support), so we generate the xray JSON ourselves from the
+    // node's handshake metadata (see xray-config.ts). VLESS peer material is a UUID —
+    // the same handshake V2Ray uses — so we reuse an SDK V2Ray instance purely to
+    // generate + send the uuid. buildXRayConfig rejects a node with no encrypted
+    // (Reality/TLS) VLESS entry, so an all-cleartext node fails into the refund path.
+    const keygen = new V2Ray()
+    const result = await withTimeout(
+      sdkHandshake(sid, { uuid: keygen.getKey() }, privKey, remoteUrl),
+      HANDSHAKE_TIMEOUT_MS,
+      'node handshake',
+    )
+
+    const handshakeData = parseHandshakeData(result)
+    const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
+    const config = buildXRayConfig(metadata, result.addrs, keygen.uuid)
+    const configString = JSON.stringify(config, null, 2)
+
+    saveSessionConfig({
+      sessionId,
+      protocol: 'xray',
+      configString,
+      nodeAddress,
+      nodeMoniker,
+      nodeCountry,
+    })
+
+    return { protocol: 'xray', configString, wgInstance: null, v2rayInstance: null }
   } else {
     // V2Ray
     const v2ray = new V2Ray()

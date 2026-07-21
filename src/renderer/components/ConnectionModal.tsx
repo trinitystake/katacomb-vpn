@@ -3,6 +3,7 @@ import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../typ
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useNavigation } from '../contexts/NavigationContext'
+import { useConnection } from '../hooks/useConnection'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
 
@@ -21,6 +22,14 @@ function getUdvpnPrice(prices: { denom: string; value: string }[]): { raw: strin
 export default function ConnectionModal({ node, onClose }: Props) {
   const active = node.isActive && node.isHealthy
   const { goToPlansForNode } = useNavigation()
+  // Live connection status — when the tunnel is already up to THIS node we show a
+  // "Connected" panel + Disconnect instead of the subscribe form (which would create
+  // a redundant second session). `reconnecting` counts so we don't flash the form
+  // during a same-node reconnect blip.
+  const { status, disconnect: disconnectVpn } = useConnection()
+  const onThisNode =
+    status.nodeAddress === node.address &&
+    (status.state === 'connected' || status.state === 'reconnecting')
   // Plans compatible with THIS node. null = still loading.
   const [compatiblePlans, setCompatiblePlans] = useState<PlanInfo[] | null>(null)
   // User's existing plan allocations (subscriptions). Used to detect reuse vs. fresh subscribe.
@@ -36,6 +45,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
 
   const gbPrice = getUdvpnPrice(node.gigabytePrices)
   const hrPrice = getUdvpnPrice(node.hourlyPrices)
@@ -194,11 +204,23 @@ export default function ConnectionModal({ node, onClose }: Props) {
     onClose()
   }
 
-  const title = tunnelConnected
-    ? 'VPN Active'
-    : connecting
-      ? 'Connecting...'
-      : 'Connect to Node'
+  async function handleDisconnect() {
+    setDisconnecting(true)
+    try {
+      await disconnectVpn()
+    } finally {
+      setDisconnecting(false)
+      onClose()
+    }
+  }
+
+  const title = onThisNode
+    ? 'Connected to this node'
+    : tunnelConnected
+      ? 'VPN Active'
+      : connecting
+        ? 'Connecting...'
+        : 'Connect to Node'
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting ? undefined : onClose}>
@@ -323,8 +345,47 @@ export default function ConnectionModal({ node, onClose }: Props) {
           </div>
         )}
 
+        {/* Already connected to this node — show status + Disconnect instead of the
+            subscribe form (subscribing again would create a redundant session). */}
+        {onThisNode && !connecting && !tunnelConnected && (
+          <div className="space-y-3">
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Session ID</span>
+                <span className="text-success font-mono">{status.sessionId ?? '—'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Protocol</span>
+                <span className="text-text-primary">{protocolMeta(node.type).label}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-sm">
+              <span className="status-dot status-dot-active" />
+              <span className="text-success font-medium">VPN tunnel active</span>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleDisconnect}
+                disabled={disconnecting}
+                className="btn btn-danger flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {disconnecting ? 'Disconnecting…' : 'Disconnect'}
+              </button>
+              <button
+                onClick={onClose}
+                disabled={disconnecting}
+                className="btn btn-secondary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Subscription form */}
-        {!tunnelConnected && !connecting && !error && !vpnWarning && (
+        {!onThisNode && !tunnelConnected && !connecting && !error && !vpnWarning && (
           <>
             {matchingAllocation ? (
               <div className="bg-success/10 border border-success/40 rounded-md px-4 py-3 text-sm space-y-1">

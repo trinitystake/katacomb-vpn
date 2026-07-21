@@ -398,6 +398,33 @@ export default function PlanDiscovery() {
     Promise.all(Array.from({ length: CONCURRENCY }, worker)).catch(() => {})
   }, [hasNodesOnly, plansNodeFilter, plans])
 
+  // Arriving at "plans covering node X" (via the modal's "See Plans tab") shouldn't
+  // hide that node's plans behind the standing chips. Once node lists have resolved,
+  // relax exactly the chips that would filter a covering plan out, based on those
+  // plans' own characteristics. A ref makes it fire once per node so it never fights
+  // a manual chip toggle afterwards.
+  const relaxedForNode = useRef<string | null>(null)
+  useEffect(() => {
+    if (!plansNodeFilter) {
+      relaxedForNode.current = null
+      return
+    }
+    if (relaxedForNode.current === plansNodeFilter || plans.length === 0) return
+    // Any unresolved node list means "covering" is still partial — wait.
+    const stillResolving = plans.some((p) => {
+      const s = planNodes[p.id]
+      return s === undefined || s === 'loading'
+    })
+    if (stillResolving) return
+    const covering = plans.filter((p) => {
+      const s = planNodes[p.id]
+      return isKnownToHaveNodes(s) && s.addresses.includes(plansNodeFilter)
+    })
+    relaxedForNode.current = plansNodeFilter
+    if (covering.some((p) => p.private)) setPublicOnly(false)
+    if (covering.some((p) => p.isTest)) setShowTests(true)
+  }, [plansNodeFilter, plans, planNodes])
+
   function retryPlanNodes(planId: string) {
     setPlanNodes((prev) => {
       const next = { ...prev }

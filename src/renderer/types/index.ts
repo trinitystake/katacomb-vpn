@@ -68,7 +68,7 @@ export interface ReconnectParams {
 }
 
 export interface ConnectParams {
-  protocol: 'wireguard' | 'v2ray' | 'xray'
+  protocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'
   configString?: string
 }
 

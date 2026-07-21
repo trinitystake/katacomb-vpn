@@ -15,6 +15,7 @@ import {
 import { BrowserWindow, app, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import { readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
@@ -22,6 +23,7 @@ import { withTimeout } from './async-utils'
 import { broadcastOrTimeout } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { buildXRayConfig } from './xray-config'
+import { buildHysteria2Config } from './hysteria-config'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -43,8 +45,8 @@ const SESSION_TX_TIMEOUT_MESSAGE =
 
 interface SavedSessionConfig {
   sessionId: string
-  protocol: 'wireguard' | 'v2ray' | 'xray'
-  configString: string // WG config, or V2Ray/Xray JSON config
+  protocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'
+  configString: string // WG config, or V2Ray/Xray/Hysteria2 JSON config
   nodeAddress: string
   nodeMoniker?: string
   nodeCountry?: string
@@ -389,6 +391,40 @@ export async function performHandshake(params: {
     })
 
     return { protocol: 'xray', configString, wgInstance: null, v2rayInstance: null }
+  } else if (nodeType === 6) {
+    // Hysteria2 (QUIC). The bundled JS SDK has no Hysteria2 class either, so — like
+    // xray — we build the client config ourselves from the node's handshake metadata
+    // (see hysteria-config.ts). The peer material is a UUID which doubles as the
+    // hysteria2 `auth` credential.
+    //
+    // CRITICAL: unlike V2Ray/XRAY, hysteria2's node-side peer request field is a plain
+    // `string` (go-sdk hysteria2/requests.go: `UUID string`), NOT `uuid.UUID`. The SDK's
+    // V2Ray.getKey() returns the uuid as a 16-BYTE ARRAY — which v2ray/xray's `uuid.UUID`
+    // field accepts, but hysteria2's `string` field cannot unmarshal (JSON array → Go
+    // string), so the node returns HTTP 500. So we send the canonical UUID STRING, and
+    // reuse that exact string as the config `auth` (it must match what the node registered).
+    const uuid = randomUUID()
+    const result = await withTimeout(
+      sdkHandshake(sid, { uuid }, privKey, remoteUrl),
+      HANDSHAKE_TIMEOUT_MS,
+      'node handshake',
+    )
+
+    const handshakeData = parseHandshakeData(result)
+    const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
+    const config = buildHysteria2Config(metadata, result.addrs, uuid)
+    const configString = JSON.stringify(config, null, 2)
+
+    saveSessionConfig({
+      sessionId,
+      protocol: 'hysteria2',
+      configString,
+      nodeAddress,
+      nodeMoniker,
+      nodeCountry,
+    })
+
+    return { protocol: 'hysteria2', configString, wgInstance: null, v2rayInstance: null }
   } else {
     // V2Ray
     const v2ray = new V2Ray()

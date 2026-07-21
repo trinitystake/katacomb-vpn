@@ -14,6 +14,7 @@ import {
   v2raySecurityBadge,
   withV2RayDoH,
   isSafeNodeApiUrl,
+  assertSafeHysteria2Config,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -369,4 +370,34 @@ test('withV2RayDoH does not mutate input and output passes the security guard', 
   assert.equal(input.routing.rules.length, 2)
   // injected DoH config is still safe to spawn
   assert.doesNotThrow(() => assertSafeV2RayConfig(out))
+})
+
+// --- Hysteria2 config guard ---
+
+const HY2_PIN = 'b3:7a:2f:9c:1d:44:e8:05:6a:cc:91:0f:23:5e:88:d1:47:b0:9a:3c:6e:12:fd:84:55:aa:e1:38:7c:90:2b:6f'
+const CLEAN_HY2 = {
+  server: '203.0.113.10:34567',
+  auth: '11111111-2222-3333-4444-555555555555',
+  tls: { insecure: true, pinSHA256: HY2_PIN },
+  socks5: { listen: '127.0.0.1:1080' },
+  lazy: true,
+}
+
+test('assertSafeHysteria2Config accepts a clean synthesized config', () => {
+  assert.doesNotThrow(() => assertSafeHysteria2Config(CLEAN_HY2))
+})
+
+test('assertSafeHysteria2Config rejects a non-loopback SOCKS5 listener (open proxy)', () => {
+  assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, socks5: { listen: '0.0.0.0:1080' } }), /loopback/)
+})
+
+test('assertSafeHysteria2Config rejects a missing or malformed TLS pin', () => {
+  assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, tls: { insecure: true } }), /pinSHA256/)
+  assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, tls: { insecure: true, pinSHA256: 'nope' } }), /MITM-able/)
+})
+
+test('assertSafeHysteria2Config rejects traffic-redirecting keys and bad server', () => {
+  assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, outbounds: [{}] }), /outbounds.*not allowed/)
+  assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, acl: { inline: [] } }), /acl.*not allowed/)
+  assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, server: 'no-port' }), /host:port/)
 })

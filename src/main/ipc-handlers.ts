@@ -29,6 +29,7 @@ import {
   connectWireGuardFromConfig,
   connectV2RayFromConfig,
   connectXRayFromConfig,
+  connectHysteria2FromConfig,
   disconnect,
   getConnectionStatus,
   isVpnActive,
@@ -78,9 +79,10 @@ function effectiveV2RayResolverIp(settings: AppSettings): string | null {
 
 let activeWg: Wireguard | null = null
 let activeV2ray: V2Ray | null = null
-// Xray has no SDK instance (we build its config ourselves), so we hold the built
-// config string across the subscribe→connect handoff, mirroring activeWg/activeV2ray.
+// Xray/Hysteria2 have no SDK instance (we build their configs ourselves), so we hold
+// the built config string across the subscribe→connect handoff, like activeWg/activeV2ray.
 let activeXrayConfig: string | null = null
+let activeHysteria2Config: string | null = null
 let activeSessionId: string | null = null
 let activeNodeInfo: { address: string; moniker: string; country: string; type: number; v2raySummary?: string } | null = null
 // True when the user enabled the kill switch but arming it failed — surfaced to
@@ -149,7 +151,7 @@ function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
 // survive a WG interface drop so the liveness monitor below knows to reconnect
 // (finding L8 — the two are not duplication, so they're named apart, not merged).
 // V2Ray has a process exit callback; WireGuard has no process to watch, so we poll.
-let desiredProtocol: 'wireguard' | 'v2ray' | 'xray' | null = null
+let desiredProtocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' | null = null
 let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
 
 function startWireGuardMonitor(): void {
@@ -220,6 +222,28 @@ function applySession(
   activeWg = result.wgInstance
   activeV2ray = result.v2rayInstance
   activeXrayConfig = result.protocol === 'xray' ? result.configString : null
+  activeHysteria2Config = result.protocol === 'hysteria2' ? result.configString : null
+}
+
+/**
+ * Turn a handshake/resolve failure into a human-readable reason. A node handshake
+ * failure surfaces as an axios error whose `.message` collapses to a bare
+ * "Request failed with status code 500", hiding the node's actual error body — the
+ * one thing that explains WHY the node rejected us. When an HTTP response is present,
+ * surface its status plus a snippet of the (possibly nested) error body instead.
+ */
+function describeHandshakeError(err: unknown): string {
+  const response = (err as { response?: { status?: number; data?: unknown } })?.response
+  if (response && (response.status !== undefined || response.data !== undefined)) {
+    let detail: unknown = response.data
+    if (detail && typeof detail === 'object') {
+      const obj = detail as Record<string, any>
+      detail = obj.error?.message ?? obj.error ?? obj.message ?? JSON.stringify(obj)
+    }
+    const detailStr = typeof detail === 'string' ? detail.trim().slice(0, 300) : ''
+    return `node returned HTTP ${response.status ?? '?'}${detailStr ? ` — ${detailStr}` : ''}`
+  }
+  return err instanceof Error ? err.message : String(err)
 }
 
 /**
@@ -260,14 +284,14 @@ async function establishSessionOrRefund(params: {
       isDeposit,
       sessionId,
       nodeMoniker,
-      reason: err instanceof Error ? err.message : String(err),
+      reason: describeHandshakeError(err),
       policyRejected: err instanceof V2RayPolicyError,
     }))
   }
 }
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
-async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray'): Promise<void> {
+async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'): Promise<void> {
   // New interface/session — clear the speed baseline (finding M10).
   resetTrafficStats()
   killSwitchFailed = false
@@ -284,8 +308,11 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray'
   // - V2Ray: tun2socks does no DNS setup, so we point the resolver through the
   //   tunnel ourselves. Under the kill switch a 'system'/LAN resolver isn't
   //   tunnel-routed (the kill switch drops it), so force a public resolver.
-  // xray uses the same tun2socks path as v2ray, so it needs the same tunnelled DNS.
-  const v2rayDnsIp = (protocol === 'v2ray' || protocol === 'xray') ? effectiveV2RayResolverIp(settings) : null
+  // xray and hysteria2 use the same tun2socks path as v2ray, so they need the same
+  // tunnelled DNS resolver. (hysteria2 gets the dns-set here but NOT the in-config DoH
+  // injection — that's v2ray-config-shaped only — so its DNS is plaintext-through-tunnel.)
+  const v2rayDnsIp = (protocol === 'v2ray' || protocol === 'xray' || protocol === 'hysteria2')
+    ? effectiveV2RayResolverIp(settings) : null
 
   // Apply DNS override (routes V2Ray DNS through the tunnel via /etc/resolv.conf)
   if (v2rayDnsIp) {
@@ -395,6 +422,7 @@ export async function performDisconnect(): Promise<void> {
     activeV2ray = null
     activeWg = null
     activeXrayConfig = null
+    activeHysteria2Config = null
     desiredProtocol = null
     activeSessionId = null
     activeNodeInfo = null
@@ -470,12 +498,16 @@ async function attemptReconnect(): Promise<void> {
         if (saved.protocol === 'wireguard') {
           await connectWireGuardFromConfig(saved.configString)
         } else {
-          // v2ray and xray share the child-process + tun2socks bring-up.
-          const dohIp = effectiveV2RayResolverIp(loadSettings())
-          if (saved.protocol === 'xray') {
-            connectXRayFromConfig(saved.configString, dohIp)
+          // v2ray, xray and hysteria2 share the child-process + tun2socks bring-up.
+          if (saved.protocol === 'hysteria2') {
+            connectHysteria2FromConfig(saved.configString) // no DoH (see connectHysteria2FromConfig)
           } else {
-            connectV2RayFromConfig(saved.configString, dohIp)
+            const dohIp = effectiveV2RayResolverIp(loadSettings())
+            if (saved.protocol === 'xray') {
+              connectXRayFromConfig(saved.configString, dohIp)
+            } else {
+              connectV2RayFromConfig(saved.configString, dohIp)
+            }
           }
           await new Promise((r) => setTimeout(r, 1500))
           const status = getConnectionStatus()
@@ -494,9 +526,9 @@ async function attemptReconnect(): Promise<void> {
         }
 
         // Apply post-connect settings
-        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray' | 'xray')
+        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2')
 
-        desiredProtocol = saved.protocol as 'wireguard' | 'v2ray' | 'xray'
+        desiredProtocol = saved.protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'
         if (desiredProtocol === 'wireguard') startWireGuardMonitor()
 
         console.log('[reconnect] Success')
@@ -857,7 +889,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4) throw new Error('Unsupported nodeType: only WireGuard (1), V2Ray (2) and XRAY (4) are connectable')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4 && params.nodeType !== 6) throw new Error('Unsupported nodeType: only WireGuard (1), V2Ray (2), XRAY (4) and Hysteria2 (6) are connectable')
     assertString(params.apiField, 'apiField')
     if (params.type !== 'gigabytes' && params.type !== 'hours') throw new Error('Invalid type')
     assertNumber(params.amount, 'amount', 1, 1000)
@@ -950,7 +982,7 @@ export function registerIpcHandlers(): void {
       address: saved.nodeAddress,
       moniker: saved.nodeMoniker || nodeMeta.moniker || '',
       country: saved.nodeCountry || nodeMeta.country || '',
-      type: saved.protocol === 'wireguard' ? 1 : saved.protocol === 'xray' ? 4 : 2,
+      type: saved.protocol === 'wireguard' ? 1 : saved.protocol === 'xray' ? 4 : saved.protocol === 'hysteria2' ? 6 : 2,
     }
 
     return {
@@ -969,11 +1001,11 @@ export function registerIpcHandlers(): void {
 
   // Connection: Connect (establish tunnel — from SDK instance or raw config)
   handle(IPC.CONNECTION_CONNECT, async (_event, params: {
-    protocol: 'wireguard' | 'v2ray' | 'xray'
+    protocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'
     configString?: string
   }) => {
-    if (params.protocol !== 'wireguard' && params.protocol !== 'v2ray' && params.protocol !== 'xray') {
-      throw new Error('Invalid protocol: must be wireguard, v2ray or xray')
+    if (params.protocol !== 'wireguard' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2') {
+      throw new Error('Invalid protocol: must be wireguard, v2ray, xray or hysteria2')
     }
     if (params.configString !== undefined && typeof params.configString !== 'string') {
       throw new Error('Invalid configString')
@@ -1085,6 +1117,47 @@ export function registerIpcHandlers(): void {
         desiredProtocol = 'xray'
         sendStateChange('connected')
         return { protocol: 'xray' }
+      }
+
+      if (params.protocol === 'hysteria2') {
+        // Hysteria2 reuses the v2ray tunnel path (child process + tun2socks). The config
+        // is the one built during the handshake (activeHysteria2Config), or a saved
+        // config on manual reconnect (params.configString). No DoH — hysteria2's DNS is
+        // plaintext-through-tunnel (see connectHysteria2FromConfig).
+        const hysteria2Config = params.configString ?? activeHysteria2Config
+        if (!hysteria2Config) {
+          throw new Error('No Hysteria2 config available')
+        }
+        connectHysteria2FromConfig(hysteria2Config)
+
+        // Wait briefly and verify the hysteria process didn't crash on startup
+        await new Promise((r) => setTimeout(r, 1500))
+        const status = getConnectionStatus()
+        if (!status.connected) {
+          const errMsg = getV2RayError()
+          const fromSavedConfig = !activeHysteria2Config && !!params.configString
+          const hint = fromSavedConfig
+            ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
+            : ''
+          throw new Error(
+            'Hysteria2 process exited immediately after starting.' + hint +
+            (errMsg ? `\n\nHysteria2 error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
+          )
+        }
+
+        // Hysteria2 is running — bring up the TUN interface (same tun2socks path as v2ray).
+        try {
+          await bringUpV2RayTunnel()
+        } catch (err) {
+          await disconnect()
+          throw err
+        }
+
+        await applyPostConnectSettings('hysteria2')
+
+        desiredProtocol = 'hysteria2'
+        sendStateChange('connected')
+        return { protocol: 'hysteria2' }
       }
 
       throw new Error('No active VPN instance')
@@ -1273,7 +1346,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4) throw new Error('Unsupported nodeType')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4 && params.nodeType !== 6) throw new Error('Unsupported nodeType')
     assertString(params.apiField, 'apiField')
 
     const wallet = getWallet()
@@ -1325,7 +1398,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4) throw new Error('Unsupported nodeType')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4 && params.nodeType !== 6) throw new Error('Unsupported nodeType')
     assertString(params.apiField, 'apiField')
 
     const wallet = getWallet()

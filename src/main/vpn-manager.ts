@@ -8,6 +8,7 @@ import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 import {
   assertSafeWireguardConfig,
   assertSafeV2RayConfig,
+  assertSafeHysteria2Config,
   withV2RayDiagnosticLog,
   withV2RayDoH,
   pinV2RayNodeAddresses,
@@ -62,6 +63,10 @@ function resolveXRayBinary(): string {
   return resolveBundled('xray')
 }
 
+function resolveHysteria2Binary(): string {
+  return resolveBundled('hysteria')
+}
+
 function resolveTun2Socks(): string {
   return resolveBundled('tun2socks')
 }
@@ -70,12 +75,13 @@ const TUN_IFACE = 'sntl-tun'
 const SOCKS_ADDR = '127.0.0.1:1080'
 
 let activeChild: ChildProcess | null = null
-let activeProtocol: 'wireguard' | 'v2ray' | 'xray' | null = null
+let activeProtocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' | null = null
 
-// v2ray and xray are both child-process + tun2socks tunnels with identical
-// lifecycle handling — this narrows the two together at the branch sites.
+// v2ray, xray and hysteria2 are all child-process + tun2socks tunnels with identical
+// lifecycle handling (spawn a local SOCKS proxy, route it through tun2socks) — this
+// narrows them together at the branch sites.
 function isChildProxy(p: typeof activeProtocol): boolean {
-  return p === 'v2ray' || p === 'xray'
+  return p === 'v2ray' || p === 'xray' || p === 'hysteria2'
 }
 let activeConfigFile: string | null = null
 let v2rayStderr = ''
@@ -180,12 +186,24 @@ function resolveHostToIPv4(host: string): string | null {
   return null
 }
 
-/** Extract V2Ray remote server IP from the active config file, resolving hostnames to IPs */
+/**
+ * Extract the remote proxy server IP from the active config file, resolving
+ * hostnames to IPs. Handles both the v2ray/xray shape (`outbounds[].settings.vnext`)
+ * and the hysteria2 shape (a single `server: "host:port"`). Used by bringUpTun for
+ * the tun2socks bypass route AND by the kill-switch whitelist, so both see the same IP.
+ */
 function extractV2RayRemoteHost(): string | null {
   try {
     const configPath = activeConfigFile || V2RAY_CONFIG
     if (!existsSync(configPath)) return null
     const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+    // Hysteria2: a single `server: "host:port"` (no outbounds/vnext).
+    if (typeof config.server === 'string') {
+      const host = config.server.startsWith('[')
+        ? config.server.slice(1, config.server.indexOf(']'))
+        : config.server.slice(0, config.server.lastIndexOf(':'))
+      if (host && host !== '127.0.0.1') return resolveHostToIPv4(host)
+    }
     for (const ob of config.outbounds || []) {
       const addr = ob?.settings?.vnext?.[0]?.address
       if (addr && addr !== '127.0.0.1') {
@@ -538,6 +556,56 @@ export function connectXRayFromConfig(configString: string, dohResolverIp?: stri
 
   activeChild = child
   activeProtocol = 'xray'
+  activeConfigFile = V2RAY_CONFIG
+}
+
+/**
+ * Connect a Hysteria2 (QUIC) tunnel from a config string. The hysteria client exposes
+ * a loopback SOCKS5 listener that tun2socks routes through — the same path as
+ * v2ray/xray — so only the binary (`hysteria client -c`) and the config shape differ.
+ * The config is synthesized by hysteria-config.ts in the handshake (the SDK has no
+ * Hysteria2 class), or reloaded from a saved session on reconnect. Node data is
+ * untrusted: we pin the server to an IP (no DNS deadlock through the tunnel) and
+ * re-validate with assertSafeHysteria2Config before spawn. The `.json` extension makes
+ * hysteria's viper loader parse the config as JSON. No DoH (hysteria2 has no in-config
+ * DoH mechanism — DNS resolves plaintext-through-tunnel, like WireGuard).
+ */
+export function connectHysteria2FromConfig(configString: string): void {
+  const bin = resolveHysteria2Binary()
+  if (bin === 'hysteria' && !binaryExists('hysteria')) {
+    throw new Error('hysteria binary not found. The bundled binary is missing and no system hysteria is installed.')
+  }
+
+  let parsed: any
+  try {
+    parsed = JSON.parse(configString)
+  } catch {
+    throw new Error(
+      'Invalid Hysteria2 config. This session was saved with an older version. ' +
+      'Please end this session and create a new subscription.'
+    )
+  }
+
+  // Pin the server endpoint to an IP so hysteria never re-resolves it through the
+  // tunnel and deadlocks (the DNS-deadlock fix, as pinV2RayNodeAddresses does for v2ray).
+  if (typeof parsed.server === 'string') {
+    const colon = parsed.server.lastIndexOf(':')
+    if (colon > 0) {
+      const host = parsed.server.slice(0, colon)
+      const port = parsed.server.slice(colon + 1)
+      const ip = resolveHostToIPv4(host)
+      if (ip) parsed.server = `${ip}:${port}`
+    }
+  }
+
+  assertSafeHysteria2Config(parsed)
+
+  writeFileSync(V2RAY_CONFIG, JSON.stringify(parsed, null, 2), { mode: 0o600 })
+
+  const child = spawnV2Ray(V2RAY_CONFIG, { bin, args: ['client', '-c', V2RAY_CONFIG], logName: 'hysteria.log' })
+
+  activeChild = child
+  activeProtocol = 'hysteria2'
   activeConfigFile = V2RAY_CONFIG
 }
 

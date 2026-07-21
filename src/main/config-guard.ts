@@ -313,6 +313,69 @@ export function assertSafeV2RayConfig(config: unknown): void {
 }
 
 /**
+ * True if `pin` is a SHA-256 cert fingerprint: 64 hex chars, optionally
+ * colon-separated (the format hysteria2's pinSHA256 accepts). Kept inline so this
+ * module stays self-contained and unit-testable in isolation; hysteria-config.ts has
+ * its own copy for the build (the two pure modules never runtime-import each other).
+ */
+function isHexCertPin(pin: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(pin.replace(/:/g, ''))
+}
+
+/** Extract the host portion of a `host:port` (or `[ipv6]:port`) listen string. */
+function hostOfListen(listen: string): string {
+  if (listen.startsWith('[')) {
+    const close = listen.indexOf(']')
+    return close > 0 ? listen.slice(1, close) : listen
+  }
+  const colon = listen.lastIndexOf(':')
+  return colon > 0 ? listen.slice(0, colon) : listen
+}
+
+/**
+ * Throw if a synthesized Hysteria2 client config is outside the shape this app
+ * builds (see hysteria-config.ts). Unlike WireGuard/V2Ray — where the node hands us
+ * a whole config — we synthesize the hysteria2 config from a few node scalars, so
+ * this is a tight trust-boundary re-check before spawn: the server must be host:port,
+ * the SOCKS5 listener must stay on loopback (never an open proxy), the TLS cert must
+ * be pinned (an unpinned hysteria2 tunnel is MITM-able — the analogue of VLess-none),
+ * and no traffic-redirecting keys (acl / outbounds) may be present (we never emit them).
+ */
+export function assertSafeHysteria2Config(config: unknown): void {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('Hysteria2 config is invalid: expected an object')
+  }
+  const cfg = config as Record<string, unknown>
+
+  // Host is an IPv4 (after pinning) or hostname; port required. No IPv6 literals emitted.
+  if (typeof cfg.server !== 'string' || !/^[A-Za-z0-9.-]+:\d{1,5}$/.test(cfg.server)) {
+    throw new Error('Hysteria2 config: server must be host:port')
+  }
+
+  const socks5 = cfg.socks5
+  const listen = socks5 && typeof socks5 === 'object' ? (socks5 as Record<string, unknown>).listen : undefined
+  if (typeof listen !== 'string') {
+    throw new Error('Hysteria2 config: missing socks5.listen')
+  }
+  if (!V2RAY_LOOPBACK.has(hostOfListen(listen))) {
+    throw new Error(`Hysteria2 config: socks5.listen "${listen}" must be loopback`)
+  }
+
+  const tls = cfg.tls
+  const pin = tls && typeof tls === 'object' ? (tls as Record<string, unknown>).pinSHA256 : undefined
+  if (typeof pin !== 'string' || !isHexCertPin(pin)) {
+    throw new Error('Hysteria2 config: tls.pinSHA256 must be a valid cert pin (an unpinned tunnel is MITM-able)')
+  }
+
+  // hysteria2's `acl` can reference external files / reject-route, and `outbounds`
+  // can chain traffic to an arbitrary proxy — we never emit either, so their
+  // presence means tampering.
+  for (const key of ['acl', 'outbounds'] as const) {
+    if (key in cfg) throw new Error(`Hysteria2 config: "${key}" is not allowed`)
+  }
+}
+
+/**
  * DoH endpoints for each resolver the app allows, keyed by the plaintext resolver
  * IP the user picks (a subset of ALLOWED_DNS_RESOLVERS). Each entry pairs a
  * hostname URL (so v2ray validates the TLS certificate against a real name) with

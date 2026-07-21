@@ -1490,7 +1490,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
       })
       setSessionId(res.sessionId)
       setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' })
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' })
       setTunnelConnected(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
@@ -1770,7 +1770,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
       })
       setSessionId(res.sessionId)
       setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' })
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' })
       setTunnelConnected(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')

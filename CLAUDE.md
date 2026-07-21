@@ -144,11 +144,13 @@ assume a two-protocol world). The Nodes-tab protocol filter is a single-select
 `<select>` in `NodeFilters.tsx` driven by `PROTOCOL_FILTER_OPTIONS`; `NodeFilter.type`
 is `'all' | ProtocolType`.
 
-**Connectable: WireGuard (1), V2Ray (2), XRAY (4).** OpenVPN/AmneziaWG/Hysteria2
-(3/5/6) are identify-and-filter only — the connect UI disables them
-(`isProtocolSupported`) and the main-process IPC guards (`nodeType` not in `{1,2,4}`
+**Connectable: WireGuard (1), V2Ray (2), XRAY (4), Hysteria2 (6).** OpenVPN/AmneziaWG
+(3/5) are identify-and-filter only — the connect UI disables them
+(`isProtocolSupported`) and the main-process IPC guards (`nodeType` not in `{1,2,4,6}`
 → throw) are the enforcement. Each additional protocol needs its own pinned binary,
-config generation/validation, and (for root-run ones) a privileged daemon op.
+config generation/validation, and (for root-run ones) a privileged daemon op. The two
+remaining are root/kernel protocols, so they DO need the privileged-daemon path (unlike
+the unprivileged xray/hysteria2 pilots).
 
 **XRAY** is the VLESS+Reality protocol and reuses almost the entire V2Ray path: it's
 a v2ray-core fork that reads the **same JSON config**, so it runs through the same
@@ -171,9 +173,36 @@ What differs:
   official release, SHA-pinned in `binary-integrity.ts` — vendor + verify checksum +
   update the pin when upgrading). `extraResources` ships everything under that dir.
 
+**Hysteria2** (type 6) is a QUIC protocol — NOT a v2ray-core fork — but it still reuses
+the child-process + tun2socks tunnel path because the `hysteria` client exposes a local
+SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What differs:
+- Its own bundled **`hysteria`** binary (apernet/hysteria, SHA-pinned in
+  `binary-integrity.ts`; CLI `hysteria client -c <file>`, JSON config via viper by `.json`
+  ext) in `resources/linux/v2ray/`.
+- The SDK has no Hysteria2 class at all, so `src/main/hysteria-config.ts`
+  (`buildHysteria2Config`, pure + unit-tested) synthesizes the whole client config from a
+  few handshake-metadata scalars: `server`/`auth`(=uuid)/`tls{insecure:true,pinSHA256}`/
+  `socks5{listen:127.0.0.1:1080}`/`lazy:true` (+ optional salamander `obfs`). Fields taken
+  verbatim from the go-sdk `hysteria2/` package (metadata = `{port, tls_pin, obfs_password}`).
+- **Its config shape has no `outbounds`/`vnext`,** so `assertSafeV2RayConfig` and the v2ray
+  DoH/pin transforms DON'T apply — it has its own `assertSafeHysteria2Config` (require
+  `server` host:port, loopback socks5, a valid `tls.pinSHA256`; reject `acl`/`outbounds`),
+  and `extractV2RayRemoteHost` was generalized to also read hysteria2's `server` field (for
+  the tun2socks bypass route AND the kill-switch whitelist — the kill switch's
+  `-d host -j ACCEPT` is protocol-agnostic, so QUIC/UDP works with no helper change).
+- **Security gate = the TLS pin** (hysteria2's Reality analog): self-signed cert, safe only
+  when pinned via `tls.pinSHA256`; a pin-less node → `buildHysteria2Config` throws → refund.
+- Hysteria2 gets the `dns-set` (tun2socks needs a tunnel-routed resolver) but NOT the
+  in-config DoH injection (v2ray-shaped only) → its DNS is plaintext-through-tunnel, like WG.
+- **UUID-format gotcha (cost a live 500):** the SDK's `V2Ray.getKey()` returns the uuid as a
+  16-BYTE ARRAY, which v2ray/xray's node field (`uuid.UUID`) accepts but hysteria2's
+  (`UUID string`) rejects (JSON array → Go string = unmarshal error → HTTP 500). The
+  hysteria2 handshake mints a `randomUUID()` STRING and reuses it as the config `auth`. Only
+  use `getKey()` for protocols whose node peer field is `uuid.UUID`.
+
 v9.0.0 nodes expose a `service_metadata` array on `/info` (Xray Reality keys,
 Hysteria2 obfs, transport variants) that the SDK's `NodeInfo` type lacks — the xray
-path reads the equivalent from the handshake response, not `/info`.
+and hysteria2 paths read the equivalent from the handshake response, not `/info`.
 
 ## Working Principles (for LLM contributors)
 

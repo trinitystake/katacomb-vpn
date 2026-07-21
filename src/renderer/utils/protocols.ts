@@ -8,10 +8,11 @@
 // used to be duplicated across every component and assumed a two-protocol world.
 //
 // `supported` marks whether THIS client can actually establish a tunnel. WireGuard,
-// V2Ray and XRAY are connectable; OpenVPN/AmneziaWG/Hysteria2 are identify/filter-only
-// (each would need its own bundled binary + config-guard validator, and the root ones
-// a privileged daemon op). The connect UI disables unsupported types; the main-process
-// IPC guards (nodeType not in {1,2,4} → throw) are the actual enforcement.
+// V2Ray, XRAY and Hysteria2 are connectable; OpenVPN/AmneziaWG are identify/filter-only
+// (each would need its own bundled binary + config-guard validator, and — being
+// root/kernel protocols — a privileged daemon op). The connect UI disables unsupported
+// types; the main-process IPC guards (nodeType not in {1,2,4,6} → throw) are the
+// actual enforcement.
 
 export type ProtocolType = 0 | 1 | 2 | 3 | 4 | 5 | 6
 
@@ -31,7 +32,7 @@ const PROTOCOLS: Record<number, ProtocolMeta> = {
   3: { label: 'OpenVPN', short: 'OpenVPN', color: 'text-accent', supported: false },
   4: { label: 'XRAY', short: 'XRAY', color: 'text-warning', supported: true },
   5: { label: 'AmneziaWG', short: 'AWG', color: 'text-info', supported: false },
-  6: { label: 'Hysteria2', short: 'HY2', color: 'text-success', supported: false },
+  6: { label: 'Hysteria2', short: 'HY2', color: 'text-success', supported: true },
 }
 
 const UNKNOWN: ProtocolMeta = { label: 'Unknown', short: '?', color: 'text-text-tertiary', supported: false }

@@ -78,8 +78,13 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
 
   async function handleEndSession(session: SessionInfo) {
     const isThisSessionConnected = vpnConnected && status.sessionId === session.id
-    const vpnWarning = vpnConnected && !isThisSessionConnected
-      ? '\n\nNote: Your current VPN connection will be temporarily interrupted to reach the blockchain.'
+    // When ending a *different* session than the one we're on, the tunnel is only
+    // torn down to reach the chain — capture the live session so we can restore it.
+    const reconnectTarget = vpnConnected && !isThisSessionConnected
+      ? sessions.find((s) => s.id === status.sessionId) ?? null
+      : null
+    const vpnWarning = reconnectTarget
+      ? '\n\nNote: Your current VPN connection will be temporarily interrupted to reach the blockchain, then reconnected.'
       : ''
     if (!confirm(`End session #${session.id}? This will close the session on-chain. Remaining data/time will be forfeited.${vpnWarning}`)) {
       return
@@ -88,6 +93,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
     setBusy(session.id)
     setError(null)
 
+    let endError: string | null = null
     try {
       if (vpnConnected) {
         await window.api.connectionDisconnect()
@@ -98,10 +104,21 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
       await window.api.walletEndSession(session.id)
       await refresh()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to end session')
-    } finally {
-      setBusy(null)
+      endError = err instanceof Error ? err.message : 'Failed to end session'
     }
+
+    // Restore the tunnel we tore down only to reach the chain. Run this even if the
+    // end failed — the reconnect target is unrelated to the ended session.
+    if (reconnectTarget) {
+      const result = await reconnect(reconnectTarget)
+      if (result.ok) await refreshConnection()
+      else endError = endError
+        ? `${endError} — and reconnect failed: ${result.error}`
+        : (result.error ?? 'Reconnection failed')
+    }
+
+    if (endError) setError(endError)
+    setBusy(null)
   }
 
   if (loading) {

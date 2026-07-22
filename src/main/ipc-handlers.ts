@@ -1,6 +1,9 @@
-import { ipcMain, net, BrowserWindow } from 'electron'
+import { ipcMain, net, BrowserWindow, app } from 'electron'
 import { is } from '@electron-toolkit/utils'
+import { existsSync, unlinkSync } from 'fs'
+import { join } from 'path'
 import { IPC } from '../shared/ipc-channels'
+import { writeFileAtomic } from './fs-utils'
 import {
   hasStoredWallet,
   generateMnemonicPhrase,
@@ -290,6 +293,31 @@ async function establishSessionOrRefund(params: {
   }
 }
 
+// App-owned marker recording that /etc/resolv.conf may currently hold our DNS
+// override (V2Ray/XRAY/Hysteria2 only — WireGuard's wg-quick manages its own).
+// Mirrors the kill-switch armed marker: it lets the quit/disconnect path skip a
+// (privileged) `dns-restore` when we never overrode DNS, so a clean session never
+// touches root — which on the pkexec fallback path (AppImage/dev) means no prompt.
+function dnsOverrideMarkerPath(): string {
+  return join(app.getPath('userData'), 'dns-override.state')
+}
+
+function markDnsOverridden(): void {
+  try {
+    writeFileAtomic(dnsOverrideMarkerPath(), 'set\n')
+  } catch { /* best-effort — marker is only a hint for teardown */ }
+}
+
+function isDnsOverridden(): boolean {
+  return existsSync(dnsOverrideMarkerPath())
+}
+
+function clearDnsOverridden(): void {
+  try {
+    unlinkSync(dnsOverrideMarkerPath())
+  } catch { /* already gone */ }
+}
+
 /** Apply DNS and kill switch settings after a successful VPN connection */
 async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'): Promise<void> {
   // New interface/session — clear the speed baseline (finding M10).
@@ -316,6 +344,9 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray'
 
   // Apply DNS override (routes V2Ray DNS through the tunnel via /etc/resolv.conf)
   if (v2rayDnsIp) {
+    // Mark BEFORE the override so even a partial/failed dns-set is covered by the
+    // teardown gate (mirrors enableKillSwitch's mark-before-arm discipline).
+    markDnsOverridden()
     try {
       await runPrivileged(['dns-set', v2rayDnsIp])
     } catch (err) {
@@ -347,21 +378,29 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'v2ray' | 'xray'
 async function revertPostConnectSettings(): Promise<void> {
   killSwitchFailed = false
 
-  // Tear both down UNCONDITIONALLY, regardless of the current settings: the user
-  // may have toggled the kill switch / DNS off mid-session via SETTINGS_SET, but
-  // if they were on at connect time the iptables chain and the resolv.conf
-  // override are still installed. Both helper verbs are idempotent no-ops when
-  // there's nothing to undo, so unconditional teardown is safe and can't strand
-  // the user behind a stale kill switch or a pinned resolv.conf. Kill switch
-  // first, so DNS-restore traffic can flow. If the kill switch WAS armed and its
-  // teardown fails, the DROP-all chain persists until the next-launch self-heal —
-  // flag it so the renderer can warn the user their internet may be blocked (M6).
-  const wasArmed = isKillSwitchArmed()
-  const teardownOk = await disableKillSwitch()
-  killSwitchTeardownFailed = wasArmed && !teardownOk
-  try {
-    await runPrivileged(['dns-restore'])
-  } catch { /* best-effort */ }
+  // Tear down each thing ONLY when its marker says it may actually be installed —
+  // NOT based on the current settings (the user may have toggled the kill switch /
+  // DNS off mid-session via SETTINGS_SET, yet the iptables chain / resolv.conf
+  // override installed at connect time is still live). The markers are set at
+  // arm/override time and cleared after a confirmed teardown, so they reflect real
+  // installed state, not the toggle — this is the same invariant healStrandedKillSwitch
+  // relies on. Gating this way avoids a privileged no-op on a clean session, which on
+  // the pkexec fallback path (AppImage/dev) is what triggered a spurious password
+  // prompt on quit. Kill switch first, so DNS-restore traffic can flow. If the kill
+  // switch WAS armed and its teardown fails, the DROP-all chain persists until the
+  // next-launch self-heal — flag it so the renderer can warn the user (M6).
+  if (isKillSwitchArmed()) {
+    const teardownOk = await disableKillSwitch()
+    killSwitchTeardownFailed = !teardownOk
+  } else {
+    killSwitchTeardownFailed = false
+  }
+  if (isDnsOverridden()) {
+    try {
+      await runPrivileged(['dns-restore'])
+      clearDnsOverridden()
+    } catch { /* best-effort — marker kept so a later teardown retries */ }
+  }
 }
 
 /**

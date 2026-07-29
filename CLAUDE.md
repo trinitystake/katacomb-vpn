@@ -144,12 +144,12 @@ assume a two-protocol world). The Nodes-tab protocol filter is a single-select
 `<select>` in `NodeFilters.tsx` driven by `PROTOCOL_FILTER_OPTIONS`; `NodeFilter.type`
 is `'all' | ProtocolType`.
 
-**Connectable: WireGuard (1), V2Ray (2), XRAY (4), Hysteria2 (6).** OpenVPN/AmneziaWG
-(3/5) are identify-and-filter only — the connect UI disables them
-(`isProtocolSupported`) and the main-process IPC guards (`nodeType` not in `{1,2,4,6}`
+**Connectable: WireGuard (1), V2Ray (2), XRAY (4), AmneziaWG (5), Hysteria2 (6).**
+OpenVPN (3) is identify-and-filter only — the connect UI disables it
+(`isProtocolSupported`) and the main-process IPC guards (`nodeType` not in `{1,2,4,5,6}`
 → throw) are the enforcement. Each additional protocol needs its own pinned binary,
-config generation/validation, and (for root-run ones) a privileged daemon op. The two
-remaining are root/kernel protocols, so they DO need the privileged-daemon path (unlike
+config generation/validation, and (for root-run ones) a privileged daemon op. OpenVPN
+is a root protocol, so it DOES need the privileged-daemon path (like AmneziaWG, unlike
 the unprivileged xray/hysteria2 pilots).
 
 **XRAY** is the VLESS+Reality protocol and reuses almost the entire V2Ray path: it's
@@ -200,9 +200,39 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   hysteria2 handshake mints a `randomUUID()` STRING and reuses it as the config `auth`. Only
   use `getKey()` for protocols whose node peer field is `uuid.UUID`.
 
+**AmneziaWG** (type 5) is a WireGuard fork with DPI-evasion params and rides the WG
+**root/privileged path** (helper + daemon), NOT the tun2socks child-proxy path
+(`isChildProxy` must never include it). What differs from plain WG:
+- The SDK can't emit the obfuscation keys, so `src/main/amneziawg-config.ts`
+  (`buildAmneziaWgConfig`, pure + unit-tested) builds the awg INI from handshake
+  metadata (go-sdk `amneziawg/metadata.go`: `{port, public_key, s1..s4, h1..h4,
+  i1..i5?}`). The handshake payload is the same `{public_key}` as WG — the SDK
+  `Wireguard` class is used for keygen only. **Nodes never send `Jc/Jmin/Jmax`** —
+  the client generates them (Jc [3,10], Jmin [64,256], Jmax [512,1024], Sentinel's
+  own defaults). Constraint re-checks (S1+56≠S2; H1-H4 all-zero or all distinct >4;
+  I1-I5 tag grammar) throw → refund.
+- Three bundled binaries in `resources/linux/v2ray/` — **`amneziawg-go`, `awg`,
+  `awg-quick`** — built from source by `scripts/build-amneziawg.sh` at the exact
+  commits Sentinel pins (no prebuilt amneziawg-go exists anywhere), SHA-pinned incl.
+  the root-run awg-quick bash script. **No system-PATH fallback — root-run binaries
+  fail closed** (both `vpn-manager.resolveAmneziaWgBinDir` and the daemon's).
+- Helper verbs `awg-up <config> <bindir>` / `awg-down`; daemon ops `amneziawg_up` /
+  `amneziawg_down` (additive — no protocol-version bump); `validate_awg_config` is
+  the bash mirror of `assertSafeAmneziaWgConfig` (allow-list = WG keys + jc/jmin/
+  jmax/s1-s4/h1-h4/i1-i5; PostUp/PreUp still rejected — awg-quick executes them as
+  root identically).
+- **The tunnel reuses iface `sntl0`** (awg-quick derives it from the config
+  filename) so kill switch, `/proc/net/dev` traffic stats, the WG liveness monitor
+  and daemon status work unchanged — BUT a userspace AWG `sntl0` is `type tun`, not
+  `type wireguard`, so every "sntl0 ⇒ kernel WG" assumption branches on
+  `sntl0IsKernelWireGuard()` (teardown via `ensureSntl0Down`, adoption, status,
+  `detectOtherVpn` exclusion). DNS is owned by awg-quick (resolvconf) like wg-quick
+  — no `dns-set`, no DoH.
+
 v9.0.0 nodes expose a `service_metadata` array on `/info` (Xray Reality keys,
 Hysteria2 obfs, transport variants) that the SDK's `NodeInfo` type lacks — the xray
 and hysteria2 paths read the equivalent from the handshake response, not `/info`.
+The amneziawg path likewise reads everything from the handshake response.
 
 ## Working Principles (for LLM contributors)
 

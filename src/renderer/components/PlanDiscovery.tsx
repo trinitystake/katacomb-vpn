@@ -1517,7 +1517,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
       })
       setSessionId(res.sessionId)
       setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' })
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' })
       setTunnelConnected(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
@@ -1651,7 +1651,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
             </button>
             {selected?.node && !isProtocolSupported(selected.node.type) && (
               <div className="text-xs text-warning text-center pt-2">
-                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a WireGuard or V2Ray node.
+                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a node running a supported protocol.
               </div>
             )}
           </>
@@ -1797,7 +1797,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
       })
       setSessionId(res.sessionId)
       setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' })
+      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' })
       setTunnelConnected(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
@@ -1944,7 +1944,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
             </button>
             {selected?.node && !isProtocolSupported(selected.node.type) && (
               <div className="text-xs text-warning text-center pt-2">
-                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a WireGuard or V2Ray node.
+                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a node running a supported protocol.
               </div>
             )}
           </>

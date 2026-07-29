@@ -188,7 +188,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
       setCurrentStep('5/5')
       await window.api.connectionConnect({
-        protocol: protocol as 'wireguard' | 'v2ray' | 'xray' | 'hysteria2',
+        protocol: protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2',
       })
 
       setTunnelConnected(true)

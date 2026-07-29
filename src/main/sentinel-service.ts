@@ -24,6 +24,7 @@ import { broadcastOrTimeout } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { buildXRayConfig } from './xray-config'
 import { buildHysteria2Config } from './hysteria-config'
+import { buildAmneziaWgConfig } from './amneziawg-config'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -45,8 +46,8 @@ const SESSION_TX_TIMEOUT_MESSAGE =
 
 interface SavedSessionConfig {
   sessionId: string
-  protocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2'
-  configString: string // WG config, or V2Ray/Xray/Hysteria2 JSON config
+  protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+  configString: string // WG/AWG INI config, or V2Ray/Xray/Hysteria2 JSON config
   nodeAddress: string
   nodeMoniker?: string
   nodeCountry?: string
@@ -425,6 +426,35 @@ export async function performHandshake(params: {
     })
 
     return { protocol: 'hysteria2', configString, wgInstance: null, v2rayInstance: null }
+  } else if (nodeType === 5) {
+    // AmneziaWG — same handshake payload as WireGuard (a base64 Curve25519 public
+    // key); the SDK Wireguard class is used ONLY for keygen, the way the xray
+    // branch uses a V2Ray instance only for its uuid. The SDK cannot emit the AWG
+    // obfuscation keys (Jc/S/H/I), so amneziawg-config.ts builds the INI instead.
+    // Any builder throw (bad metadata from an adversarial node) propagates into
+    // establishSessionOrRefund's refund path.
+    const wg = new Wireguard()
+    const result = await withTimeout(
+      sdkHandshake(sid, { public_key: wg.publicKey }, privKey, remoteUrl),
+      HANDSHAKE_TIMEOUT_MS,
+      'node handshake',
+    )
+
+    const handshakeData = parseHandshakeData(result)
+    const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
+    const assignedAddrs = Array.isArray(handshakeData.addrs) ? handshakeData.addrs : []
+    const configString = buildAmneziaWgConfig(metadata, result.addrs, assignedAddrs, wg.privateKey)
+
+    saveSessionConfig({
+      sessionId,
+      protocol: 'amneziawg',
+      configString,
+      nodeAddress,
+      nodeMoniker,
+      nodeCountry,
+    })
+
+    return { protocol: 'amneziawg', configString, wgInstance: null, v2rayInstance: null }
   } else {
     // V2Ray
     const v2ray = new V2Ray()

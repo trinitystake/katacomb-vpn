@@ -104,6 +104,49 @@ validate_wg_config() {
   done < "$config"
 }
 
+# Validate AmneziaWG config CONTENT — the WireGuard allow-list plus the AWG
+# obfuscation keys (awg-quick is a wg-quick fork, so PostUp/PreUp execute as
+# root identically and must be rejected the same way). Mirror of
+# assertSafeAmneziaWgConfig in config-guard.ts; last line of defense like
+# validate_wg_config above.
+validate_awg_config() {
+  local config="$1"
+  local section="" line key lc_key sec
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
+    if [[ "$line" =~ ^\[(.+)\]$ ]]; then
+      sec="${BASH_REMATCH[1],,}"
+      if [[ "$sec" != "interface" && "$sec" != "peer" ]]; then
+        echo "Error: AmneziaWG config section [$sec] is not allowed" >&2; exit 1
+      fi
+      section="$sec"; continue
+    fi
+    if [[ "$line" != *"="* ]]; then
+      echo "Error: malformed AmneziaWG config line is not allowed" >&2; exit 1
+    fi
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    lc_key="${key,,}"
+    if [[ -z "$section" ]]; then
+      echo "Error: AmneziaWG key outside any section is not allowed" >&2; exit 1
+    fi
+    if [[ "$section" == "interface" ]]; then
+      case "$lc_key" in
+        privatekey|address|dns|mtu|listenport) ;;
+        jc|jmin|jmax|s1|s2|s3|s4|h1|h2|h3|h4|i1|i2|i3|i4|i5) ;;
+        *) echo "Error: AmneziaWG [Interface] key '$lc_key' is not allowed" >&2; exit 1 ;;
+      esac
+    else
+      case "$lc_key" in
+        publickey|presharedkey|allowedips|endpoint|persistentkeepalive) ;;
+        *) echo "Error: AmneziaWG [Peer] key '$lc_key' is not allowed" >&2; exit 1 ;;
+      esac
+    fi
+  done < "$config"
+}
+
 # Ensure state directory exists with restrictive permissions
 ensure_run_dir() {
   if [[ ! -d "$RUN_DIR" ]]; then
@@ -174,6 +217,45 @@ case "${1:-}" in
       validate_iface "$iface"
       wg-quick down "$iface" 2>/dev/null || ip link delete "$iface" 2>/dev/null || true
     done
+    ;;
+  awg-up)
+    # AmneziaWG bring-up: same config rules as `up`, but via bundled awg-quick.
+    # BINDIR holds the SHA-pinned trio (awg, awg-quick, amneziawg-go); the daemon
+    # passes its own verified dir, the pkexec path is gated by polkit auth (same
+    # trust model as tun-up's caller-supplied binary).
+    CONFIG="${2:-}"
+    BINDIR="${3:-}"
+    if [[ -z "$CONFIG" || ! -f "$CONFIG" || "$CONFIG" != *.conf ]]; then
+      echo "Error: invalid config path" >&2
+      exit 1
+    fi
+    validate_path "$CONFIG"
+    IFACE="$(basename "$CONFIG" .conf)"
+    if [[ "$IFACE" != "$ALLOWED_IFACE" ]]; then
+      echo "Error: interface must be $ALLOWED_IFACE, got $IFACE" >&2
+      exit 1
+    fi
+    validate_awg_config "$CONFIG"
+    if [[ -z "$BINDIR" || ! -d "$BINDIR" ]]; then
+      echo "Error: invalid bin dir" >&2
+      exit 1
+    fi
+    validate_path "$BINDIR"
+    for b in awg awg-quick amneziawg-go; do
+      if [[ ! -x "$BINDIR/$b" ]]; then
+        echo "Error: $b missing from bin dir" >&2
+        exit 1
+      fi
+    done
+    # awg-quick shells out to `awg` and (userspace default) `amneziawg-go` by
+    # bare name — prepend the verified dir so only the bundled trio is found.
+    PATH="$BINDIR:$PATH" "$BINDIR/awg-quick" up "$CONFIG"
+    ;;
+  awg-down)
+    # amneziawg-go exits when its TUN device is removed — same teardown fidelity
+    # as the `down` fallback above (wg-quick down by name fails for our config
+    # location there too and falls back to ip link delete).
+    ip link delete "$ALLOWED_IFACE" 2>/dev/null || true
     ;;
   tun-up)
     # Spawn tun2socks + set up routing in one call
@@ -409,7 +491,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: sentinel-vpn-helper {up <config>|down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
+    echo "Usage: sentinel-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
     exit 1
     ;;
 esac

@@ -10,6 +10,7 @@ if [ "$1" != "upgrade" ]; then
     "$HELPER" killswitch-off 2>/dev/null || true
     "$HELPER" tun-down 2>/dev/null || true
     "$HELPER" down 2>/dev/null || true
+    "$HELPER" awg-down 2>/dev/null || true
     "$HELPER" dns-restore 2>/dev/null || true
   fi
 

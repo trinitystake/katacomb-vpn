@@ -45,6 +45,16 @@ async function runViaDaemon(args: string[]): Promise<void> {
     case 'down':
       await daemonRequest('wireguard_down')
       return
+    case 'awg-up': {
+      // rest = [configPath, binDir] — content is sent like `up`; the bindir is
+      // dropped because the daemon resolves + SHA-pins its own AWG trio.
+      const configString = readFileSync(rest[0], 'utf-8')
+      await daemonRequest('amneziawg_up', { configString })
+      return
+    }
+    case 'awg-down':
+      await daemonRequest('amneziawg_down')
+      return
     case 'tun-up': {
       // rest = [tun2socksBin, socksAddr, remoteHost, gateway, iface, bypassCsv?]
       // The daemon resolves+pins its own tun2socks, so the bin arg is dropped.

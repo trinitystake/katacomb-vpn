@@ -33,6 +33,7 @@ function makeDeps() {
     runHelper: (args: string[]) => { helperCalls.push(args); return '' },
     writeWgConfig: () => '/run/sentinel-dvpn/sntl0.conf',
     resolveTun2Socks: () => '/pinned/tun2socks',
+    resolveAmneziaWgBinDir: () => '/pinned/awg-bin',
     checkStatus: () => ({ wgUp: true, tunUp: false }),
   }
   return { deps, helperCalls }
@@ -117,4 +118,53 @@ test('an unknown op is rejected', () => {
   const res = handleRequest(req('frobnicate'), deps)
   assert.equal(res.ok, false)
   assert.equal(helperCalls.length, 0)
+})
+
+const CLEAN_AWG = `[Interface]
+PrivateKey = aGVsbG8=
+Address = 10.8.0.5/32
+Jc = 4
+Jmin = 128
+Jmax = 800
+S1 = 15
+S2 = 40
+H1 = 1234567891
+H2 = 987654321
+H3 = 246813579
+H4 = 1357924680
+
+[Peer]
+PublicKey = cHVia2V5
+AllowedIPs = 0.0.0.0/0
+Endpoint = 203.0.113.10:51820
+`
+
+test('amneziawg_up accepts a clean config and passes the daemon-resolved bin dir', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('amneziawg_up', { configString: CLEAN_AWG }), deps)
+  assert.equal(res.ok, true)
+  assert.deepEqual(helperCalls, [['awg-up', '/run/sentinel-dvpn/sntl0.conf', '/pinned/awg-bin']])
+})
+
+test('amneziawg_up REJECTS a PostUp config and never calls the helper', () => {
+  const { deps, helperCalls } = makeDeps()
+  const evil = CLEAN_AWG.replace('Jc = 4', 'PostUp = touch /tmp/pwned')
+  const res = handleRequest(req('amneziawg_up', { configString: evil }), deps)
+  assert.equal(res.ok, false)
+  assert.equal(helperCalls.length, 0)
+})
+
+test('amneziawg_up fails CLOSED when the bundled binaries fail integrity', () => {
+  const { deps, helperCalls } = makeDeps()
+  deps.resolveAmneziaWgBinDir = () => { throw new Error('awg failed SHA-256 integrity check') }
+  const res = handleRequest(req('amneziawg_up', { configString: CLEAN_AWG }), deps)
+  assert.equal(res.ok, false)
+  assert.equal(helperCalls.length, 0)
+})
+
+test('amneziawg_down calls the awg-down verb', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('amneziawg_down'), deps)
+  assert.equal(res.ok, true)
+  assert.deepEqual(helperCalls, [['awg-down']])
 })

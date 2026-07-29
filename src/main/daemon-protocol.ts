@@ -14,6 +14,8 @@ export type DaemonOp =
   | 'status'
   | 'wireguard_up'
   | 'wireguard_down'
+  | 'amneziawg_up'
+  | 'amneziawg_down'
   | 'tun_up'
   | 'tun_down'
   | 'killswitch_on'

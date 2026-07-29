@@ -14,6 +14,7 @@ import { execFileSync } from 'child_process'
 import { join } from 'path'
 import {
   assertSafeWireguardConfig,
+  assertSafeAmneziaWgConfig,
   isAllowedBypassCidr,
   isAllowedDnsResolver,
   isIPv4,
@@ -81,6 +82,8 @@ export interface DaemonDeps {
   writeWgConfig: (content: string) => string
   /** Resolve + SHA-pin the bundled tun2socks; throws on tamper/missing. */
   resolveTun2Socks: () => string
+  /** Resolve + SHA-pin the bundled AmneziaWG trio's dir; throws on tamper/missing. */
+  resolveAmneziaWgBinDir: () => string
   /** Read kernel interface state (world-readable). */
   checkStatus: () => { wgUp: boolean; tunUp: boolean }
 }
@@ -109,6 +112,18 @@ export const defaultDeps: DaemonDeps = {
       throw new Error('tun2socks failed SHA-256 integrity check')
     }
     return bundled
+  },
+  resolveAmneziaWgBinDir: () => {
+    // All three run as root via awg-up — fail closed on any missing/tampered one.
+    const dir = join(__dirname, '../linux/v2ray')
+    for (const name of ['awg', 'awg-quick', 'amneziawg-go']) {
+      const bundled = join(dir, name)
+      if (!existsSync(bundled)) throw new Error(`bundled ${name} not found`)
+      if (!verifyBinaryIntegrity(bundled, name)) {
+        throw new Error(`${name} failed SHA-256 integrity check`)
+      }
+    }
+    return dir
   },
   checkStatus: () => ({ wgUp: ifaceUp('sntl0'), tunUp: ifaceUp('sntl-tun') }),
 }
@@ -144,6 +159,22 @@ export function handleRequest(req: DaemonRequest, deps: DaemonDeps): DaemonRespo
         deps.runHelper(['down'])
         // Remove the root-owned WG config (holds the private key). It lives on tmpfs
         // but otherwise persists until the next connect overwrites it (finding L5).
+        try { if (existsSync(WG_CONFIG_PATH)) unlinkSync(WG_CONFIG_PATH) } catch { /* best-effort */ }
+        return reply()
+
+      case 'amneziawg_up': {
+        const configString = (args as Record<string, unknown>).configString
+        if (typeof configString !== 'string') return fail('amneziawg_up: configString required')
+        assertSafeAmneziaWgConfig(configString) // throws on PostUp/PreUp/unknown keys
+        const binDir = deps.resolveAmneziaWgBinDir() // pinned trio; client-supplied paths ignored
+        const path = deps.writeWgConfig(configString) // same root-owned sntl0.conf — one tunnel at a time
+        deps.runHelper(['awg-up', path, binDir])
+        return reply()
+      }
+
+      case 'amneziawg_down':
+        deps.runHelper(['awg-down'])
+        // Same private-key hygiene as wireguard_down.
         try { if (existsSync(WG_CONFIG_PATH)) unlinkSync(WG_CONFIG_PATH) } catch { /* best-effort */ }
         return reply()
 

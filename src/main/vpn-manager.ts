@@ -1,12 +1,13 @@
 import { execSync, execFileSync, spawn, type ChildProcess } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync, appendFileSync } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 import {
   assertSafeWireguardConfig,
+  assertSafeAmneziaWgConfig,
   assertSafeV2RayConfig,
   assertSafeHysteria2Config,
   withV2RayDiagnosticLog,
@@ -71,11 +72,26 @@ function resolveTun2Socks(): string {
   return resolveBundled('tun2socks')
 }
 
+/**
+ * Resolve the bundled AmneziaWG trio's directory. Unlike the child-proxy
+ * binaries there is NO system-PATH fallback: awg-quick/awg/amneziawg-go run as
+ * root via the helper, so an unverified substitute is never acceptable — missing
+ * or tampered fails closed (the daemon's resolveAmneziaWgBinDir does the same).
+ */
+function resolveAmneziaWgBinDir(): string {
+  for (const name of ['amneziawg-go', 'awg', 'awg-quick']) {
+    if (resolveBundled(name) === name) {
+      throw new Error('AmneziaWG binaries are missing from this build. Reinstall the app.')
+    }
+  }
+  return dirname(resolveBundled('amneziawg-go'))
+}
+
 const TUN_IFACE = 'sntl-tun'
 const SOCKS_ADDR = '127.0.0.1:1080'
 
 let activeChild: ChildProcess | null = null
-let activeProtocol: 'wireguard' | 'v2ray' | 'xray' | 'hysteria2' | null = null
+let activeProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | null = null
 
 // v2ray, xray and hysteria2 are all child-process + tun2socks tunnels with identical
 // lifecycle handling (spawn a local SOCKS proxy, route it through tun2socks) — this
@@ -128,6 +144,21 @@ function isAnyWireGuardUp(): boolean {
   }
 }
 
+/**
+ * Discriminate what a live sntl0 actually is: kernel WireGuard shows up under
+ * `type wireguard`, while a userspace AmneziaWG sntl0 is a plain `type tun`
+ * device (amneziawg-go). Everything that assumed "sntl0 ⇒ kernel WG" (teardown,
+ * adoption, status) branches on this.
+ */
+function sntl0IsKernelWireGuard(): boolean {
+  try {
+    const output = execSync('ip -o link show type wireguard', { stdio: 'pipe' }).toString().trim()
+    return output.split('\n').some((line) => line.match(/^\d+:\s+(\S+):/)?.[1] === WG_IFACE)
+  } catch {
+    return false
+  }
+}
+
 /** Bring down ALL WireGuard interfaces — single password prompt via helper */
 async function bringDownAllWireGuard(): Promise<void> {
   if (!isAnyWireGuardUp()) return
@@ -142,6 +173,34 @@ async function bringDownAllWireGuard(): Promise<void> {
   const ourConfig = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
   if (existsSync(ourConfig)) {
     try { unlinkSync(ourConfig) } catch { /* ignore */ }
+  }
+}
+
+/** Bring down our AmneziaWG tunnel (userspace sntl0) and clean its config */
+async function bringDownAmneziaWg(): Promise<void> {
+  try {
+    await runPrivileged(['awg-down'])
+  } catch {
+    // Best-effort
+  }
+
+  const ourConfig = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
+  if (existsSync(ourConfig)) {
+    try { unlinkSync(ourConfig) } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Tear down whatever currently owns sntl0 — kernel WireGuard via the `down`
+ * verb, userspace AmneziaWG via `awg-down`. The shared pre-connect/teardown
+ * step, so a stale tunnel of either protocol never blocks the other's bring-up.
+ */
+async function ensureSntl0Down(): Promise<void> {
+  if (!isWireGuardUp()) return
+  if (sntl0IsKernelWireGuard()) {
+    await bringDownAllWireGuard()
+  } else {
+    await bringDownAmneziaWg()
   }
 }
 
@@ -387,7 +446,9 @@ function spawnV2Ray(
  */
 export function detectExistingConnection(): void {
   if (isWireGuardUp()) {
-    activeProtocol = 'wireguard'
+    // A live sntl0 is kernel WG or userspace AmneziaWG (type tun) — adopt the
+    // right protocol so disconnect uses the matching teardown verb.
+    activeProtocol = sntl0IsKernelWireGuard() ? 'wireguard' : 'amneziawg'
     activeConfigFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
   }
 
@@ -439,9 +500,7 @@ export async function connectWireGuard(wg: Wireguard): Promise<void> {
     )
   }
 
-  if (isWireGuardUp()) {
-    await bringDownAllWireGuard()
-  }
+  await ensureSntl0Down()
 
   // Use buildConfigString and write to our own sntl0.conf instead of SDK's wgsent0.conf
   // This ensures we always use the sntl0 interface name, compatible with the helper script
@@ -470,9 +529,7 @@ export async function connectWireGuardFromConfig(configString: string): Promise<
     )
   }
 
-  if (isWireGuardUp()) {
-    await bringDownAllWireGuard()
-  }
+  await ensureSntl0Down()
 
   // Saved/reconnect configs are equally untrusted — guard before wg-quick (root).
   assertSafeWireguardConfig(configString)
@@ -488,6 +545,49 @@ export async function connectWireGuardFromConfig(configString: string): Promise<
   }
 
   activeProtocol = 'wireguard'
+  activeConfigFile = configFile
+}
+
+/** Bring up AmneziaWG from a config file via the bundled awg-quick (helper verb) */
+async function bringUpAmneziaWg(configFile: string, binDir: string): Promise<void> {
+  try {
+    await runPrivileged(['awg-up', configFile, binDir])
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('dismissed') || msg.includes('cancelled') || msg.includes('Not authorized')) {
+      throw new Error('Admin authentication was cancelled. AmneziaWG requires root privileges.')
+    }
+    if (msg.includes('unknown op')) {
+      // A pre-AWG daemon is still running (deb upgraded but the unit restart failed).
+      throw new Error(
+        'The Sentinel privileged service is out of date. Restart it (sudo systemctl restart sentinel-dvpn-daemon) or reboot, then reconnect.'
+      )
+    }
+    throw new Error(`Failed to bring up AmneziaWG interface: ${msg}`)
+  }
+}
+
+export async function connectAmneziaWgFromConfig(configString: string): Promise<void> {
+  // Fail fast on missing/tampered bundled binaries before any tunnel state changes.
+  const binDir = resolveAmneziaWgBinDir()
+
+  await ensureSntl0Down()
+
+  // Node operators are untrusted: same PostUp/PreUp root-exec surface as
+  // wg-quick, guarded by the AWG-aware allow-list before awg-quick runs as root.
+  assertSafeAmneziaWgConfig(configString)
+
+  const configFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
+  writeFileSync(configFile, configString, { mode: 0o600 })
+
+  try {
+    await bringUpAmneziaWg(configFile, binDir)
+  } catch (err) {
+    if (existsSync(configFile)) unlinkSync(configFile)
+    throw err
+  }
+
+  activeProtocol = 'amneziawg'
   activeConfigFile = configFile
 }
 
@@ -623,6 +723,12 @@ export async function disconnect(): Promise<void> {
     activeChild = null
   }
 
+  // Bring down a userspace AmneziaWG sntl0 first — it is NOT `type wireguard`,
+  // so the WG teardown below would never remove it.
+  if (activeProtocol === 'amneziawg' || (isWireGuardUp() && !sntl0IsKernelWireGuard())) {
+    await bringDownAmneziaWg()
+  }
+
   // Bring down WireGuard interface
   if (activeProtocol === 'wireguard' || isWireGuardUp()) {
     await bringDownAllWireGuard()
@@ -651,14 +757,14 @@ export function getConnectionStatus(): { connected: boolean; protocol: string | 
     activeChild = null
   }
 
-  // Check if the WireGuard interface is actually up (works even after app restart)
+  // Check if the sntl0 interface is actually up (works even after app restart)
   if (isWireGuardUp()) {
-    if (!activeProtocol) activeProtocol = 'wireguard'
-    return { connected: true, protocol: 'wireguard' }
+    if (!activeProtocol) activeProtocol = sntl0IsKernelWireGuard() ? 'wireguard' : 'amneziawg'
+    return { connected: true, protocol: activeProtocol }
   }
 
-  // WG was supposed to be active but interface is gone
-  if (activeProtocol === 'wireguard') {
+  // WG/AWG was supposed to be active but interface is gone
+  if (activeProtocol === 'wireguard' || activeProtocol === 'amneziawg') {
     activeProtocol = null
     activeConfigFile = null
   }
@@ -723,13 +829,14 @@ export function detectOtherVpn(): { type: string; name: string; iface?: string }
     }
   } catch { /* ignore */ }
 
-  // Check for TUN interfaces (OpenVPN, etc.) — exclude our own sntl-tun
+  // Check for TUN interfaces (OpenVPN, etc.) — exclude our own sntl-tun AND
+  // sntl0 (a userspace AmneziaWG sntl0 is a plain tun device, not `type wireguard`).
   try {
     const output = execSync('ip -o link show type tun', { stdio: 'pipe' }).toString().trim()
     if (output) {
       for (const line of output.split('\n')) {
         const match = line.match(/^\d+:\s+(\S+):/)
-        if (match && match[1] !== TUN_IFACE) {
+        if (match && match[1] !== TUN_IFACE && match[1] !== WG_IFACE) {
           found.push({ type: 'tun', name: `Tunnel (${match[1]})`, iface: match[1] })
         }
       }
@@ -749,9 +856,7 @@ export async function killAllTunnels(): Promise<void> {
     activeChild.kill('SIGTERM')
   }
 
-  if (isWireGuardUp()) {
-    await bringDownAllWireGuard()
-  }
+  await ensureSntl0Down()
 
   if (existsSync(V2RAY_CONFIG)) {
     try { unlinkSync(V2RAY_CONFIG) } catch { /* ignore */ }

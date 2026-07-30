@@ -41,7 +41,7 @@ const TX_TIMEOUT_MESSAGE =
   'The transaction timed out before confirmation. It may still be processing — check ' +
   'the Session tab shortly and cancel any unexpected session.'
 
-type SentinelPlan = {
+type ChainPlan = {
   id: Long
   provAddress: string
   bytes: string
@@ -60,7 +60,7 @@ function durationToSeconds(d?: { seconds: Long; nanos: number }): number | null 
   }
 }
 
-function toCachedPlan(p: SentinelPlan): CachedPlan {
+function toCachedPlan(p: ChainPlan): CachedPlan {
   return {
     id: p.id.toString(),
     provAddress: p.provAddress,
@@ -107,7 +107,7 @@ export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
       if (!resp || !resp.plans) break
 
       for (const raw of resp.plans) {
-        results.push(toCachedPlan(raw as unknown as SentinelPlan))
+        results.push(toCachedPlan(raw as unknown as ChainPlan))
         if (results.length >= maxCount) break
       }
 
@@ -224,7 +224,7 @@ export interface PlanAllocationInfo {
   status: number
 }
 
-type SentinelSubscription = {
+type ChainSubscription = {
   id: Long
   accAddress: string
   planId: Long
@@ -264,7 +264,7 @@ export async function querySubscriptions(walletAddress: string): Promise<Subscri
       countTotal: false,
       reverse: false,
     })
-    const subs = (resp?.subscriptions || []) as unknown as SentinelSubscription[]
+    const subs = (resp?.subscriptions || []) as unknown as ChainSubscription[]
     return subs.map((s) => ({
       id: s.id.toString(),
       planId: s.planId ? s.planId.toString() : '0',
@@ -299,7 +299,7 @@ export async function cancelSubscription(params: {
       client.subscriptionCancel({
         from: address,
         id: Long.fromString(subscriptionId, true),
-        memo: 'sentinel-dvpn-app: cancel subscription',
+        memo: 'katacomb-vpn: cancel subscription',
       } as Parameters<typeof client.subscriptionCancel>[0]),
       TX_TIMEOUT_MESSAGE,
     )
@@ -330,7 +330,7 @@ export async function updateSubscriptionPolicy(params: {
         from: address,
         id: Long.fromString(subscriptionId, true),
         renewalPricePolicy: policy as RenewalPricePolicy,
-        memo: 'sentinel-dvpn-app: update renewal policy',
+        memo: 'katacomb-vpn: update renewal policy',
       } as Parameters<typeof client.subscriptionUpdate>[0]),
       TX_TIMEOUT_MESSAGE,
     )
@@ -352,18 +352,18 @@ export async function queryPlanAllocations(walletAddress: string): Promise<PlanA
       countTotal: false,
       reverse: false,
     })
-    const subs = (resp?.subscriptions || []) as unknown as SentinelSubscription[]
+    const subs = (resp?.subscriptions || []) as unknown as ChainSubscription[]
     // Only plan-based subscriptions (planId > 0)
     const planSubs = subs.filter((s) => s.planId && !s.planId.isZero())
     if (planSubs.length === 0) return []
 
     // Resolve plan details for each unique planId
     const uniquePlanIds = Array.from(new Set(planSubs.map((s) => s.planId.toString())))
-    const planDetails = new Map<string, SentinelPlan>()
+    const planDetails = new Map<string, ChainPlan>()
     for (const pid of uniquePlanIds) {
       try {
         const p = await client.sentinelQuery?.plan.plan(Long.fromString(pid, true))
-        if (p) planDetails.set(pid, p as unknown as SentinelPlan)
+        if (p) planDetails.set(pid, p as unknown as ChainPlan)
       } catch {
         // best-effort per plan
       }
@@ -406,7 +406,7 @@ export async function startSessionWithExistingSubscription(params: {
         from: address,
         id: Long.fromString(subscriptionId, true),
         nodeAddress,
-        memo: 'sentinel-dvpn-app: subscription start session',
+        memo: 'katacomb-vpn: subscription start session',
       } as Parameters<typeof client.subscriptionStartSession>[0]),
       TX_TIMEOUT_MESSAGE,
     )
@@ -456,7 +456,7 @@ export async function subscribeToPlan(params: {
         denom,
         renewalPricePolicy: renewalPricePolicy as RenewalPricePolicy,
         nodeAddress,
-        memo: 'sentinel-dvpn-app: plan start session',
+        memo: 'katacomb-vpn: plan start session',
       } as Parameters<typeof client.planStartSession>[0]),
       TX_TIMEOUT_MESSAGE,
     )

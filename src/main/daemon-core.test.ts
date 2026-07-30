@@ -31,7 +31,7 @@ function makeDeps() {
   const helperCalls: string[][] = []
   const deps = {
     runHelper: (args: string[]) => { helperCalls.push(args); return '' },
-    writeWgConfig: () => '/run/sentinel-dvpn/sntl0.conf',
+    writeWgConfig: () => '/run/katacomb-vpn/sntl0.conf',
     resolveTun2Socks: () => '/pinned/tun2socks',
     resolveAmneziaWgBinDir: () => '/pinned/awg-bin',
     checkStatus: () => ({ wgUp: true, tunUp: false }),
@@ -55,7 +55,7 @@ test('wireguard_up accepts a clean config and calls the helper up verb', () => {
   const { deps, helperCalls } = makeDeps()
   const res = handleRequest(req('wireguard_up', { configString: CLEAN_WG }), deps)
   assert.equal(res.ok, true)
-  assert.deepEqual(helperCalls, [['up', '/run/sentinel-dvpn/sntl0.conf']])
+  assert.deepEqual(helperCalls, [['up', '/run/katacomb-vpn/sntl0.conf']])
 })
 
 test('wireguard_up REJECTS a PostUp config and never calls the helper', () => {
@@ -143,7 +143,7 @@ test('amneziawg_up accepts a clean config and passes the daemon-resolved bin dir
   const { deps, helperCalls } = makeDeps()
   const res = handleRequest(req('amneziawg_up', { configString: CLEAN_AWG }), deps)
   assert.equal(res.ok, true)
-  assert.deepEqual(helperCalls, [['awg-up', '/run/sentinel-dvpn/sntl0.conf', '/pinned/awg-bin']])
+  assert.deepEqual(helperCalls, [['awg-up', '/run/katacomb-vpn/sntl0.conf', '/pinned/awg-bin']])
 })
 
 test('amneziawg_up REJECTS a PostUp config and never calls the helper', () => {

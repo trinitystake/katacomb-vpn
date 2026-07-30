@@ -3,7 +3,7 @@ import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
 // Bundle everything except native modules and electron builtins.
-// The CosmJS / Sentinel SDK ecosystem has ESM-only transitive deps
+// The CosmJS / dVPN SDK ecosystem has ESM-only transitive deps
 // (@scure/base, @noble/*) that Electron's CJS require() can't load,
 // so we must let Vite transpile the entire dependency tree.
 const DEPS_TO_BUNDLE = [

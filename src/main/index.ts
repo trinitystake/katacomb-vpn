@@ -8,13 +8,14 @@ import {
   performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
-import { sweepStaleSessionFiles } from './sentinel-service'
+import { sweepStaleSessionFiles } from './chain-service'
+import { migrateLegacyUserData } from './settings'
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
 import { IPC } from '../shared/ipc-channels'
 
-const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
-const POLICY_PATH = '/usr/share/polkit-1/actions/com.sentinel.dvpn.policy'
+const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
+const POLICY_PATH = '/usr/share/polkit-1/actions/com.katacomb.vpn.policy'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -65,9 +66,9 @@ function showAbout(): void {
   const aboutIcon = nativeImage.createFromPath(getIconPath('256x256.png'))
   dialog.showMessageBox({
     type: 'info',
-    title: 'About Sentinel dVPN',
-    message: 'Sentinel dVPN',
-    detail: `Version ${app.getVersion()}\n\nDecentralized VPN client for the Sentinel network.\n\nhttps://sentinel.co`,
+    title: 'About Katacomb VPN',
+    message: 'Katacomb VPN',
+    detail: `Version ${app.getVersion()}\n\nDecentralized VPN client.`,
     icon: aboutIcon.isEmpty() ? undefined : aboutIcon,
     buttons: ['OK'],
   })
@@ -93,7 +94,7 @@ function refreshTray(info: ConnectionInfo): void {
   const connected = info.state === 'connected'
   const where = info.nodeMoniker ? ` (${info.nodeMoniker})` : ''
 
-  tray.setToolTip(connected ? `Sentinel dVPN — Connected${where}` : 'Sentinel dVPN — Disconnected')
+  tray.setToolTip(connected ? `Katacomb VPN — Connected${where}` : 'Katacomb VPN — Disconnected')
 
   const contextMenu = Menu.buildFromTemplate([
     { label: connected ? `Connected${where}` : 'Disconnected', enabled: false },
@@ -188,7 +189,7 @@ function checkSystemDeps(): void {
   const result = dialog.showMessageBoxSync({
     type: 'question',
     title: 'Missing System Dependencies',
-    message: `Sentinel dVPN requires the following packages:\n\n  ${missing.join(', ')}\n\nInstall them now? (requires admin password)`,
+    message: `Katacomb VPN requires the following packages:\n\n  ${missing.join(', ')}\n\nInstall them now? (requires admin password)`,
     buttons: ['Install', 'Skip'],
     defaultId: 0,
     cancelId: 1,
@@ -213,8 +214,8 @@ function ensurePolkitSetup(): void {
     ? join(__dirname, '../../resources/linux')
     : join(process.resourcesPath, 'linux')
 
-  const helperSrc = join(resourceDir, 'sentinel-vpn-helper.sh')
-  const policySrc = join(resourceDir, 'com.sentinel.dvpn.policy')
+  const helperSrc = join(resourceDir, 'katacomb-vpn-helper.sh')
+  const policySrc = join(resourceDir, 'com.katacomb.vpn.policy')
 
   if (!existsSync(helperSrc) || !existsSync(policySrc)) return
 
@@ -228,7 +229,7 @@ function ensurePolkitSetup(): void {
   if (!needsInstall && !needsUpdate) return
 
   const dialogMessage = needsInstall
-    ? 'Sentinel dVPN needs to install a system helper so you don\'t have to enter your password every time you connect or disconnect.\n\nThis is a one-time setup that requires admin authentication.'
+    ? 'Katacomb VPN needs to install a system helper so you don\'t have to enter your password every time you connect or disconnect.\n\nThis is a one-time setup that requires admin authentication.'
     : 'The VPN helper script has been updated and needs to be reinstalled.\n\nThis requires admin authentication.'
 
   const result = dialog.showMessageBoxSync({
@@ -271,6 +272,10 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
+  // Must run before anything touches userData (sweepStaleSessionFiles, settings,
+  // the wallet store): the rename moved the directory, so this brings the user's
+  // profile across from the pre-rename location.
+  migrateLegacyUserData()
   checkSystemDeps()
   // The root daemon (deb install) handles privileged ops password-free, so the
   // per-op polkit helper + its install prompt are only needed on the fallback

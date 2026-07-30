@@ -30,15 +30,15 @@ import {
   type DaemonResponse,
 } from './daemon-protocol'
 
-const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
+const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
 const WG_CONFIG_PATH = join(DAEMON_DIR, 'sntl0.conf')
 const MAX_MESSAGE_BYTES = 256 * 1024
 // Only members of this group may drive the privileged daemon socket (finding C1).
 // The .deb postinstall creates it and adds the installing user.
-const SOCKET_GROUP = 'sentinel-dvpn'
+const SOCKET_GROUP = 'katacomb-vpn'
 
 function log(msg: string): void {
-  process.stderr.write(`[sentinel-daemon] ${msg}\n`)
+  process.stderr.write(`[katacomb-daemon] ${msg}\n`)
 }
 
 /** gid of `group` via getent, or null when the group doesn't exist (dev/unpackaged). */
@@ -54,7 +54,7 @@ function lookupGid(group: string): number | null {
 }
 
 /**
- * Lock the socket to the `sentinel-dvpn` group (root:sentinel-dvpn, 0660) so only
+ * Lock the socket to the `katacomb-vpn` group (root:katacomb-vpn, 0660) so only
  * group members — not every local user — can send privileged VPN ops (finding C1).
  * When the group is absent (dev / unpackaged run) fall back to the old world-
  * accessible 0666 rather than lock the GUI out entirely; that path has no daemon
@@ -262,7 +262,7 @@ function handleConnection(socket: Socket, deps: DaemonDeps): void {
   socket.on('error', () => { /* client went away */ })
 }
 
-/** Bind the Unix socket and serve. Socket is group-restricted to `sentinel-dvpn` (0660) when that group exists (finding C1), else 0666. */
+/** Bind the Unix socket and serve. Socket is group-restricted to `katacomb-vpn` (0660) when that group exists (finding C1), else 0666. */
 export function startDaemon(deps: DaemonDeps = defaultDeps): void {
   if (!existsSync(DAEMON_DIR)) mkdirSync(DAEMON_DIR, { recursive: true, mode: 0o755 })
   if (existsSync(DAEMON_SOCKET_PATH)) {

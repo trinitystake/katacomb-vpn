@@ -64,7 +64,7 @@ test('buildAmneziaWgConfig emits the WG base config plus the obfuscation keys', 
   assert.equal(cfg.peer.PersistentKeepalive, '15')
 })
 
-test('buildAmneziaWgConfig generates Jc/Jmin/Jmax locally in the Sentinel ranges', () => {
+test('buildAmneziaWgConfig generates Jc/Jmin/Jmax locally in the upstream-default ranges', () => {
   // Random per build — check ranges across a few builds (nodes never send these).
   for (let i = 0; i < 20; i++) {
     const cfg = parseIni(buildAmneziaWgConfig([META], ADDRS, ASSIGNED, PRIVKEY))

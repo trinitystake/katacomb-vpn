@@ -182,7 +182,7 @@ export function isAllowedDnsResolver(ip: string): boolean {
 /**
  * True if `remoteUrl` is a safe node API / probe endpoint: http(s) only (after an
  * optional scheme-less `host:port` form), with no embedded credentials. Mirrors the
- * check in sentinel-service.resolveNodeRemoteUrl so the node-probe IPC path gets the
+ * check in chain-service.resolveNodeRemoteUrl so the node-probe IPC path gets the
  * same guarantee as the handshake path (finding M3).
  */
 export function isSafeNodeApiUrl(remoteUrl: unknown): boolean {
@@ -555,7 +555,7 @@ export function withV2RayDoH(config: unknown, resolverIp: string): unknown {
 // inbound are fine. We prefer encrypted inbounds and reject nodes that offer
 // only cleartext ones.
 //
-// Enum values mirror the Sentinel SDK (ProxyProtocol / TransportSecurity); kept
+// Enum values mirror the vendored JS SDK (ProxyProtocol / TransportSecurity); kept
 // as named constants so this module needs no runtime SDK import. Must match the
 // SDK enums.
 const PROXY_VLESS = 1 // ProxyProtocol.VLess

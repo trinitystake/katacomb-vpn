@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sentinel dVPN helper — runs as root via polkit
+# Katacomb VPN helper — runs as root via polkit
 # Handles WireGuard up/down and tun2socks spawn/routing/teardown
 set -euo pipefail
 
@@ -15,13 +15,13 @@ TUN_ADDR="198.18.0.1/15"
 # netstack caches MTU at creation). Lower to 1280 (IPv6 min, always deliverable)
 # if a site still stalls; raise toward 1500 only if throughput matters more.
 TUN_MTU="1400"
-RUN_DIR="/run/sentinel-dvpn"
+RUN_DIR="/run/katacomb-vpn"
 STATE_FILE="${RUN_DIR}/tun.state"
 # Persistent (non-tmpfs) state. Only the resolv.conf backup lives here: it must
 # survive a crash/reboot-while-connected so DNS can be restored to the user's
 # original (a tmpfs backup would be wiped while the static /etc/resolv.conf the
 # helper wrote survives on disk, stranding DNS on the tunnel resolver).
-PERSIST_DIR="/var/lib/sentinel-dvpn"
+PERSIST_DIR="/var/lib/katacomb-vpn"
 
 # --- Input validation helpers ---
 
@@ -172,7 +172,7 @@ ensure_persist_dir() {
 # v6 egress — closing the native-IPv6 real-IP leak that an IPv4-only kill switch
 # leaves open. Best-effort: skipped when ip6tables is unavailable (IPv6-disabled
 # host) and never allowed to abort the IPv4 kill switch (callers use `|| ...`).
-CHAIN6="SENTINEL_KILLSWITCH6"
+CHAIN6="KATACOMB_KILLSWITCH6"
 
 ipv6_available() {
   command -v ip6tables >/dev/null 2>&1 && ip6tables -S >/dev/null 2>&1
@@ -346,7 +346,7 @@ case "${1:-}" in
       validate_ipv4 "$DNS_IP"
     fi
 
-    CHAIN="SENTINEL_KILLSWITCH"
+    CHAIN="KATACOMB_KILLSWITCH"
 
     # Flush existing chain if present
     iptables -w 5 -D OUTPUT -j "$CHAIN" 2>/dev/null || true
@@ -399,7 +399,7 @@ case "${1:-}" in
     # once the tunnel is gone (a stranded kill switch). `-w 5` waits for the lock
     # so the removal actually happens. (The `|| true` now only covers the benign
     # "chain doesn't exist" case.)
-    CHAIN="SENTINEL_KILLSWITCH"
+    CHAIN="KATACOMB_KILLSWITCH"
     iptables -w 5 -D OUTPUT -j "$CHAIN" 2>/dev/null || true
     iptables -w 5 -F "$CHAIN" 2>/dev/null || true
     iptables -w 5 -X "$CHAIN" 2>/dev/null || true
@@ -419,7 +419,7 @@ case "${1:-}" in
     # kill switch drops. Only used for V2Ray; WireGuard's DNS is owned by wg-quick.
     #
     # The prior resolv.conf is snapshotted ONCE per session for an exact restore:
-    # the file/symlink via `cp -P`, or — if there was none — a sentinel marker so
+    # the file/symlink via `cp -P`, or — if there was none — a marker file so
     # dns-restore returns to the no-file state. The new file is written via a temp
     # file on the SAME filesystem + atomic rename, so there is never a window with
     # no /etc/resolv.conf.
@@ -491,7 +491,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: sentinel-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
+    echo "Usage: katacomb-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
     exit 1
     ;;
 esac

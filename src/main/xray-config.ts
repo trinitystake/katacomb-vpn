@@ -1,5 +1,5 @@
-// Pure builder for an Xray (VLESS + Reality) CLIENT config from a Sentinel node's
-// handshake metadata. The bundled Sentinel SDK (its V2Ray class) cannot emit Reality
+// Pure builder for an Xray (VLESS + Reality) CLIENT config from a dVPN node's
+// handshake metadata. The bundled JS SDK (its V2Ray class) cannot emit Reality
 // configs — its metadata type has no flow/reality_* fields and parseConfig ignores
 // them — so for xray nodes (node.type === 4) we build the outbound ourselves.
 //

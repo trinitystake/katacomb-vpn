@@ -8,7 +8,7 @@ import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
 
-const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited sentinel set by the provider
+const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited placeholder set by the provider
 const PLAN_DISCOVERY_MAX = 500
 
 /**
@@ -219,8 +219,8 @@ export default function PlanDiscovery() {
   const { plansNodeFilter, clearPlansNodeFilter } = useNavigation()
   const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached } = usePlans()
   // A rescan re-queries the chain over RPC, which is unreachable while OUR tunnel
-  // is up (traffic routes to the Sentinel node). External VPNs like Mullvad don't
-  // trigger this — only this app's own Sentinel tunnel does.
+  // is up (traffic routes to the dVPN node). External VPNs like Mullvad don't
+  // trigger this — only this app's own tunnel does.
   const { status: connStatus } = useConnection()
   const tunnelUp = connStatus.state !== 'idle'
   const [error, setError] = useState<string | null>(null)

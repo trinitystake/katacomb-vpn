@@ -1,9 +1,9 @@
 {
-  "name": "sentinel-dvpn-app",
+  "name": "katacomb-vpn",
   "version": "0.1.0",
-  "description": "Sentinel dVPN Desktop Client",
-  "author": "Sentinel <noreply@sentinel.co>",
-  "homepage": "https://sentinel.co",
+  "description": "Katacomb VPN Desktop Client",
+  "author": "Katacomb <noreply@katacomb.vpn>",
+  "homepage": "https://katacomb.vpn",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

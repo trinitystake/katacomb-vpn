@@ -3,11 +3,10 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <vendor>Sentinel dVPN</vendor>
-  <vendor_url>https://sentinel.co</vendor_url>
+  <vendor>Katacomb VPN</vendor>
 
-  <action id="com.sentinel.dvpn.manage-tunnel">
-    <description>Manage Sentinel dVPN tunnel (WireGuard and V2Ray/tun2socks)</description>
+  <action id="com.katacomb.vpn.manage-tunnel">
+    <description>Manage Katacomb VPN tunnel (WireGuard and V2Ray/tun2socks)</description>
     <message>Authentication is required to manage the VPN tunnel.</message>
     <icon_name>network-vpn</icon_name>
     <defaults>
@@ -15,7 +14,7 @@
       <allow_inactive>no</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/sentinel-vpn-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/katacomb-vpn-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 </policyconfig>

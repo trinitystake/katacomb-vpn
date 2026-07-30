@@ -1,5 +1,5 @@
-// Pure builder for an AmneziaWG CLIENT config (awg-quick INI) from a Sentinel
-// node's handshake metadata. The bundled JS SDK (sentinel-js-sdk 2.0.4) knows only
+// Pure builder for an AmneziaWG CLIENT config (awg-quick INI) from a dVPN
+// node's handshake metadata. The bundled JS SDK (2.0.4) knows only
 // WireGuard/V2Ray — its Wireguard.buildConfigString() cannot emit the AmneziaWG
 // obfuscation keys — so for amneziawg nodes (node.type === 5) we build the INI
 // ourselves. The SDK Wireguard class is still used by the caller for KEYGEN only

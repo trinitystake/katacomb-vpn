@@ -18,7 +18,7 @@ import {
   getPrivKey,
   logout,
 } from './wallet'
-import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
+import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, updateSubscriptionPolicy } from './plan-service'
@@ -752,7 +752,7 @@ function assertNumber(value: unknown, name: string, min?: number, max?: number):
 function assertSentAddress(value: unknown, name: string): asserts value is string {
   assertString(value, name)
   if (!/^sent(node|prov)?1[a-z0-9]{38,}$/.test(value as string)) {
-    throw new Error(`Invalid ${name}: not a valid Sentinel address`)
+    throw new Error(`Invalid ${name}: not a valid wallet address`)
   }
 }
 

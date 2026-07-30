@@ -24,7 +24,32 @@ extension (required by the native runner). No linter is configured; `tsc` is
 
 ## Architecture
 
-Sentinel dVPN desktop client: Electron 41 + React 18 + TypeScript + Vite + Tailwind CSS 3. Connects to the Sentinel blockchain (Cosmos SDK) to subscribe to decentralized VPN nodes and establish WireGuard/V2Ray tunnels. Linux-only target.
+Katacomb VPN desktop client: Electron 41 + React 18 + TypeScript + Vite + Tailwind CSS 3. Connects to the Sentinel blockchain (Cosmos SDK) to subscribe to decentralized VPN nodes and establish WireGuard/V2Ray tunnels. Linux-only target.
+
+### Naming: the product vs. the chain (do not "finish the job")
+
+The product was renamed **Sentinel dVPN → Katacomb VPN**. The word "Sentinel" is
+gone from everything the app owns. What remains is the **blockchain**, not the
+brand, and removing it breaks the build or makes a comment unverifiable:
+
+- the npm dep `@sentinel-official/sentinel-js-sdk`, its deep protobuf import paths,
+  and its API surface (`SentinelClient`, `SigningSentinelClient`, `sentinelQuery`)
+- protobuf type URLs the chain returns: `/sentinel.node.v3.Session`,
+  `/sentinel.subscription.v3.Session`, `sentinel.types.v1.RenewalPricePolicy`
+- hostnames `rpc.sentinel.co`, `api.sentnodes.com`; the `sent` prefix; `udvpn`
+- upstream citations naming `sentinel-official/sentinel-go-sdk`, `sentinel-dvpnx`,
+  `sentinel-dvpncli` (binary pins + metadata field provenance)
+
+Also deliberate: the tunnel interfaces stayed **`sntl0` / `sntl-tun`**. They are
+opaque tags, and renaming them would touch the AmneziaWG type-tun discriminator,
+traffic stats, the liveness monitor and awg-quick's filename-derived iface.
+
+**userData moved** with `package.json` `name` (`~/.config/sentinel-dvpn-app` →
+`~/.config/katacomb-vpn`). `settings.migrateLegacyUserData()` (called first in
+`whenReady`) copies settings/wallets/sessions across. `safeStorage`'s libsecret key
+is keyed by app name, so pre-rename `.enc` seeds **cannot** be decrypted —
+verified, not assumed. `getWalletMnemonic` turns that failure into a re-import
+instruction; the wallet index is copied so the name/address stay visible.
 
 ### Process Separation
 
@@ -38,7 +63,7 @@ Strict Electron security isolation with three process boundaries:
 
 - `wallet.ts`: BIP-39 mnemonic import, `DirectSecp256k1HdWallet` derivation with `sent` prefix, `safeStorage` encryption (OS keyring via libsecret on Linux), balance/session queries via `SentinelClient`.
 - `settings.ts`: Multi-wallet store (`wallets/` dir with encrypted `.enc` files + `wallets-index.json`), app settings (`settings.json`), old single-wallet migration. Wallet entries have `id` (UUID), `name`, `address`.
-- `sentinel-service.ts`: `SigningSentinelClient` for on-chain tx (node subscription via `nodeStartSession`), session ID extraction from tx events, cryptographic handshake with nodes (WireGuard/V2Ray branching). Session configs saved to disk for reconnect.
+- `chain-service.ts`: `SigningSentinelClient` for on-chain tx (node subscription via `nodeStartSession`), session ID extraction from tx events, cryptographic handshake with nodes (WireGuard/V2Ray branching). Session configs saved to disk for reconnect.
 - `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled binaries (v2ray, tun2socks) verified via SHA-256 before use, with system PATH fallback.
 - `ipc-handlers.ts`: all IPC channels (registered via a `handle()` wrapper that rejects calls from any frame that isn't our own renderer), pre-connect balance validation, node list fetch from `api.sentnodes.com/v2/nodes` via `net.fetch`, auto-reconnect + a WireGuard liveness monitor. Caches balance/sessions/nodes when VPN is active (RPC unreachable through tunnel).
 - `config-guard.ts`: **pure validators for untrusted-node data** — `assertSafeWireguardConfig` (allow-list keys, reject `PostUp`/`PreUp`/… so a node config can't run shell as root via `wg-quick`), `assertSafeV2RayConfig`, `isAllowedBypassCidr`/`sanitizeBypassRoutes` (reject `0.0.0.0/x` split-tunnel routes), `extractWireguardEndpointHost`. Unit-tested; see the node-trust invariant below.
@@ -49,18 +74,18 @@ Strict Electron security isolation with three process boundaries:
 ### Privilege Escalation
 
 VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a polkit helper:
-- `resources/linux/sentinel-vpn-helper.sh` — installed to `/usr/local/bin/sentinel-vpn-helper`
-- `resources/linux/com.sentinel.dvpn.policy` — polkit policy for cached auth
+- `resources/linux/katacomb-vpn-helper.sh` — installed to `/usr/local/bin/katacomb-vpn-helper`
+- `resources/linux/com.katacomb.vpn.policy` — polkit policy for cached auth
 - `resources/linux/postinstall.sh` — deb postinstall that deploys the helper + policy
 - Helper commands: `up <config>`, `down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard interface name: `sntl0`. TUN interface: `sntl-tun`.
 
 ### Privileged daemon (deb) vs. pkexec fallback (AppImage/dev)
 
-The `.deb` installs a **persistent root daemon** (systemd `sentinel-dvpn-daemon`,
+The `.deb` installs a **persistent root daemon** (systemd `katacomb-vpn-daemon`,
 run via `ELECTRON_RUN_AS_NODE` on the bundled Electron) so connect/disconnect
 **never prompt for a password**. The GUI (as the user) sends JSON ops over a Unix
-socket at `/run/sentinel-dvpn/daemon.sock` (mode 0666 — any local user, Mullvad
+socket at `/run/katacomb-vpn/daemon.sock` (mode 0666 — any local user, Mullvad
 model). The AppImage and `npm run dev` have no daemon, so they fall back to the
 per-op `pkexec` helper (one cached prompt).
 
@@ -74,8 +99,8 @@ per-op `pkexec` helper (one cached prompt).
   The privileged call tree (`vpn-manager`, `kill-switch`, `ipc-handlers`) is
   **async** because of the socket round-trip.
 - Packaging: `postinstall.sh` installs+enables the unit and a space-free
-  `/opt/sentinel-dvpn` → `/opt/Sentinel dVPN` symlink (the unit ExecStart uses it
-  + the `sentinel-dvpn-app` binary name). `postrm.sh` tears down any tunnel then
+  `/opt/katacomb-vpn` → `/opt/Katacomb VPN` symlink (the unit ExecStart uses it
+  + the `katacomb-vpn` binary name). `postrm.sh` tears down any tunnel then
   removes everything. **If you change the package `name`, fix the unit ExecStart
   binary.** Verify packaging by building + extracting the deb (`dpkg-deb -x`),
   not just by reading config.
@@ -126,9 +151,9 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 
 ### Vite Bundling (Critical)
 
-`electron.vite.config.ts` must bundle the entire CosmJS/Sentinel SDK dependency tree (listed in `DEPS_TO_BUNDLE`). Electron loads main process output as CJS, but these deps have ESM-only transitive dependencies (`@scure/base`, `@noble/*`). Only `bufferutil` and `utf-8-validate` are externalized (ws optional native deps that gracefully no-op).
+`electron.vite.config.ts` must bundle the entire CosmJS/dVPN SDK dependency tree (listed in `DEPS_TO_BUNDLE`). Electron loads main process output as CJS, but these deps have ESM-only transitive dependencies (`@scure/base`, `@noble/*`). Only `bufferutil` and `utf-8-validate` are externalized (ws optional native deps that gracefully no-op).
 
-**If you add a new `@cosmjs/*` or Sentinel SDK dependency, add it to `DEPS_TO_BUNDLE` or the build will fail at runtime with `ERR_REQUIRE_ESM`.**
+**If you add a new `@cosmjs/*` or dVPN SDK dependency, add it to `DEPS_TO_BUNDLE` or the build will fail at runtime with `ERR_REQUIRE_ESM`.**
 
 ### Renderer Conventions
 
@@ -172,7 +197,7 @@ a v2ray-core fork that reads the **same JSON config**, so it runs through the sa
 and the same child-process lifecycle (`spawnV2Ray` — generalized to take a
 bin/args/logName; `isChildProxy()` narrows v2ray+xray together at the branch sites).
 What differs:
-- The bundled Sentinel SDK **cannot** build Reality configs — its `V2RayMetadata`
+- The bundled JS SDK **cannot** build Reality configs — its `V2RayMetadata`
   type has no `flow`/`reality_*` fields and `V2Ray.parseConfig` ignores them — so
   `src/main/xray-config.ts` (`buildXRayConfig`, pure + unit-tested) builds the xray
   VLESS+Reality JSON from the node's handshake metadata. Enum decode confirmed via the
@@ -221,12 +246,12 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   metadata (go-sdk `amneziawg/metadata.go`: `{port, public_key, s1..s4, h1..h4,
   i1..i5?}`). The handshake payload is the same `{public_key}` as WG — the SDK
   `Wireguard` class is used for keygen only. **Nodes never send `Jc/Jmin/Jmax`** —
-  the client generates them (Jc [3,10], Jmin [64,256], Jmax [512,1024], Sentinel's
+  the client generates them (Jc [3,10], Jmin [64,256], Jmax [512,1024], the SDK's
   own defaults). Constraint re-checks (S1+56≠S2; H1-H4 all-zero or all distinct >4;
   I1-I5 tag grammar) throw → refund.
 - Three bundled binaries in `resources/linux/v2ray/` — **`amneziawg-go`, `awg`,
   `awg-quick`** — built from source by `scripts/build-amneziawg.sh` at the exact
-  commits Sentinel pins (no prebuilt amneziawg-go exists anywhere), SHA-pinned incl.
+  commits the upstream node pins (no prebuilt amneziawg-go exists anywhere), SHA-pinned incl.
   the root-run awg-quick bash script. **No system-PATH fallback — root-run binaries
   fail closed** (both `vpn-manager.resolveAmneziaWgBinDir` and the daemon's).
 - Helper verbs `awg-up <config> <bindir>` / `awg-down`; daemon ops `amneziawg_up` /
@@ -316,7 +341,7 @@ This codebase follows Karpathy-style discipline. Apply these in order of precede
 - Address prefix: `sent`
 - Gas price: `0.2udvpn`
 - `Long` type (from `long` package) required for session IDs, gigabytes, hours — use `Long.fromNumber(n, true)` (unsigned)
-- CosmJS pinned at 0.38.x for peer compatibility with Sentinel SDK
+- CosmJS pinned at 0.38.x for peer compatibility with the JS SDK
 
 ### Packaging
 

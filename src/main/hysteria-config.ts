@@ -1,5 +1,5 @@
-// Pure builder for a Hysteria2 CLIENT config from a Sentinel node's handshake
-// metadata. The bundled JS SDK (sentinel-js-sdk 2.0.4) knows only WireGuard/V2Ray —
+// Pure builder for a Hysteria2 CLIENT config from a dVPN node's handshake
+// metadata. The bundled JS SDK (2.0.4) knows only WireGuard/V2Ray —
 // it has no Hysteria2 class at all — so for hysteria2 nodes (node.type === 6) we
 // build the client config ourselves from the node's handshake metadata.
 //

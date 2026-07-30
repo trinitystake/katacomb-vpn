@@ -3,7 +3,7 @@ import http from 'node:http'
 import { net, BrowserWindow } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 
-// Sentinel nodes use self-signed TLS certificates, so we need a custom agent
+// dVPN nodes use self-signed TLS certificates, so we need a custom agent
 const insecureAgent = new https.Agent({ rejectUnauthorized: false })
 
 /** Fetch a URL accepting self-signed certs (for node probes). */
@@ -77,7 +77,7 @@ export async function probeNode(remoteUrl: string, nodeAddress: string): Promise
   try {
     // Ensure URL has a scheme (api field may be bare host:port)
     const normalizedUrl = remoteUrl.startsWith('http') ? remoteUrl : `https://${remoteUrl}`
-    // Hit root path — Sentinel nodes serve status at /
+    // Hit root path — dVPN nodes serve status at /
     const url = normalizedUrl.replace(/\/+$/, '') + '/'
     const start = performance.now()
     const response = await nodeFetch(url, 8000)
@@ -129,7 +129,7 @@ export async function probeNode(remoteUrl: string, nodeAddress: string): Promise
 }
 
 /**
- * Ask a node what protocol it actually runs. Sentinel nodes serve their info at
+ * Ask a node what protocol it actually runs. dVPN nodes serve their info at
  * the ROOT path as `{success, result:{…, service_type}}` (there is no /info route
  * — it 404s); `service_type` is a string on v9 nodes ("amneziawg", "hysteria2").
  * Throws when the node is unreachable or the response isn't the expected shape,

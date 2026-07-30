@@ -5,7 +5,7 @@
 # behind a DROP-all firewall, then stop+disable the daemon and remove everything.
 
 if [ "$1" != "upgrade" ]; then
-  HELPER="/usr/local/bin/sentinel-vpn-helper"
+  HELPER="/usr/local/bin/katacomb-vpn-helper"
   if [ -x "$HELPER" ]; then
     "$HELPER" killswitch-off 2>/dev/null || true
     "$HELPER" tun-down 2>/dev/null || true
@@ -15,18 +15,18 @@ if [ "$1" != "upgrade" ]; then
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl stop sentinel-dvpn-daemon.service 2>/dev/null || true
-    systemctl disable sentinel-dvpn-daemon.service 2>/dev/null || true
+    systemctl stop katacomb-vpn-daemon.service 2>/dev/null || true
+    systemctl disable katacomb-vpn-daemon.service 2>/dev/null || true
   fi
 
-  rm -f /etc/systemd/system/sentinel-dvpn-daemon.service
-  rm -f /opt/sentinel-dvpn
+  rm -f /etc/systemd/system/katacomb-vpn-daemon.service
+  rm -f /opt/katacomb-vpn
   rm -f "$HELPER"
-  rm -f /usr/share/polkit-1/actions/com.sentinel.dvpn.policy
+  rm -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy
 
   # Remove the socket-access group (finding C1). Best-effort — harmless if it has
   # members or is already gone.
-  groupdel sentinel-dvpn 2>/dev/null || true
+  groupdel katacomb-vpn 2>/dev/null || true
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true

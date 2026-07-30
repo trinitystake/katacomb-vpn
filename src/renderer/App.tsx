@@ -76,7 +76,7 @@ function AppInner() {
           <div className="flex items-center gap-2.5">
             <AppLogo size={30} className="shrink-0" />
             <h1 className="text-accent font-semibold text-base">
-              Sentinel dVPN
+              Katacomb VPN
             </h1>
           </div>
           <ConnectedBar />
@@ -100,7 +100,7 @@ function AppInner() {
           <span aria-hidden>⚠</span>
           <span>
             The kill switch could not be turned off — all traffic may still be blocked.
-            If you have no internet, restart Sentinel dVPN to restore it.
+            If you have no internet, restart Katacomb VPN to restore it.
           </span>
         </div>
       )}

@@ -1,7 +1,7 @@
 // Single source of truth for the node VPN protocol axis.
 //
 // The node-list API (api.sentnodes.com/v2) tags each node with a numeric `type`.
-// As of Sentinel node v9.0.0 six protocol types exist across the network (each
+// As of dVPN node v9.0.0 six protocol types exist across the network (each
 // node still runs exactly ONE — the aggregator `type` is its single service_type,
 // verified against dvpnx's /info handler; "six protocols" means six node types,
 // not six per node). This table replaces the `type === 1 ? … : …` ternaries that

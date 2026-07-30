@@ -1,17 +1,16 @@
 [Unit]
-Description=Sentinel dVPN privileged helper daemon
-Documentation=https://sentinel.co
+Description=Katacomb VPN privileged helper daemon
 After=network.target
 
 [Service]
 Type=simple
 # Reuse the app's bundled Electron in Node mode — no separate Node runtime
-# dependency. /opt/sentinel-dvpn is a space-free symlink to "/opt/Sentinel dVPN"
+# dependency. /opt/katacomb-vpn is a space-free symlink to "/opt/Katacomb VPN"
 # created by the postinstall, so the ExecStart needs no quoting/escaping.
 Environment=ELECTRON_RUN_AS_NODE=1
-ExecStart=/opt/sentinel-dvpn/sentinel-dvpn-app /opt/sentinel-dvpn/resources/daemon/index.js
-# systemd creates/owns /run/sentinel-dvpn (where the daemon binds its socket).
-RuntimeDirectory=sentinel-dvpn
+ExecStart=/opt/katacomb-vpn/katacomb-vpn /opt/katacomb-vpn/resources/daemon/index.js
+# systemd creates/owns /run/katacomb-vpn (where the daemon binds its socket).
+RuntimeDirectory=katacomb-vpn
 RuntimeDirectoryMode=0755
 Restart=on-failure
 RestartSec=2

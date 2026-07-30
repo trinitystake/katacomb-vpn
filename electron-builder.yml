@@ -1,5 +1,5 @@
-appId: com.sentinel.dvpn
-productName: Sentinel dVPN
+appId: com.katacomb.vpn
+productName: Katacomb VPN
 directories:
   output: dist
   buildResources: build
@@ -25,7 +25,7 @@ extraResources:
     to: linux/v2ray/
     filter:
       - "**/*"
-  # Standalone root-daemon bundle → /opt/Sentinel dVPN/resources/daemon/index.js
+  # Standalone root-daemon bundle → /opt/Katacomb VPN/resources/daemon/index.js
   - from: out/daemon/index.js
     to: daemon/index.js
   # App icons → resources/icons/ so the tray (getIconPath in main) can load them
@@ -44,7 +44,7 @@ linux:
   icon: build/icons
   desktop:
     entry:
-      Name: Sentinel dVPN
+      Name: Katacomb VPN
       Comment: Decentralized VPN Client
       Categories: Network;VPN;Security;
 deb:
@@ -54,4 +54,4 @@ deb:
   afterInstall: resources/linux/postinstall.sh
   afterRemove: resources/linux/postrm.sh
 appImage:
-  artifactName: sentinel-dvpn-${version}.AppImage
+  artifactName: katacomb-vpn-${version}.AppImage

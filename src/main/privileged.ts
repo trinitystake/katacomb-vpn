@@ -11,7 +11,7 @@ import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { isDaemonAvailable, daemonRequest, DaemonUnreachableError } from './daemon-client'
 
-const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
+const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
 
 /**
  * Is there any route to root right now — the daemon socket or the installed

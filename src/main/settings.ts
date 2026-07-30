@@ -1,8 +1,49 @@
 import { app, safeStorage } from 'electron'
-import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs'
+import { readFileSync, existsSync, unlinkSync, mkdirSync, cpSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { writeFileAtomic } from './fs-utils'
+
+// --- Pre-rename profile migration ---
+
+// userData is derived from package.json `name`, so the Sentinel dVPN → Katacomb
+// VPN rename moved it. Everything the user owns lived under the old directory.
+const LEGACY_USER_DATA_DIR = 'sentinel-dvpn-app'
+// Caches (*-cache.json) and Chromium state are deliberately not carried over —
+// they regenerate, and copying them would just move stale data.
+const MIGRATED_ENTRIES = ['settings.json', 'wallets-index.json', 'wallets', 'sessions']
+
+/**
+ * One-time copy of the pre-rename profile into the new userData directory.
+ * Copies rather than moves, so the old directory survives as a fallback.
+ *
+ * NOTE: the `.enc` seed files come across but will NOT decrypt — safeStorage's
+ * libsecret key is looked up by app name, so the rename invalidates it (verified:
+ * same ciphertext decrypts under `sentinel-dvpn-app` and fails under
+ * `katacomb-vpn`). Copying them anyway keeps the wallet's name and address
+ * visible, so the user knows which seed phrase to re-enter; getWalletMnemonic
+ * turns the resulting failure into that instruction.
+ */
+export function migrateLegacyUserData(): void {
+  const dest = app.getPath('userData')
+  // Already migrated (or a fresh install that has since created wallets).
+  if (existsSync(join(dest, 'wallets-index.json'))) return
+
+  const legacy = join(app.getPath('appData'), LEGACY_USER_DATA_DIR)
+  if (!existsSync(join(legacy, 'wallets-index.json'))) return
+
+  mkdirSync(dest, { recursive: true })
+  for (const entry of MIGRATED_ENTRIES) {
+    const from = join(legacy, entry)
+    if (!existsSync(from)) continue
+    try {
+      cpSync(from, join(dest, entry), { recursive: true, preserveTimestamps: true })
+    } catch {
+      // Best-effort: a partial migration still beats starting empty, and the
+      // legacy directory is left untouched either way.
+    }
+  }
+}
 
 // --- App Settings ---
 
@@ -175,7 +216,17 @@ export function getWalletMnemonic(id: string): string {
   const encPath = join(walletsDir(), `${id}.enc`)
   if (!existsSync(encPath)) throw new Error('Wallet file not found')
   const encrypted = readFileSync(encPath)
-  return safeStorage.decryptString(encrypted)
+  try {
+    return safeStorage.decryptString(encrypted)
+  } catch {
+    // safeStorage's keyring entry is keyed by app name, so a seed saved before
+    // the rename cannot be decrypted now. Tell the user what to do instead of
+    // surfacing "Error while decrypting the ciphertext provided to …".
+    throw new Error(
+      'This wallet was saved under the app\'s previous name and can no longer be unlocked. ' +
+      'Remove it and import the same seed phrase again — your funds are on-chain and unaffected.'
+    )
+  }
 }
 
 /**

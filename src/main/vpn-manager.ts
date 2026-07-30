@@ -26,7 +26,7 @@ import { DNS_PROVISION_FAILED } from '../shared/error-markers'
 const WG_IFACE = 'sntl0'
 
 // Create a private temp directory for config files (mode 0o700, not predictable)
-const SECURE_TMPDIR = mkdtempSync(join(tmpdir(), 'sentinel-dvpn-'))
+const SECURE_TMPDIR = mkdtempSync(join(tmpdir(), 'katacomb-vpn-'))
 const V2RAY_CONFIG = join(SECURE_TMPDIR, 'v2ray.json')
 
 /**
@@ -164,7 +164,7 @@ export function protocolRuntimeError(protocol: 'wireguard' | 'amneziawg' | 'v2ra
   }
 }
 
-/** Check if our Sentinel WireGuard interface (sntl0) is currently up */
+/** Check if our WireGuard interface (sntl0) is currently up */
 export function isWireGuardUp(): boolean {
   try {
     execSync(`ip link show ${WG_IFACE}`, { stdio: 'pipe' })
@@ -610,7 +610,7 @@ async function bringUpAmneziaWg(configFile: string, binDir: string): Promise<voi
     if (msg.includes('unknown op')) {
       // A pre-AWG daemon is still running (deb upgraded but the unit restart failed).
       throw new Error(
-        'The Sentinel privileged service is out of date. Restart it (sudo systemctl restart sentinel-dvpn-daemon) or reboot, then reconnect.'
+        'The Katacomb privileged service is out of date. Restart it (sudo systemctl restart katacomb-vpn-daemon) or reboot, then reconnect.'
       )
     }
     if (isDnsProvisionError(msg)) {
@@ -887,7 +887,7 @@ export function onV2RayUnexpectedExit(callback: () => void): void {
   v2rayExitCallback = callback
 }
 
-/** Detect non-Sentinel VPN connections that might conflict */
+/** Detect other VPN connections that might conflict */
 export function detectOtherVpn(): { type: string; name: string; iface?: string }[] {
   const found: { type: string; name: string; iface?: string }[] = []
 

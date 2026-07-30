@@ -27,13 +27,13 @@ jobs:
 
       # Blocking gate for anything critical. Kept separate from the high-severity
       # report below because the transitive `elliptic` advisory (GHSA-848j-6mx2-7j84,
-      # high, no upstream fix — dormant fallback under the Sentinel SDK's native
+      # high, no upstream fix — dormant fallback under the vendored JS SDK's native
       # secp256k1) would otherwise make every run red.
       - name: Security audit (critical, blocking)
         run: npm audit --omit=dev --audit-level=critical
 
       # Informational: surfaces new high/moderate/low advisories without failing the
-      # build. Review these on each run; drop the elliptic exception once the Sentinel
+      # build. Review these on each run; drop the elliptic exception once the JS
       # SDK moves off it.
       - name: Security audit (full report, non-blocking)
         run: npm audit --omit=dev || true

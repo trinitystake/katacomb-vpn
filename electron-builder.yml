@@ -51,6 +51,11 @@ deb:
   depends:
     - wireguard-tools
     - policykit-1
+    # OpenVPN (node type 3) runs the distro client rather than a bundled build:
+    # it's a TLS client, so distro OpenSSL security updates are a better supply
+    # chain than a binary we'd have to re-cut on every CVE. Same model as
+    # wireguard-tools above. AppImage/dev users install it themselves.
+    - openvpn
   afterInstall: resources/linux/postinstall.sh
   afterRemove: resources/linux/postrm.sh
 appImage:

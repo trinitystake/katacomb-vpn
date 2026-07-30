@@ -5,6 +5,9 @@ set -euo pipefail
 
 ALLOWED_IFACE="sntl0"
 TUN_IFACE="sntl-tun"
+# OpenVPN's own interface — sntl0 is taken by WireGuard/AmneziaWG, and a shared
+# name would make teardown ambiguous between awg-down and ovpn-down.
+OVPN_IFACE="sntl-ovpn"
 TUN_ADDR="198.18.0.1/15"
 # tun2socks terminates TCP in a userspace netstack and advertises MSS = MTU-40 to
 # local apps. With no explicit MTU, its default is too large for the proxy-wrapped
@@ -17,6 +20,8 @@ TUN_ADDR="198.18.0.1/15"
 TUN_MTU="1400"
 RUN_DIR="/run/katacomb-vpn"
 STATE_FILE="${RUN_DIR}/tun.state"
+OVPN_PID_FILE="${RUN_DIR}/openvpn.pid"
+OVPN_LOG_FILE="${RUN_DIR}/openvpn.log"
 # Persistent (non-tmpfs) state. Only the resolv.conf backup lives here: it must
 # survive a crash/reboot-while-connected so DNS can be restored to the user's
 # original (a tmpfs backup would be wiped while the static /etc/resolv.conf the
@@ -147,6 +152,82 @@ validate_awg_config() {
   done < "$config"
 }
 
+# Validate OpenVPN config CONTENT — allow-list directives and inline PKI blocks,
+# rejecting everything else. openvpn executes up/down/route-up/ipchange/plugin/
+# tls-verify/client-connect/learn-address as ROOT, and script-security would
+# re-enable them, so the allow-list is the security boundary (same discipline as
+# validate_wg_config). Mirror of assertSafeOpenVpnConfig in config-guard.ts; last
+# line of defense if the daemon is bypassed or the helper is invoked directly.
+# Operational flags the app needs (--daemon/--writepid/--log/--script-security)
+# are intentionally NOT allowed in the file — ovpn-up passes them on the command
+# line, so they can only come from us.
+validate_openvpn_config() {
+  local config="$1"
+  local line directive lc_dir block="" tag
+  local -A seen_block=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # trim surrounding whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    # Inside an inline PKI block: PEM armor or base64/hex body only.
+    if [[ -n "$block" ]]; then
+      if [[ "$line" == "</$block>" ]]; then block=""; continue; fi
+      [[ -z "$line" ]] && continue
+      if [[ ! "$line" =~ ^-----(BEGIN|END)\ [A-Za-z0-9\ ]{1,48}-----$ && ! "$line" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+        echo "Error: OpenVPN inline block contains a non-PEM line" >&2; exit 1
+      fi
+      continue
+    fi
+    [[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
+    if [[ "$line" =~ ^\<([A-Za-z0-9-]+)\>$ ]]; then
+      tag="${BASH_REMATCH[1],,}"
+      case "$tag" in
+        ca|cert|key|tls-crypt) ;;
+        *) echo "Error: OpenVPN inline block <$tag> is not allowed" >&2; exit 1 ;;
+      esac
+      if [[ -n "${seen_block[$tag]:-}" ]]; then
+        echo "Error: OpenVPN inline block <$tag> is repeated" >&2; exit 1
+      fi
+      seen_block[$tag]=1
+      block="$tag"; continue
+    fi
+    if [[ "$line" == \<* ]]; then
+      echo "Error: OpenVPN stray tag is not allowed" >&2; exit 1
+    fi
+    directive="${line%%[[:space:]]*}"
+    lc_dir="${directive,,}"
+    case "$lc_dir" in
+      client|dev|dev-type|proto|remote|nobind|auth-nocache|auth) ;;
+      data-ciphers|data-ciphers-fallback|tls-cipher|tls-client|tls-version-min) ;;
+      remote-cert-tls|redirect-gateway|topology|explicit-exit-notify) ;;
+      persist-key|persist-tun) ;;
+      *) echo "Error: OpenVPN directive '$lc_dir' is not allowed" >&2; exit 1 ;;
+    esac
+  done < "$config"
+  if [[ -n "$block" ]]; then
+    echo "Error: OpenVPN inline block <$block> is unterminated" >&2; exit 1
+  fi
+  for tag in ca cert key tls-crypt; do
+    if [[ -z "${seen_block[$tag]:-}" ]]; then
+      echo "Error: OpenVPN inline block <$tag> is missing" >&2; exit 1
+    fi
+  done
+}
+
+# Resolve the system openvpn from an absolute allow-list. Never a $PATH lookup and
+# never a caller-supplied path: this runs as root.
+resolve_openvpn_bin() {
+  local candidate
+  for candidate in /usr/sbin/openvpn /sbin/openvpn /usr/bin/openvpn; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  echo "Error: openvpn is not installed" >&2
+  exit 1
+}
+
 # Ensure state directory exists with restrictive permissions
 ensure_run_dir() {
   if [[ ! -d "$RUN_DIR" ]]; then
@@ -256,6 +337,85 @@ case "${1:-}" in
     # as the `down` fallback above (wg-quick down by name fails for our config
     # location there too and falls back to ip link delete).
     ip link delete "$ALLOWED_IFACE" 2>/dev/null || true
+    ;;
+  ovpn-up)
+    # OpenVPN bring-up. Unlike wg-quick/awg-quick, openvpn STAYS RESIDENT, so this
+    # daemonizes it (--writepid/--log) and then waits for proof of success before
+    # returning — otherwise a failed bring-up would look like a successful one.
+    #
+    # Every security-critical and operational flag is passed HERE, after --config,
+    # so it wins (openvpn is last-one-wins) and can never come from a node:
+    #   --script-security 0  no --up/--down/--plugin script can execute, ever
+    #   --dev/--dev-type     pins the interface the kill switch and stats expect
+    #   --connect-*          bounds the bring-up instead of retrying forever
+    CONFIG="${2:-}"
+    if [[ -z "$CONFIG" || ! -f "$CONFIG" || "$CONFIG" != *.conf ]]; then
+      echo "Error: invalid config path" >&2
+      exit 1
+    fi
+    validate_path "$CONFIG"
+    validate_openvpn_config "$CONFIG"
+    OPENVPN_BIN="$(resolve_openvpn_bin)"
+
+    ensure_run_dir
+    # Clean up any previous tunnel/state so a stale pid can't be killed later.
+    if [[ -f "$OVPN_PID_FILE" ]]; then
+      OLD_PID="$(cat "$OVPN_PID_FILE" 2>/dev/null || true)"
+      if [[ "$OLD_PID" =~ ^[0-9]+$ ]]; then kill "$OLD_PID" 2>/dev/null || true; fi
+      rm -f "$OVPN_PID_FILE"
+    fi
+    ip link delete "$OVPN_IFACE" 2>/dev/null || true
+    rm -f "$OVPN_LOG_FILE"
+
+    "$OPENVPN_BIN" --config "$CONFIG" \
+      --dev "$OVPN_IFACE" --dev-type tun \
+      --script-security 0 \
+      --connect-timeout 10 --connect-retry-max 2 \
+      --verb 3 --log "$OVPN_LOG_FILE" \
+      --writepid "$OVPN_PID_FILE" --daemon katacomb-ovpn
+    chmod 600 "$OVPN_LOG_FILE" 2>/dev/null || true
+
+    # Wait for the tunnel to be genuinely up: the interface exists AND openvpn
+    # reported a completed init (routes installed). 25s ≈ two connect attempts,
+    # inside the daemon's 60s budget.
+    OVPN_READY=0
+    for _ in $(seq 1 125); do
+      if ip link show "$OVPN_IFACE" &>/dev/null \
+         && grep -q "Initialization Sequence Completed" "$OVPN_LOG_FILE" 2>/dev/null; then
+        OVPN_READY=1
+        break
+      fi
+      sleep 0.2
+    done
+
+    if [[ "$OVPN_READY" != "1" ]]; then
+      OVPN_PID="$(cat "$OVPN_PID_FILE" 2>/dev/null || true)"
+      if [[ "$OVPN_PID" =~ ^[0-9]+$ ]]; then kill "$OVPN_PID" 2>/dev/null || true; fi
+      ip link delete "$OVPN_IFACE" 2>/dev/null || true
+      rm -f "$OVPN_PID_FILE"
+      # Surface the real reason (auth failure, TLS error, unreachable node) instead
+      # of a bare timeout — this text reaches the connect modal.
+      echo "Error: OpenVPN did not come up: $(tail -n 5 "$OVPN_LOG_FILE" 2>/dev/null | tr '\n' ' ')" >&2
+      exit 1
+    fi
+    ;;
+  ovpn-down)
+    if [[ -f "$OVPN_PID_FILE" ]]; then
+      OVPN_PID="$(cat "$OVPN_PID_FILE" 2>/dev/null || true)"
+      if [[ "$OVPN_PID" =~ ^[0-9]+$ ]]; then
+        kill "$OVPN_PID" 2>/dev/null || true
+        # Give openvpn a moment to remove its routes and interface itself.
+        for _ in $(seq 1 25); do
+          kill -0 "$OVPN_PID" 2>/dev/null || break
+          sleep 0.2
+        done
+        kill -9 "$OVPN_PID" 2>/dev/null || true
+      fi
+      rm -f "$OVPN_PID_FILE"
+    fi
+    # Belt and braces: drop the interface if openvpn died without cleaning up.
+    ip link delete "$OVPN_IFACE" 2>/dev/null || true
+    rm -f "$OVPN_LOG_FILE"
     ;;
   tun-up)
     # Spawn tun2socks + set up routing in one call
@@ -491,7 +651,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: katacomb-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
+    echo "Usage: katacomb-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|ovpn-up <config>|ovpn-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
     exit 1
     ;;
 esac

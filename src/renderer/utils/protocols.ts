@@ -29,7 +29,7 @@ const PROTOCOLS: Record<number, ProtocolMeta> = {
   0: { label: 'Unknown', short: '—', color: 'text-text-tertiary', supported: false },
   1: { label: 'WireGuard', short: 'WG', color: 'text-info', supported: true },
   2: { label: 'V2Ray', short: 'V2Ray', color: 'text-warning', supported: true },
-  3: { label: 'OpenVPN', short: 'OpenVPN', color: 'text-accent', supported: false },
+  3: { label: 'OpenVPN', short: 'OVPN', color: 'text-accent', supported: true },
   4: { label: 'XRAY', short: 'XRAY', color: 'text-warning', supported: true },
   5: { label: 'AmneziaWG', short: 'AWG', color: 'text-info', supported: true },
   6: { label: 'Hysteria2', short: 'HY2', color: 'text-success', supported: true },

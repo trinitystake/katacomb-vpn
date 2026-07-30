@@ -16,6 +16,8 @@ export type DaemonOp =
   | 'wireguard_down'
   | 'amneziawg_up'
   | 'amneziawg_down'
+  | 'openvpn_up'
+  | 'openvpn_down'
   | 'tun_up'
   | 'tun_down'
   | 'killswitch_on'

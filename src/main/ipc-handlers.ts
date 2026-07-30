@@ -31,6 +31,7 @@ import {
   connectWireGuard,
   connectWireGuardFromConfig,
   connectAmneziaWgFromConfig,
+  connectOpenVpnFromConfig,
   connectV2RayFromConfig,
   connectXRayFromConfig,
   connectHysteria2FromConfig,
@@ -42,7 +43,9 @@ import {
   bringUpV2RayTunnel,
   getV2RayRemoteHost,
   getWireGuardRemoteHost,
+  getOpenVpnRemoteHost,
   isWireGuardUp,
+  isOpenVpnUp,
   binaryExists,
   isBinaryAvailable,
   protocolRuntimeError,
@@ -91,6 +94,7 @@ let activeV2ray: V2Ray | null = null
 let activeXrayConfig: string | null = null
 let activeHysteria2Config: string | null = null
 let activeAmneziaWgConfig: string | null = null
+let activeOpenVpnConfig: string | null = null
 let activeSessionId: string | null = null
 let activeNodeInfo: { address: string; moniker: string; country: string; type: number; v2raySummary?: string } | null = null
 // True when the user enabled the kill switch but arming it failed — surfaced to
@@ -159,27 +163,37 @@ function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
 // survive a WG interface drop so the liveness monitor below knows to reconnect
 // (finding L8 — the two are not duplication, so they're named apart, not merged).
 // V2Ray has a process exit callback; WireGuard has no process to watch, so we poll.
-let desiredProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | null = null
+let desiredProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn' | null = null
 // Tunnel vs. local-proxy for the current session — a runtime choice, so it is
 // deliberately NOT persisted in SavedSessionConfig (a session-tab reconnect is
 // always full-tunnel). Auto-reconnect replays whatever the user picked.
 let desiredMode: 'tunnel' | 'proxy' = 'tunnel'
 let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
 
-function startWireGuardMonitor(): void {
+/**
+ * Root-tunnel liveness. WireGuard, AmneziaWG and OpenVPN all bring their tunnel up
+ * through the privileged helper, so there is no child process to watch (the
+ * child-proxy protocols use onV2RayUnexpectedExit instead) — poll the interface.
+ * AmneziaWG shares WireGuard's sntl0; OpenVPN has its own sntl-ovpn.
+ */
+function isRootTunnelProtocol(p: typeof desiredProtocol): boolean {
+  return p === 'wireguard' || p === 'amneziawg' || p === 'openvpn'
+}
+
+function startRootTunnelMonitor(): void {
   if (wgMonitorTimer) return
   wgMonitorTimer = setInterval(() => {
-    // AmneziaWG shares the monitor: same sntl0 interface, same no-process-to-watch problem.
-    if ((desiredProtocol !== 'wireguard' && desiredProtocol !== 'amneziawg') || isIntentionalDisconnect || reconnectAttempt > 0) return
+    if (!isRootTunnelProtocol(desiredProtocol) || isIntentionalDisconnect || reconnectAttempt > 0) return
     if (!activeSessionId) return
-    if (!isWireGuardUp()) {
-      console.log('[vpn] WireGuard interface dropped, attempting reconnect...')
+    const up = desiredProtocol === 'openvpn' ? isOpenVpnUp() : isWireGuardUp()
+    if (!up) {
+      console.log(`[vpn] ${desiredProtocol} interface dropped, attempting reconnect...`)
       attemptReconnect()
     }
   }, 5000)
 }
 
-function stopWireGuardMonitor(): void {
+function stopRootTunnelMonitor(): void {
   if (wgMonitorTimer) {
     clearInterval(wgMonitorTimer)
     wgMonitorTimer = null
@@ -237,6 +251,7 @@ function applySession(
   activeXrayConfig = result.protocol === 'xray' ? result.configString : null
   activeHysteria2Config = result.protocol === 'hysteria2' ? result.configString : null
   activeAmneziaWgConfig = result.protocol === 'amneziawg' ? result.configString : null
+  activeOpenVpnConfig = result.protocol === 'openvpn' ? result.configString : null
 }
 
 /**
@@ -260,8 +275,8 @@ function describeHandshakeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-const NODE_TYPE_TO_PROTOCOL: Record<number, 'wireguard' | 'v2ray' | 'xray' | 'amneziawg' | 'hysteria2'> = {
-  1: 'wireguard', 2: 'v2ray', 4: 'xray', 5: 'amneziawg', 6: 'hysteria2',
+const NODE_TYPE_TO_PROTOCOL: Record<number, 'wireguard' | 'v2ray' | 'xray' | 'amneziawg' | 'hysteria2' | 'openvpn'> = {
+  1: 'wireguard', 2: 'v2ray', 3: 'openvpn', 4: 'xray', 5: 'amneziawg', 6: 'hysteria2',
 }
 
 /**
@@ -284,12 +299,13 @@ async function preflightConnect(nodeType: number, apiField: string): Promise<voi
   const runtimeError = protocolRuntimeError(protocol)
   if (runtimeError) throw new Error(`Can't connect — not charged. ${runtimeError}`)
 
-  // WireGuard/AmneziaWG go up as root: without the daemon or the helper the
+  // WireGuard/AmneziaWG/OpenVPN go up as root: without the daemon or the helper the
   // bring-up has no way to escalate and would fail after payment.
-  if (protocol === 'wireguard' || protocol === 'amneziawg') {
+  if (protocol === 'wireguard' || protocol === 'amneziawg' || protocol === 'openvpn') {
     if (!canEscalatePrivileges()) {
+      const label = protocol === 'wireguard' ? 'WireGuard' : protocol === 'amneziawg' ? 'AmneziaWG' : 'OpenVPN'
       throw new Error(
-        `Can't connect — not charged. The privileged helper isn't installed, so ${protocol === 'wireguard' ? 'WireGuard' : 'AmneziaWG'} can't be brought up. Restart the app and accept the helper setup prompt.`
+        `Can't connect — not charged. The privileged helper isn't installed, so ${label} can't be brought up. Restart the app and accept the helper setup prompt.`
       )
     }
   }
@@ -384,7 +400,7 @@ function clearDnsOverridden(): void {
 }
 
 /** Apply DNS and kill switch settings after a successful VPN connection */
-async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'): Promise<void> {
+async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'): Promise<void> {
   // New interface/session — clear the speed baseline (finding M10).
   resetTrafficStats()
   killSwitchFailed = false
@@ -404,7 +420,11 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v
   // xray and hysteria2 use the same tun2socks path as v2ray, so they need the same
   // tunnelled DNS resolver. (hysteria2 gets the dns-set here but NOT the in-config DoH
   // injection — that's v2ray-config-shaped only — so its DNS is plaintext-through-tunnel.)
-  const v2rayDnsIp = (protocol === 'v2ray' || protocol === 'xray' || protocol === 'hysteria2')
+  // - OpenVPN: joins the dns-set group. Applying the server's pushed DNS would need
+  //   an --up script, which is exactly the root-exec vector config-guard rejects, so
+  //   we provision the resolver ourselves. redirect-gateway sends it through the
+  //   tunnel; like WG/hysteria2 it is plaintext-in-tunnel (no DoH — not v2ray-shaped).
+  const v2rayDnsIp = (protocol === 'v2ray' || protocol === 'xray' || protocol === 'hysteria2' || protocol === 'openvpn')
     ? effectiveV2RayResolverIp(settings) : null
 
   // Apply DNS override (routes V2Ray DNS through the tunnel via /etc/resolv.conf)
@@ -426,11 +446,16 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v
       // Endpoint= line in its config, and awg-quick owns resolv.conf like
       // wg-quick does (no dns-set — v2rayDnsIp above is already null for it).
       const isWgLike = protocol === 'wireguard' || protocol === 'amneziawg'
-      const vpnIface = isWgLike ? 'sntl0' : 'sntl-tun'
+      // OpenVPN has its own interface and its own `remote` line; the kill switch
+      // itself is protocol-agnostic (`-d host -j ACCEPT`), so it needs no changes.
+      const isOpenVpn = protocol === 'openvpn'
+      const vpnIface = isWgLike ? 'sntl0' : isOpenVpn ? 'sntl-ovpn' : 'sntl-tun'
       // Whitelist the *real* server endpoint so the tunnel can re-handshake
       // while the kill switch is engaged (was hardcoded to a useless 0.0.0.0
       // for WireGuard — see finding H2).
-      const remoteHost = (isWgLike ? getWireGuardRemoteHost() : getV2RayRemoteHost()) || '0.0.0.0'
+      const remoteHost = (
+        isWgLike ? getWireGuardRemoteHost() : isOpenVpn ? getOpenVpnRemoteHost() : getV2RayRemoteHost()
+      ) || '0.0.0.0'
       const dnsIp = v2rayDnsIp ?? undefined
       await enableKillSwitch(vpnIface, remoteHost, dnsIp)
     } catch (err) {
@@ -524,7 +549,7 @@ export async function performDisconnect(): Promise<void> {
   return withConnectionLock(async () => {
     rememberSessionUsage()
 
-    stopWireGuardMonitor()
+    stopRootTunnelMonitor()
     await revertPostConnectSettings()
     await disconnect()
     activeV2ray = null
@@ -532,6 +557,7 @@ export async function performDisconnect(): Promise<void> {
     activeXrayConfig = null
     activeHysteria2Config = null
     activeAmneziaWgConfig = null
+    activeOpenVpnConfig = null
     desiredProtocol = null
     desiredMode = 'tunnel'
     activeSessionId = null
@@ -552,7 +578,7 @@ async function teardownToIdle(broadcast: boolean): Promise<void> {
   reconnectAttempt = 0
   await revertPostConnectSettings()
   await disconnect()
-  stopWireGuardMonitor()
+  stopRootTunnelMonitor()
   desiredProtocol = null
   if (broadcast) sendStateChange('idle')
 }
@@ -607,6 +633,8 @@ async function attemptReconnect(): Promise<void> {
         // Re-establish the tunnel
         if (saved.protocol === 'wireguard') {
           await connectWireGuardFromConfig(saved.configString)
+        } else if (saved.protocol === 'openvpn') {
+          await connectOpenVpnFromConfig(saved.configString)
         } else if (saved.protocol === 'amneziawg') {
           await connectAmneziaWgFromConfig(saved.configString)
         } else {
@@ -643,11 +671,11 @@ async function attemptReconnect(): Promise<void> {
         // Apply post-connect settings (proxy mode touches no system state — see
         // the CONNECTION_CONNECT branches)
         if (desiredMode !== 'proxy') {
-          await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2')
+          await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn')
         }
 
-        desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
-        if (desiredProtocol === 'wireguard' || desiredProtocol === 'amneziawg') startWireGuardMonitor()
+        desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
+        if (isRootTunnelProtocol(desiredProtocol)) startRootTunnelMonitor()
 
         console.log('[reconnect] Success')
         reconnectAttempt = 0
@@ -1007,7 +1035,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4 && params.nodeType !== 5 && params.nodeType !== 6) throw new Error('Unsupported nodeType: only WireGuard (1), V2Ray (2), XRAY (4), AmneziaWG (5) and Hysteria2 (6) are connectable')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 3 && params.nodeType !== 4 && params.nodeType !== 5 && params.nodeType !== 6) throw new Error('Unsupported nodeType: only WireGuard (1), V2Ray (2), OpenVPN (3), XRAY (4), AmneziaWG (5) and Hysteria2 (6) are connectable')
     assertString(params.apiField, 'apiField')
     if (params.type !== 'gigabytes' && params.type !== 'hours') throw new Error('Invalid type')
     assertNumber(params.amount, 'amount', 1, 1000)
@@ -1103,7 +1131,7 @@ export function registerIpcHandlers(): void {
       address: saved.nodeAddress,
       moniker: saved.nodeMoniker || nodeMeta.moniker || '',
       country: saved.nodeCountry || nodeMeta.country || '',
-      type: saved.protocol === 'wireguard' ? 1 : saved.protocol === 'xray' ? 4 : saved.protocol === 'hysteria2' ? 6 : saved.protocol === 'amneziawg' ? 5 : 2,
+      type: saved.protocol === 'wireguard' ? 1 : saved.protocol === 'openvpn' ? 3 : saved.protocol === 'xray' ? 4 : saved.protocol === 'hysteria2' ? 6 : saved.protocol === 'amneziawg' ? 5 : 2,
     }
 
     return {
@@ -1122,7 +1150,7 @@ export function registerIpcHandlers(): void {
 
   // Connection: Connect (establish tunnel — from SDK instance or raw config)
   handle(IPC.CONNECTION_CONNECT, async (_event, params: {
-    protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+    protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
     configString?: string
     dnsFallback?: boolean
     mode?: 'tunnel' | 'proxy'
@@ -1131,14 +1159,14 @@ export function registerIpcHandlers(): void {
       throw new Error('Invalid mode: must be tunnel or proxy')
     }
     // Local-proxy mode = the child core's SOCKS5 listener only: no TUN, no root,
-    // no routing change. WireGuard/AmneziaWG have no such listener — they ARE the
-    // routing change — so the mode is meaningless (and unimplementable) for them.
+    // no routing change. WireGuard/AmneziaWG/OpenVPN have no such listener — they ARE
+    // the routing change — so the mode is meaningless (and unimplementable) for them.
     const proxyOnly = params.mode === 'proxy'
-    if (proxyOnly && (params.protocol === 'wireguard' || params.protocol === 'amneziawg')) {
-      throw new Error('Local-proxy mode is not available for WireGuard or AmneziaWG — they route the whole device.')
+    if (proxyOnly && (params.protocol === 'wireguard' || params.protocol === 'amneziawg' || params.protocol === 'openvpn')) {
+      throw new Error('Local-proxy mode is not available for WireGuard, AmneziaWG or OpenVPN — they route the whole device.')
     }
-    if (params.protocol !== 'wireguard' && params.protocol !== 'amneziawg' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2') {
-      throw new Error('Invalid protocol: must be wireguard, amneziawg, v2ray, xray or hysteria2')
+    if (params.protocol !== 'wireguard' && params.protocol !== 'amneziawg' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2' && params.protocol !== 'openvpn') {
+      throw new Error('Invalid protocol: must be wireguard, amneziawg, openvpn, v2ray, xray or hysteria2')
     }
     if (params.configString !== undefined && typeof params.configString !== 'string') {
       throw new Error('Invalid configString')
@@ -1172,7 +1200,7 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'wireguard'
         desiredMode = 'tunnel'
-        startWireGuardMonitor()
+        startRootTunnelMonitor()
         sendStateChange('connected')
         return { protocol: 'wireguard' }
       }
@@ -1190,9 +1218,29 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'amneziawg'
         desiredMode = 'tunnel'
-        startWireGuardMonitor()
+        startRootTunnelMonitor()
         sendStateChange('connected')
         return { protocol: 'amneziawg' }
+      }
+
+      if (params.protocol === 'openvpn') {
+        // The config is the one built during the handshake (activeOpenVpnConfig) or
+        // a saved config replayed by a manual reconnect. No dnsFallback branch:
+        // OpenVPN never touches resolvconf (that would need an --up script), so the
+        // resolvconf-missing failure mode doesn't exist for it.
+        const ovpnConfig = params.configString ?? activeOpenVpnConfig
+        if (!ovpnConfig) {
+          throw new Error('No OpenVPN config available')
+        }
+        await connectOpenVpnFromConfig(ovpnConfig)
+
+        await applyPostConnectSettings('openvpn')
+
+        desiredProtocol = 'openvpn'
+        desiredMode = 'tunnel'
+        startRootTunnelMonitor()
+        sendStateChange('connected')
+        return { protocol: 'openvpn' }
       }
 
       if (params.protocol === 'v2ray') {
@@ -1529,7 +1577,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4 && params.nodeType !== 5 && params.nodeType !== 6) throw new Error('Unsupported nodeType')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 3 && params.nodeType !== 4 && params.nodeType !== 5 && params.nodeType !== 6) throw new Error('Unsupported nodeType')
     assertString(params.apiField, 'apiField')
 
     const wallet = getWallet()
@@ -1584,7 +1632,7 @@ export function registerIpcHandlers(): void {
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
-    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 4 && params.nodeType !== 5 && params.nodeType !== 6) throw new Error('Unsupported nodeType')
+    if (params.nodeType !== 1 && params.nodeType !== 2 && params.nodeType !== 3 && params.nodeType !== 4 && params.nodeType !== 5 && params.nodeType !== 6) throw new Error('Unsupported nodeType')
     assertString(params.apiField, 'apiField')
 
     const wallet = getWallet()
@@ -1708,7 +1756,7 @@ export async function cleanupOnQuit(): Promise<void> {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
-  stopWireGuardMonitor()
+  stopRootTunnelMonitor()
   await revertPostConnectSettings()
   await disconnect()
 }

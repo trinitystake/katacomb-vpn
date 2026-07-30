@@ -66,10 +66,11 @@ export function getTrafficStats(): TrafficStats {
   const now = Date.now()
 
   // Read the active interface's byte counters from /proc/net/dev: sntl0 for
-  // WireGuard, sntl-tun for V2Ray. (`wg show transfer` would need root, since the
-  // wg device is owned by the root-created interface, so /proc/net/dev — which is
-  // world-readable — is the right source for both protocols.)
-  const stats = readProcNetDev('sntl0') || readProcNetDev('sntl-tun')
+  // WireGuard/AmneziaWG, sntl-tun for the tun2socks protocols, sntl-ovpn for
+  // OpenVPN. (`wg show transfer` would need root, since the wg device is owned by
+  // the root-created interface, so /proc/net/dev — which is world-readable — is the
+  // right source for every protocol.)
+  const stats = readProcNetDev('sntl0') || readProcNetDev('sntl-tun') || readProcNetDev('sntl-ovpn')
 
   if (!stats) {
     return { rxBytes: 0, txBytes: 0, rxSpeed: 0, txSpeed: 0 }

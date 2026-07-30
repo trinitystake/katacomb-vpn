@@ -15,6 +15,7 @@ import { join } from 'path'
 import {
   assertSafeWireguardConfig,
   assertSafeAmneziaWgConfig,
+  assertSafeOpenVpnConfig,
   isAllowedBypassCidr,
   isAllowedDnsResolver,
   isIPv4,
@@ -32,6 +33,7 @@ import {
 
 const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
 const WG_CONFIG_PATH = join(DAEMON_DIR, 'sntl0.conf')
+const OVPN_CONFIG_PATH = join(DAEMON_DIR, 'openvpn.conf')
 const MAX_MESSAGE_BYTES = 256 * 1024
 // Only members of this group may drive the privileged daemon socket (finding C1).
 // The .deb postinstall creates it and adds the installing user.
@@ -80,12 +82,16 @@ export interface DaemonDeps {
   runHelper: (args: string[]) => string
   /** Write the (already-validated) WireGuard config to a root-owned 0600 file; return its path. */
   writeWgConfig: (content: string) => string
+  /** Write the (already-validated) OpenVPN config to a root-owned 0600 file; return its path. */
+  writeOpenVpnConfig: (content: string) => string
   /** Resolve + SHA-pin the bundled tun2socks; throws on tamper/missing. */
   resolveTun2Socks: () => string
   /** Resolve + SHA-pin the bundled AmneziaWG trio's dir; throws on tamper/missing. */
   resolveAmneziaWgBinDir: () => string
+  /** Resolve the system openvpn from an absolute allow-list; throws when absent. */
+  resolveOpenVpnBinary: () => string
   /** Read kernel interface state (world-readable). */
-  checkStatus: () => { wgUp: boolean; tunUp: boolean }
+  checkStatus: () => { wgUp: boolean; tunUp: boolean; ovpnUp: boolean }
 }
 
 function ifaceUp(name: string): boolean {
@@ -125,7 +131,24 @@ export const defaultDeps: DaemonDeps = {
     }
     return dir
   },
-  checkStatus: () => ({ wgUp: ifaceUp('sntl0'), tunUp: ifaceUp('sntl-tun') }),
+  resolveOpenVpnBinary: () => {
+    // openvpn is a distro package (its OpenSSL gets security updates), so unlike the
+    // AmneziaWG trio it isn't bundled. Absolute paths only — never $PATH under root.
+    for (const candidate of ['/usr/sbin/openvpn', '/sbin/openvpn', '/usr/bin/openvpn']) {
+      if (existsSync(candidate)) return candidate
+    }
+    throw new Error('openvpn not installed')
+  },
+  checkStatus: () => ({
+    wgUp: ifaceUp('sntl0'),
+    tunUp: ifaceUp('sntl-tun'),
+    ovpnUp: ifaceUp('sntl-ovpn'),
+  }),
+  writeOpenVpnConfig: (content) => {
+    if (!existsSync(DAEMON_DIR)) mkdirSync(DAEMON_DIR, { recursive: true, mode: 0o755 })
+    writeFileSync(OVPN_CONFIG_PATH, content, { mode: 0o600 })
+    return OVPN_CONFIG_PATH
+  },
 }
 
 /**
@@ -176,6 +199,27 @@ export function handleRequest(req: DaemonRequest, deps: DaemonDeps): DaemonRespo
         deps.runHelper(['awg-down'])
         // Same private-key hygiene as wireguard_down.
         try { if (existsSync(WG_CONFIG_PATH)) unlinkSync(WG_CONFIG_PATH) } catch { /* best-effort */ }
+        return reply()
+
+      case 'openvpn_up': {
+        const configString = (args as Record<string, unknown>).configString
+        if (typeof configString !== 'string') return fail('openvpn_up: configString required')
+        // Throws on up/down/plugin/script-security and any directive outside the
+        // allow-list — openvpn would execute those as root.
+        assertSafeOpenVpnConfig(configString)
+        // Fail closed with a clear reason before touching any state. The helper
+        // resolves openvpn from its own allow-list too — root never trusts a path
+        // passed in, so the binary is deliberately not forwarded.
+        deps.resolveOpenVpnBinary()
+        const path = deps.writeOpenVpnConfig(configString) // root-owned, 0600
+        deps.runHelper(['ovpn-up', path])
+        return reply()
+      }
+
+      case 'openvpn_down':
+        deps.runHelper(['ovpn-down'])
+        // The config embeds the client private key — same hygiene as wireguard_down.
+        try { if (existsSync(OVPN_CONFIG_PATH)) unlinkSync(OVPN_CONFIG_PATH) } catch { /* best-effort */ }
         return reply()
 
       case 'tun_up': {

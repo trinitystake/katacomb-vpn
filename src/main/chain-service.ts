@@ -25,6 +25,7 @@ import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiU
 import { buildXRayConfig } from './xray-config'
 import { buildHysteria2Config } from './hysteria-config'
 import { buildAmneziaWgConfig } from './amneziawg-config'
+import { buildOpenVpnConfig } from './openvpn-config'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -46,8 +47,8 @@ const SESSION_TX_TIMEOUT_MESSAGE =
 
 interface SavedSessionConfig {
   sessionId: string
-  protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
-  configString: string // WG/AWG INI config, or V2Ray/Xray/Hysteria2 JSON config
+  protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
+  configString: string // WG/AWG INI, V2Ray/Xray/Hysteria2 JSON, or OpenVPN .ovpn
   nodeAddress: string
   nodeMoniker?: string
   nodeCountry?: string
@@ -455,6 +456,35 @@ export async function performHandshake(params: {
     })
 
     return { protocol: 'amneziawg', configString, wgInstance: null, v2rayInstance: null }
+  } else if (nodeType === 3) {
+    // OpenVPN. The bundled JS SDK has no OpenVPN class, so openvpn-config.ts builds
+    // the client .ovpn from the handshake response.
+    //
+    // The peer field is v2fly `uuid.UUID` ([16]byte) — go-sdk openvpn/requests.go —
+    // so this is the BYTE-ARRAY form, the opposite of hysteria2's string field
+    // above. Unlike every other protocol the peer material is not what authenticates
+    // us: the node's PKI issues a client certificate + key in the response, and the
+    // uuid is only the peer's identifier.
+    const uuid = randomUUID()
+    const result = await withTimeout(
+      sdkHandshake(sid, { uuid: Array.from(Buffer.from(uuid.replace(/-/g, ''), 'hex')) }, privKey, remoteUrl),
+      HANDSHAKE_TIMEOUT_MS,
+      'node handshake',
+    )
+
+    const handshakeData = parseHandshakeData(result)
+    const configString = buildOpenVpnConfig(handshakeData, result.addrs)
+
+    saveSessionConfig({
+      sessionId,
+      protocol: 'openvpn',
+      configString,
+      nodeAddress,
+      nodeMoniker,
+      nodeCountry,
+    })
+
+    return { protocol: 'openvpn', configString, wgInstance: null, v2rayInstance: null }
   } else {
     // V2Ray
     const v2ray = new V2Ray()

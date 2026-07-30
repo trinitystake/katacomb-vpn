@@ -458,6 +458,155 @@ export function assertSafeAmneziaWgConfig(config: string): void {
   }
 }
 
+// --- OpenVPN config guard ---
+
+// OpenVPN's grammar is space-separated directives plus inline <tag>…</tag> PKI
+// blocks, so the WireGuard INI scanner does not transfer. The LPE surface is
+// larger than wg-quick's: `up`/`down`/`route-up`/`ipchange`/`client-connect`/
+// `tls-verify`/`auth-user-pass-verify`/`learn-address`/`plugin` all execute code
+// as root, and `script-security` would re-enable them. Every one of those is
+// rejected by omission from this allow-list — the same discipline as WG's
+// PostUp. Operational directives the app itself needs (--daemon, --writepid,
+// --log, --script-security 0) are deliberately NOT allowed here: the privileged
+// helper passes them on the command line after --config, so they can only ever
+// come from us, never from a node.
+const OVPN_IFACE_NAME = 'sntl-ovpn'
+
+// directive -> validator for its argument ('' when the directive takes none).
+// A Map (not an object) so a directive named `constructor` can't hit the prototype.
+const OVPN_DIRECTIVES = new Map<string, RegExp>([
+  ['client', /^$/],
+  ['dev', new RegExp(`^${OVPN_IFACE_NAME}$`)],
+  ['dev-type', /^tun$/],
+  ['proto', /^(tcp|udp)$/],
+  ['remote', /^\[?[A-Za-z0-9.:_-]+\]?[ \t]+\d{1,5}$/],
+  ['nobind', /^$/],
+  ['auth-nocache', /^$/],
+  ['auth', /^[A-Za-z0-9-]{1,32}$/],
+  ['data-ciphers', /^[A-Za-z0-9:-]{1,128}$/],
+  ['data-ciphers-fallback', /^[A-Za-z0-9-]{1,64}$/],
+  ['tls-cipher', /^[A-Za-z0-9:-]{1,128}$/],
+  ['tls-client', /^$/],
+  ['tls-version-min', /^1\.[23]$/],
+  ['remote-cert-tls', /^server$/],
+  ['redirect-gateway', /^[A-Za-z0-9 \t-]{0,64}$/], // def1 ipv6 bypass-dhcp
+  ['topology', /^subnet$/],
+  ['explicit-exit-notify', /^[1-3]$/],
+  ['persist-key', /^$/],
+  ['persist-tun', /^$/],
+])
+
+const OVPN_INLINE_TAGS = new Set(['ca', 'cert', 'key', 'tls-crypt'])
+// PEM armor or its base64/hex body. The builder decodes and re-armors every node
+// blob, so nothing else can legitimately appear inside a block.
+const OVPN_PEM_LINE = /^(-----(BEGIN|END) [A-Za-z0-9 ]{1,48}-----|[A-Za-z0-9+/]+={0,2})$/
+// Without these the tunnel would either not be a client tunnel or would drop the
+// tls-crypt channel wrapper — a downgrade a socket client must not be able to ask
+// root to run.
+const OVPN_REQUIRED = ['client', 'dev', 'proto', 'remote']
+
+/**
+ * Throw if an OpenVPN config string contains any directive outside the allow-list,
+ * an allow-listed directive with a malformed value, an unknown inline block, a
+ * repeated directive, or a missing essential. Mirrored in bash by
+ * validate_openvpn_config in the polkit helper (last line of defense if the
+ * daemon is bypassed or the helper is invoked directly).
+ */
+export function assertSafeOpenVpnConfig(config: string): void {
+  let openBlock: string | null = null
+  const seenBlocks = new Set<string>()
+  const seenDirectives = new Set<string>()
+
+  for (const raw of config.split('\n')) {
+    const line = raw.trim()
+
+    if (openBlock) {
+      if (line === `</${openBlock}>`) {
+        openBlock = null
+        continue
+      }
+      if (line === '') continue
+      if (!OVPN_PEM_LINE.test(line)) {
+        throw new Error('OpenVPN config: inline block contains a non-PEM line')
+      }
+      continue
+    }
+
+    if (line === '' || line.startsWith('#') || line.startsWith(';')) continue
+
+    const opening = line.match(/^<([A-Za-z0-9-]+)>$/)
+    if (opening) {
+      const tag = opening[1].toLowerCase()
+      if (!OVPN_INLINE_TAGS.has(tag)) {
+        throw new Error(`OpenVPN config: inline block <${tag}> is not allowed`)
+      }
+      if (seenBlocks.has(tag)) {
+        throw new Error(`OpenVPN config: inline block <${tag}> is repeated`)
+      }
+      seenBlocks.add(tag)
+      openBlock = tag
+      continue
+    }
+    if (line.startsWith('<')) {
+      throw new Error(`OpenVPN config: stray tag is not allowed: ${line}`)
+    }
+
+    const split = line.search(/[ \t]/)
+    const directive = (split === -1 ? line : line.slice(0, split)).toLowerCase()
+    const value = split === -1 ? '' : line.slice(split + 1).trim()
+
+    const validator = OVPN_DIRECTIVES.get(directive)
+    if (!validator) {
+      throw new Error(`OpenVPN config: directive "${directive}" is not allowed`)
+    }
+    if (seenDirectives.has(directive)) {
+      // e.g. a second `remote` (failover) that the kill switch wouldn't whitelist.
+      throw new Error(`OpenVPN config: directive "${directive}" is repeated`)
+    }
+    seenDirectives.add(directive)
+    if (!validator.test(value)) {
+      throw new Error(`OpenVPN config: directive "${directive}" has a malformed value`)
+    }
+  }
+
+  if (openBlock) {
+    throw new Error(`OpenVPN config: inline block <${openBlock}> is unterminated`)
+  }
+  for (const tag of OVPN_INLINE_TAGS) {
+    if (!seenBlocks.has(tag)) {
+      throw new Error(`OpenVPN config: inline block <${tag}> is missing`)
+    }
+  }
+  for (const directive of OVPN_REQUIRED) {
+    if (!seenDirectives.has(directive)) {
+      throw new Error(`OpenVPN config: directive "${directive}" is missing`)
+    }
+  }
+}
+
+/**
+ * Extract the host from the OpenVPN `remote <host> <port>` line, or null if
+ * absent. Used to whitelist the real server in the kill switch (analogue of
+ * extractWireguardEndpointHost).
+ */
+export function extractOpenVpnRemoteHost(config: string): string | null {
+  for (const raw of config.split('\n')) {
+    const line = raw.trim()
+    const split = line.search(/[ \t]/)
+    if (split === -1) continue
+    if (line.slice(0, split).toLowerCase() !== 'remote') continue
+
+    const host = line.slice(split + 1).trim().split(/[ \t]+/)[0]
+    if (!host) return null
+    if (host.startsWith('[')) {
+      const close = host.indexOf(']')
+      return close > 0 ? host.slice(1, close) : null
+    }
+    return host
+  }
+  return null
+}
+
 /**
  * DoH endpoints for each resolver the app allows, keyed by the plaintext resolver
  * IP the user picks (a subset of ALLOWED_DNS_RESOLVERS). Each entry pairs a

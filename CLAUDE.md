@@ -77,8 +77,8 @@ VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a po
 - `resources/linux/katacomb-vpn-helper.sh` — installed to `/usr/local/bin/katacomb-vpn-helper`
 - `resources/linux/com.katacomb.vpn.policy` — polkit policy for cached auth
 - `resources/linux/postinstall.sh` — deb postinstall that deploys the helper + policy
-- Helper commands: `up <config>`, `down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
-- WireGuard interface name: `sntl0`. TUN interface: `sntl-tun`.
+- Helper commands: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
+- WireGuard/AmneziaWG interface: `sntl0`. tun2socks: `sntl-tun`. OpenVPN: `sntl-ovpn`.
 
 ### Privileged daemon (deb) vs. pkexec fallback (AppImage/dev)
 
@@ -184,13 +184,11 @@ assume a two-protocol world). The Nodes-tab protocol filter is a single-select
 `<select>` in `NodeFilters.tsx` driven by `PROTOCOL_FILTER_OPTIONS`; `NodeFilter.type`
 is `'all' | ProtocolType`.
 
-**Connectable: WireGuard (1), V2Ray (2), XRAY (4), AmneziaWG (5), Hysteria2 (6).**
-OpenVPN (3) is identify-and-filter only — the connect UI disables it
-(`isProtocolSupported`) and the main-process IPC guards (`nodeType` not in `{1,2,4,5,6}`
-→ throw) are the enforcement. Each additional protocol needs its own pinned binary,
-config generation/validation, and (for root-run ones) a privileged daemon op. OpenVPN
-is a root protocol, so it DOES need the privileged-daemon path (like AmneziaWG, unlike
-the unprivileged xray/hysteria2 pilots).
+**All six protocols are connectable: WireGuard (1), V2Ray (2), OpenVPN (3), XRAY (4),
+AmneziaWG (5), Hysteria2 (6).** Only type 0 (unknown) is not. The main-process IPC
+guards (`nodeType` not in `{1,2,3,4,5,6}` → throw) plus `isProtocolSupported` in the
+connect UI are the enforcement. Any *future* protocol needs its own binary, config
+generation/validation, and (for root-run ones) a privileged daemon op.
 
 **XRAY** is the VLESS+Reality protocol and reuses almost the entire V2Ray path: it's
 a v2ray-core fork that reads the **same JSON config**, so it runs through the same
@@ -269,6 +267,57 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   `detectOtherVpn` exclusion). DNS is owned by awg-quick (resolvconf) like wg-quick
   — no `dns-set`, no DoH.
 
+**OpenVPN** (type 3) also rides the **root/privileged path** (`isChildProxy` must never
+include it). The wire shape is identical at go-sdk master and the commit node v8.3.1
+pins, so one implementation covers the whole network:
+- Handshake request is `{uuid}` as a **16-BYTE ARRAY** (node field is v2fly
+  `uuid.UUID` = `[16]byte`) — the opposite of hysteria2's string field. The uuid is
+  only the peer id: the node's PKI *issues the client certificate*, so the response is
+  `{metadata:[{port, protocol:"tcp"|"udp", ca:b64(DER), tls:b64(256-byte tls-crypt)}],
+  cert:b64(DER), key:b64(DER PKCS#8)}`. There is **no `addrs`** in the body (the
+  OpenVPN server pushes the tunnel IP) — the endpoint comes from `result.addrs`.
+- `src/main/openvpn-config.ts` (`buildOpenVpnConfig`, pure + unit-tested) emits ONE
+  self-contained `.ovpn` with **inline `<ca>/<cert>/<key>/<tls-crypt>` blocks** — not
+  the go-sdk's config-plus-four-PKI-files layout. That is what lets it live in
+  `SavedSessionConfig.configString` (reconnect works) and be shipped to the daemon as
+  content. Every blob is base64-**decoded and re-armored by us**, so no node byte can
+  become a directive; `ca`/`cert` must parse as X.509 and `key` as a private key
+  (node:crypto), and the tls-crypt key must be exactly 256 bytes — all throw → refund.
+  The endpoint is IPv4-pinned (a hostname `remote` would deadlock on reconnect with the
+  kill switch armed). `management 127.0.0.1 2323` from the upstream template is dropped.
+- **The security boundary is the directive allow-list**, not a blocklist:
+  `up`/`down`/`route-up`/`ipchange`/`client-connect`/`tls-verify`/
+  `auth-user-pass-verify`/`learn-address`/`plugin`/`script-security` all run code as
+  root and are rejected by omission (`assertSafeOpenVpnConfig`, mirrored in bash by
+  `validate_openvpn_config`). It also **requires** `client` + all four PKI blocks and
+  rejects a repeated `remote` (the kill switch only whitelists the first).
+  Operational flags are deliberately NOT allowed in the file — the helper passes
+  `--script-security 0 --dev sntl-ovpn --daemon --writepid --log --connect-*` on the
+  command line *after* `--config` (openvpn is last-one-wins), so they can only come
+  from us. **Invariant: anything the guard rejects is supplied by the helper.**
+- **Distro binary, not bundled**: `deb.depends` gains `openvpn`, resolved from an
+  absolute allow-list (`/usr/sbin/openvpn`, …) — never `$PATH` under root. This is the
+  plain-WireGuard model (system `wg-quick`), chosen over vendoring because openvpn is a
+  TLS client and distro packaging ships the OpenSSL CVE fixes.
+- **Own interface `sntl-ovpn`** (not sntl0): a userspace AWG sntl0 is already
+  `type tun`, so a third tun there would make adoption/teardown ambiguous
+  (`awg-down` ≠ `ovpn-down`). Costs only `traffic-stats`' third fallback,
+  `daemon-core.checkStatus`'s `ovpnUp`, the `detectOtherVpn` exclusion and the
+  `vpnIface` ternary — all two-way, no new discriminator.
+- **openvpn stays resident** (wg-quick/awg-quick exit), so `ovpn-up` daemonizes it and
+  then **waits for proof**: `sntl-ovpn` present AND "Initialization Sequence Completed"
+  in the log, else it kills the pid and returns the log tail (that text reaches the
+  connect modal). `ovpn-down` kills the pid, waits, then deletes the link. Liveness is
+  interface polling (`startRootTunnelMonitor`, shared with WG/AWG) — there is no child
+  process to watch, since root owns it.
+- Helper verbs `ovpn-up <config>` / `ovpn-down`; daemon ops `openvpn_up` /
+  `openvpn_down` (additive — no protocol-version bump).
+- **DNS is ours, not the tunnel's.** Applying the server's pushed DNS would need an
+  `--up` script (the LPE vector), so OpenVPN joins the `dns-set` group with
+  v2ray/xray/hysteria2 — plaintext-through-tunnel, and NOT the DoH group (that
+  transform is v2ray-JSON-shaped). Consequently there is **no `DNS_PROVISION_FAILED`
+  path**: `dnsFallback`/`stripDnsLines` stay WG/AWG-only.
+
 **Connection modes.** `ConnectParams.mode` is `'tunnel'` (default, routes the whole
 device) or `'proxy'`. Local-proxy mode applies ONLY to the child-proxy protocols
 (v2ray/xray/hysteria2 — the ones with a local SOCKS5 listener at `127.0.0.1:1080`):
@@ -297,7 +346,9 @@ it is NOT an instant refund, so don't word it as one.
 v9.0.0 nodes expose a `service_metadata` array on `/info` (Xray Reality keys,
 Hysteria2 obfs, transport variants) that the SDK's `NodeInfo` type lacks — the xray
 and hysteria2 paths read the equivalent from the handshake response, not `/info`.
-The amneziawg path likewise reads everything from the handshake response.
+The amneziawg and openvpn paths likewise read everything from the handshake response.
+(The only two OpenVPN nodes on the network are v8.3.1 and don't expose it at all; one
+reports `service_type: "openvpn"` at its ROOT path, which is what the preflight needs.)
 
 ## Working Principles (for LLM contributors)
 

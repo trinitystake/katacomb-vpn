@@ -7,7 +7,7 @@ export interface SentNode {
   version: string
   // Numeric protocol tag from the node-list API. 0=unknown, 1=WireGuard,
   // 2=V2Ray, 3=OpenVPN, 4=XRAY, 5=AmneziaWG, 6=Hysteria2 (see utils/protocols.ts).
-  // 1/2/4/5/6 are connectable; OpenVPN (3) is identify/filter-only for now.
+  // All of 1-6 are connectable (0=unknown is not).
   type: number
   // V2Ray proxy/transport/security advertised by the node list API. null for
   // WireGuard and for V2Ray nodes that don't advertise it. Operator-supplied —
@@ -67,7 +67,7 @@ export interface ReconnectParams {
   sessionId: string
 }
 
-export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
 
 /** A subscription as listed by the Subscriptions manager. */
 export interface SubscriptionSummary {

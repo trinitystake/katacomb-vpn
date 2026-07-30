@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePlans } from '../hooks/usePlans'
 import { useConnection } from '../hooks/useConnection'
 import { useNavigation } from '../contexts/NavigationContext'
-import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode } from '../types'
+import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode, TunnelProtocol } from '../types'
+import ConnectErrorActions from './ConnectErrorActions'
 import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
@@ -1460,6 +1461,9 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
   const [error, setError] = useState<string | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // Protocol of the session we already paid for — lets a failed bring-up be
+  // retried against it instead of starting a second session.
+  const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
 
   useEffect(() => {
@@ -1516,9 +1520,29 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
         apiField: selected.node.api,
       })
       setSessionId(res.sessionId)
-      setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' })
-      setTunnelConnected(true)
+      const tunnelProtocol = res.protocol as TunnelProtocol
+      setPaidProtocol(tunnelProtocol)
+      await connectTunnelOnly(tunnelProtocol)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  /** Tunnel bring-up alone — main reuses the paid session's stashed config. */
+  async function connectTunnelOnly(protocol: TunnelProtocol) {
+    setCurrentStep('5/5')
+    await window.api.connectionConnect({ protocol })
+    setTunnelConnected(true)
+  }
+
+  async function handleRetryTunnel() {
+    if (!paidProtocol) return
+    setConnecting(true)
+    setError(null)
+    try {
+      await connectTunnelOnly(paidProtocol)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -1532,6 +1556,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
       await window.api.connectionDisconnect()
       setTunnelConnected(false)
       setSessionId(null)
+      setPaidProtocol(null)
       setCurrentStep(null)
       onClose()
     } finally {
@@ -1660,21 +1685,17 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
         {connecting && <ProgressSteps currentStep={currentStep} error={error} />}
 
         {error && !connecting && (
-          <div className="space-y-3">
-            <div className="bg-danger-subtle border border-danger p-3 rounded-md">
-              <p className="text-danger text-sm">{error}</p>
-            </div>
-            <button
-              onClick={() => {
-                setError(null)
-                setCurrentStep(null)
-                setSessionId(null)
-              }}
-              className="btn btn-primary w-full"
-            >
-              Try Again
-            </button>
-          </div>
+          <ConnectErrorActions
+            error={error}
+            paidSessionId={paidProtocol ? sessionId : null}
+            onRetryTunnel={handleRetryTunnel}
+            onStartOver={() => {
+              setError(null)
+              setCurrentStep(null)
+              setSessionId(null)
+              setPaidProtocol(null)
+            }}
+          />
         )}
 
         {tunnelConnected && sessionId && selected?.node && (
@@ -1730,6 +1751,9 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
   const [error, setError] = useState<string | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // Protocol of the session we already paid for — lets a failed bring-up be
+  // retried against it instead of subscribing (and paying) a second time.
+  const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
 
   useEffect(() => {
@@ -1796,9 +1820,29 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
         apiField: selected.node.api,
       })
       setSessionId(res.sessionId)
-      setCurrentStep('5/5')
-      await window.api.connectionConnect({ protocol: res.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' })
-      setTunnelConnected(true)
+      const tunnelProtocol = res.protocol as TunnelProtocol
+      setPaidProtocol(tunnelProtocol)
+      await connectTunnelOnly(tunnelProtocol)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  /** Tunnel bring-up alone — main reuses the paid session's stashed config. */
+  async function connectTunnelOnly(protocol: TunnelProtocol) {
+    setCurrentStep('5/5')
+    await window.api.connectionConnect({ protocol })
+    setTunnelConnected(true)
+  }
+
+  async function handleRetryTunnel() {
+    if (!paidProtocol) return
+    setConnecting(true)
+    setError(null)
+    try {
+      await connectTunnelOnly(paidProtocol)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -1812,6 +1856,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
       await window.api.connectionDisconnect()
       setTunnelConnected(false)
       setSessionId(null)
+      setPaidProtocol(null)
       setCurrentStep(null)
       onClose()
     } finally {
@@ -1953,21 +1998,17 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
         {connecting && <ProgressSteps currentStep={currentStep} error={error} />}
 
         {error && !connecting && (
-          <div className="space-y-3">
-            <div className="bg-danger-subtle border border-danger p-3 rounded-md">
-              <p className="text-danger text-sm">{error}</p>
-            </div>
-            <button
-              onClick={() => {
-                setError(null)
-                setCurrentStep(null)
-                setSessionId(null)
-              }}
-              className="btn btn-primary w-full"
-            >
-              Try Again
-            </button>
-          </div>
+          <ConnectErrorActions
+            error={error}
+            paidSessionId={paidProtocol ? sessionId : null}
+            onRetryTunnel={handleRetryTunnel}
+            onStartOver={() => {
+              setError(null)
+              setCurrentStep(null)
+              setSessionId(null)
+              setPaidProtocol(null)
+            }}
+          />
         )}
 
         {tunnelConnected && sessionId && selected?.node && (

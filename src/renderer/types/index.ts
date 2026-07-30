@@ -67,8 +67,10 @@ export interface ReconnectParams {
   sessionId: string
 }
 
+export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+
 export interface ConnectParams {
-  protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+  protocol: TunnelProtocol
   configString?: string
 }
 

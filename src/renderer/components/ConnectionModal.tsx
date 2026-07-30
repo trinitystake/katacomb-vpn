@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../types'
+import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation, TunnelProtocol } from '../types'
+import ConnectErrorActions from './ConnectErrorActions'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useNavigation } from '../contexts/NavigationContext'
@@ -42,6 +43,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // Protocol of the session we already paid for. Kept so a failed bring-up can be
+  // retried against that session instead of buying a second one.
+  const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
@@ -134,6 +138,39 @@ export default function ConnectionModal({ node, onClose }: Props) {
     }
   }, [node.address, node.api])
 
+  /**
+   * The tunnel bring-up step on its own. Main keeps the paid session's config
+   * (activeWg/activeV2ray/…) until disconnect, so calling this after a failed
+   * bring-up reuses that session — no second subscribe tx, no second payment.
+   */
+  async function connectTunnelOnly(protocol: TunnelProtocol) {
+    setCurrentStep('5/5')
+    await window.api.connectionConnect({ protocol })
+    setTunnelConnected(true)
+  }
+
+  /** Error-state retry when the payment succeeded but the tunnel didn't come up. */
+  async function handleRetryTunnel() {
+    if (!paidProtocol) return
+    setConnecting(true)
+    setError(null)
+    try {
+      await connectTunnelOnly(paidProtocol)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  /** Drop the paid-session context and go back to the subscribe form. */
+  function resetToSubscribe() {
+    setError(null)
+    setCurrentStep(null)
+    setSessionId(null)
+    setPaidProtocol(null)
+  }
+
   async function handleSubscribe() {
     if (!matchingAllocation && !selectedPrice) return
 
@@ -186,12 +223,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
         throw new Error('No valid subscription selected')
       }
 
-      setCurrentStep('5/5')
-      await window.api.connectionConnect({
-        protocol: protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2',
-      })
-
-      setTunnelConnected(true)
+      const tunnelProtocol = protocol as TunnelProtocol
+      setPaidProtocol(tunnelProtocol)
+      await connectTunnelOnly(tunnelProtocol)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -481,17 +515,12 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
         {/* Error with retry */}
         {error && !connecting && (
-          <div className="space-y-3">
-            <div className="bg-danger-subtle border border-danger p-3 rounded-md">
-              <p className="text-danger text-sm">{error}</p>
-            </div>
-            <button
-              onClick={() => { setError(null); setCurrentStep(null); setSessionId(null) }}
-              className="btn btn-primary w-full"
-            >
-              Try Again
-            </button>
-          </div>
+          <ConnectErrorActions
+            error={error}
+            paidSessionId={paidProtocol ? sessionId : null}
+            onRetryTunnel={handleRetryTunnel}
+            onStartOver={resetToSubscribe}
+          />
         )}
 
         {/* Connected state */}

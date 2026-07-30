@@ -83,6 +83,11 @@ export interface SubscriptionSummary {
 
 export interface ConnectParams {
   protocol: TunnelProtocol
+  /**
+   * 'tunnel' (default) routes the whole device. 'proxy' is v2ray/xray/hysteria2
+   * only: just their local SOCKS5 listener, no TUN and no root.
+   */
+  mode?: 'tunnel' | 'proxy'
   configString?: string
   /**
    * WireGuard/AmneziaWG only: bring the tunnel up with its `DNS =` lines
@@ -132,6 +137,10 @@ export interface ConnectionStatus {
   v2raySummary?: string
   killSwitchFailed?: boolean
   killSwitchTeardownFailed?: boolean
+  /** Connected in local-proxy mode: SOCKS5 only, system routing untouched. */
+  proxyMode?: boolean
+  /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */
+  socksAddr?: string
   sessionId?: string
   error?: string
   reconnectAttempt?: number

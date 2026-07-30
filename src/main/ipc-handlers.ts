@@ -160,6 +160,10 @@ function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
 // (finding L8 — the two are not duplication, so they're named apart, not merged).
 // V2Ray has a process exit callback; WireGuard has no process to watch, so we poll.
 let desiredProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | null = null
+// Tunnel vs. local-proxy for the current session — a runtime choice, so it is
+// deliberately NOT persisted in SavedSessionConfig (a session-tab reconnect is
+// always full-tunnel). Auto-reconnect replays whatever the user picked.
+let desiredMode: 'tunnel' | 'proxy' = 'tunnel'
 let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
 
 function startWireGuardMonitor(): void {
@@ -529,6 +533,7 @@ export async function performDisconnect(): Promise<void> {
     activeHysteria2Config = null
     activeAmneziaWgConfig = null
     desiredProtocol = null
+    desiredMode = 'tunnel'
     activeSessionId = null
     activeNodeInfo = null
     isIntentionalDisconnect = false
@@ -606,14 +611,17 @@ async function attemptReconnect(): Promise<void> {
           await connectAmneziaWgFromConfig(saved.configString)
         } else {
           // v2ray, xray and hysteria2 share the child-process + tun2socks bring-up.
+          // Replay the mode the user connected with — a proxy-mode session must
+          // not silently come back as a full tunnel (that would take root).
+          const proxyOnly = desiredMode === 'proxy'
           if (saved.protocol === 'hysteria2') {
-            connectHysteria2FromConfig(saved.configString) // no DoH (see connectHysteria2FromConfig)
+            connectHysteria2FromConfig(saved.configString, { proxyOnly }) // no DoH (see connectHysteria2FromConfig)
           } else {
             const dohIp = effectiveV2RayResolverIp(loadSettings())
             if (saved.protocol === 'xray') {
-              connectXRayFromConfig(saved.configString, dohIp)
+              connectXRayFromConfig(saved.configString, dohIp, { proxyOnly })
             } else {
-              connectV2RayFromConfig(saved.configString, dohIp)
+              connectV2RayFromConfig(saved.configString, dohIp, { proxyOnly })
             }
           }
           await new Promise((r) => setTimeout(r, 1500))
@@ -621,7 +629,7 @@ async function attemptReconnect(): Promise<void> {
           if (!status.connected) {
             throw new Error('Proxy failed to start on reconnect')
           }
-          await bringUpV2RayTunnel()
+          if (!proxyOnly) await bringUpV2RayTunnel()
         }
 
         // The user disconnected while we were bringing the tunnel up — undo it and
@@ -632,8 +640,11 @@ async function attemptReconnect(): Promise<void> {
           return
         }
 
-        // Apply post-connect settings
-        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2')
+        // Apply post-connect settings (proxy mode touches no system state — see
+        // the CONNECTION_CONNECT branches)
+        if (desiredMode !== 'proxy') {
+          await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2')
+        }
 
         desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
         if (desiredProtocol === 'wireguard' || desiredProtocol === 'amneziawg') startWireGuardMonitor()
@@ -1114,7 +1125,18 @@ export function registerIpcHandlers(): void {
     protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
     configString?: string
     dnsFallback?: boolean
+    mode?: 'tunnel' | 'proxy'
   }) => {
+    if (params.mode !== undefined && params.mode !== 'tunnel' && params.mode !== 'proxy') {
+      throw new Error('Invalid mode: must be tunnel or proxy')
+    }
+    // Local-proxy mode = the child core's SOCKS5 listener only: no TUN, no root,
+    // no routing change. WireGuard/AmneziaWG have no such listener — they ARE the
+    // routing change — so the mode is meaningless (and unimplementable) for them.
+    const proxyOnly = params.mode === 'proxy'
+    if (proxyOnly && (params.protocol === 'wireguard' || params.protocol === 'amneziawg')) {
+      throw new Error('Local-proxy mode is not available for WireGuard or AmneziaWG — they route the whole device.')
+    }
     if (params.protocol !== 'wireguard' && params.protocol !== 'amneziawg' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2') {
       throw new Error('Invalid protocol: must be wireguard, amneziawg, v2ray, xray or hysteria2')
     }
@@ -1149,6 +1171,7 @@ export function registerIpcHandlers(): void {
         await applyPostConnectSettings('wireguard')
 
         desiredProtocol = 'wireguard'
+        desiredMode = 'tunnel'
         startWireGuardMonitor()
         sendStateChange('connected')
         return { protocol: 'wireguard' }
@@ -1166,6 +1189,7 @@ export function registerIpcHandlers(): void {
         await applyPostConnectSettings('amneziawg')
 
         desiredProtocol = 'amneziawg'
+        desiredMode = 'tunnel'
         startWireGuardMonitor()
         sendStateChange('connected')
         return { protocol: 'amneziawg' }
@@ -1176,9 +1200,9 @@ export function registerIpcHandlers(): void {
         // (same value applyPostConnectSettings uses for resolv.conf + kill switch).
         const dohIp = effectiveV2RayResolverIp(loadSettings())
         if (activeV2ray) {
-          connectV2Ray(activeV2ray, dohIp)
+          connectV2Ray(activeV2ray, dohIp, { proxyOnly })
         } else if (params.configString) {
-          connectV2RayFromConfig(params.configString, dohIp)
+          connectV2RayFromConfig(params.configString, dohIp, { proxyOnly })
         } else {
           throw new Error('No V2Ray instance or config available')
         }
@@ -1203,17 +1227,24 @@ export function registerIpcHandlers(): void {
 
         // V2Ray is running — bring up the TUN interface. If this fails the child is
         // still running, so tear it down rather than orphan a SOCKS proxy (finding M4).
-        try {
-          await bringUpV2RayTunnel()
-        } catch (err) {
-          await disconnect()
-          throw err
+        // In local-proxy mode there is no TUN and no system state to change: the
+        // kill switch and dns-set are deliberately skipped, so proxy mode leaks by
+        // design (only apps pointed at the SOCKS address are tunneled) and the
+        // kill-switch setting is intentionally ignored.
+        if (!proxyOnly) {
+          try {
+            await bringUpV2RayTunnel()
+          } catch (err) {
+            await disconnect()
+            throw err
+          }
+
+          // Apply DNS and kill switch if enabled
+          await applyPostConnectSettings('v2ray')
         }
 
-        // Apply DNS and kill switch if enabled
-        await applyPostConnectSettings('v2ray')
-
         desiredProtocol = 'v2ray'
+        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
         sendStateChange('connected')
         return { protocol: 'v2ray' }
       }
@@ -1227,7 +1258,7 @@ export function registerIpcHandlers(): void {
         if (!xrayConfig) {
           throw new Error('No Xray config available')
         }
-        connectXRayFromConfig(xrayConfig, dohIp)
+        connectXRayFromConfig(xrayConfig, dohIp, { proxyOnly })
 
         // Wait briefly and verify the xray process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
@@ -1244,17 +1275,21 @@ export function registerIpcHandlers(): void {
           )
         }
 
-        // Xray is running — bring up the TUN interface (same tun2socks path as v2ray).
-        try {
-          await bringUpV2RayTunnel()
-        } catch (err) {
-          await disconnect()
-          throw err
+        // Xray is running — bring up the TUN interface (same tun2socks path as v2ray),
+        // unless this is local-proxy mode (see the v2ray branch).
+        if (!proxyOnly) {
+          try {
+            await bringUpV2RayTunnel()
+          } catch (err) {
+            await disconnect()
+            throw err
+          }
+
+          await applyPostConnectSettings('xray')
         }
 
-        await applyPostConnectSettings('xray')
-
         desiredProtocol = 'xray'
+        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
         sendStateChange('connected')
         return { protocol: 'xray' }
       }
@@ -1268,7 +1303,7 @@ export function registerIpcHandlers(): void {
         if (!hysteria2Config) {
           throw new Error('No Hysteria2 config available')
         }
-        connectHysteria2FromConfig(hysteria2Config)
+        connectHysteria2FromConfig(hysteria2Config, { proxyOnly })
 
         // Wait briefly and verify the hysteria process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
@@ -1285,17 +1320,21 @@ export function registerIpcHandlers(): void {
           )
         }
 
-        // Hysteria2 is running — bring up the TUN interface (same tun2socks path as v2ray).
-        try {
-          await bringUpV2RayTunnel()
-        } catch (err) {
-          await disconnect()
-          throw err
+        // Hysteria2 is running — bring up the TUN interface (same tun2socks path as
+        // v2ray), unless this is local-proxy mode (see the v2ray branch).
+        if (!proxyOnly) {
+          try {
+            await bringUpV2RayTunnel()
+          } catch (err) {
+            await disconnect()
+            throw err
+          }
+
+          await applyPostConnectSettings('hysteria2')
         }
 
-        await applyPostConnectSettings('hysteria2')
-
         desiredProtocol = 'hysteria2'
+        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
         sendStateChange('connected')
         return { protocol: 'hysteria2' }
       }
@@ -1323,6 +1362,8 @@ export function registerIpcHandlers(): void {
       killSwitchFailed: killSwitchFailed || undefined,
       killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
       sessionId: activeSessionId,
+      proxyMode: vpnStatus.proxyMode || undefined,
+      socksAddr: vpnStatus.socksAddr,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,
     }

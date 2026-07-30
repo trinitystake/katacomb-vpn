@@ -92,8 +92,20 @@ function resolveAmneziaWgBinDir(): string {
 const TUN_IFACE = 'sntl-tun'
 const SOCKS_ADDR = '127.0.0.1:1080'
 
+/** Where the child proxies listen — shown to the user in local-proxy mode. */
+export function getSocksAddr(): string {
+  return SOCKS_ADDR
+}
+
 let activeChild: ChildProcess | null = null
 let activeProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | null = null
+/**
+ * 'tunnel' = the usual full-device VPN (tun2socks/wg routes everything).
+ * 'proxy'  = child-proxy protocols only: the core's local SOCKS5 listener is the
+ * whole product — no TUN, no root, no routing changes. Only apps pointed at the
+ * SOCKS address are tunneled; everything else keeps using the normal route.
+ */
+let activeMode: 'tunnel' | 'proxy' = 'tunnel'
 
 // v2ray, xray and hysteria2 are all child-process + tun2socks tunnels with identical
 // lifecycle handling (spawn a local SOCKS proxy, route it through tun2socks) — this
@@ -462,6 +474,7 @@ function spawnV2Ray(
       }
       activeChild = null
       activeProtocol = null
+      activeMode = 'tunnel'
       activeConfigFile = null
       // Notify auto-reconnect handler
       if (v2rayExitCallback) {
@@ -493,7 +506,7 @@ export function detectExistingConnection(): void {
   }
 }
 
-export function connectV2Ray(v2ray: V2Ray, dohResolverIp?: string | null): void {
+export function connectV2Ray(v2ray: V2Ray, dohResolverIp?: string | null, opts?: { proxyOnly?: boolean }): void {
   const bin = resolveV2RayBinary()
   if (bin === 'v2ray' && !binaryExists('v2ray')) {
     throw new Error('v2ray binary not found. The bundled binary is missing and no system v2ray is installed.')
@@ -519,6 +532,7 @@ export function connectV2Ray(v2ray: V2Ray, dohResolverIp?: string | null): void 
 
   activeChild = child
   activeProtocol = 'v2ray'
+  activeMode = opts?.proxyOnly ? 'proxy' : 'tunnel'
   activeConfigFile = configFile
 }
 
@@ -553,6 +567,7 @@ export async function connectWireGuard(wg: Wireguard): Promise<void> {
   await bringUpWireGuard(configFile)
 
   activeProtocol = 'wireguard'
+  activeMode = 'tunnel'
   activeConfigFile = configFile
 }
 
@@ -579,6 +594,7 @@ export async function connectWireGuardFromConfig(configString: string): Promise<
   }
 
   activeProtocol = 'wireguard'
+  activeMode = 'tunnel'
   activeConfigFile = configFile
 }
 
@@ -625,10 +641,11 @@ export async function connectAmneziaWgFromConfig(configString: string): Promise<
   }
 
   activeProtocol = 'amneziawg'
+  activeMode = 'tunnel'
   activeConfigFile = configFile
 }
 
-export function connectV2RayFromConfig(configString: string, dohResolverIp?: string | null): void {
+export function connectV2RayFromConfig(configString: string, dohResolverIp?: string | null, opts?: { proxyOnly?: boolean }): void {
   const bin = resolveV2RayBinary()
   if (bin === 'v2ray' && !binaryExists('v2ray')) {
     throw new Error('v2ray binary not found. The bundled binary is missing and no system v2ray is installed.')
@@ -655,6 +672,7 @@ export function connectV2RayFromConfig(configString: string, dohResolverIp?: str
 
   activeChild = child
   activeProtocol = 'v2ray'
+  activeMode = opts?.proxyOnly ? 'proxy' : 'tunnel'
   activeConfigFile = V2RAY_CONFIG
 }
 
@@ -665,7 +683,7 @@ export function connectV2RayFromConfig(configString: string, dohResolverIp?: str
  * in the binary (xray) and its CLI. The config is built by xray-config.ts (the SDK
  * can't emit Reality) in the handshake, or reloaded from a saved session on reconnect.
  */
-export function connectXRayFromConfig(configString: string, dohResolverIp?: string | null): void {
+export function connectXRayFromConfig(configString: string, dohResolverIp?: string | null, opts?: { proxyOnly?: boolean }): void {
   const bin = resolveXRayBinary()
   if (bin === 'xray' && !binaryExists('xray')) {
     throw new Error('xray binary not found. The bundled binary is missing and no system xray is installed.')
@@ -693,6 +711,7 @@ export function connectXRayFromConfig(configString: string, dohResolverIp?: stri
 
   activeChild = child
   activeProtocol = 'xray'
+  activeMode = opts?.proxyOnly ? 'proxy' : 'tunnel'
   activeConfigFile = V2RAY_CONFIG
 }
 
@@ -707,7 +726,7 @@ export function connectXRayFromConfig(configString: string, dohResolverIp?: stri
  * hysteria's viper loader parse the config as JSON. No DoH (hysteria2 has no in-config
  * DoH mechanism — DNS resolves plaintext-through-tunnel, like WireGuard).
  */
-export function connectHysteria2FromConfig(configString: string): void {
+export function connectHysteria2FromConfig(configString: string, opts?: { proxyOnly?: boolean }): void {
   const bin = resolveHysteria2Binary()
   if (bin === 'hysteria' && !binaryExists('hysteria')) {
     throw new Error('hysteria binary not found. The bundled binary is missing and no system hysteria is installed.')
@@ -743,6 +762,7 @@ export function connectHysteria2FromConfig(configString: string): void {
 
   activeChild = child
   activeProtocol = 'hysteria2'
+  activeMode = opts?.proxyOnly ? 'proxy' : 'tunnel'
   activeConfigFile = V2RAY_CONFIG
 }
 
@@ -777,19 +797,33 @@ export async function disconnect(): Promise<void> {
   }
 
   activeProtocol = null
+  activeMode = 'tunnel'
   activeConfigFile = null
   activeChild = null
 }
 
-export function getConnectionStatus(): { connected: boolean; protocol: string | null } {
-  // V2Ray/Xray: check if our spawned process is still running
+export function getConnectionStatus(): {
+  connected: boolean
+  protocol: string | null
+  proxyMode: boolean
+  socksAddr?: string
+} {
+  // V2Ray/Xray/Hysteria2: the spawned process IS the connection. In local-proxy
+  // mode that's the whole check — there is no TUN interface to look for.
   if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) {
-    return { connected: true, protocol: activeProtocol }
+    const proxyMode = activeMode === 'proxy'
+    return {
+      connected: true,
+      protocol: activeProtocol,
+      proxyMode,
+      ...(proxyMode ? { socksAddr: SOCKS_ADDR } : {}),
+    }
   }
 
   // Proxy process exited unexpectedly — clean up stale state
   if (isChildProxy(activeProtocol)) {
     activeProtocol = null
+    activeMode = 'tunnel'
     activeConfigFile = null
     activeChild = null
   }
@@ -797,7 +831,7 @@ export function getConnectionStatus(): { connected: boolean; protocol: string | 
   // Check if the sntl0 interface is actually up (works even after app restart)
   if (isWireGuardUp()) {
     if (!activeProtocol) activeProtocol = sntl0IsKernelWireGuard() ? 'wireguard' : 'amneziawg'
-    return { connected: true, protocol: activeProtocol }
+    return { connected: true, protocol: activeProtocol, proxyMode: false }
   }
 
   // WG/AWG was supposed to be active but interface is gone
@@ -806,13 +840,17 @@ export function getConnectionStatus(): { connected: boolean; protocol: string | 
     activeConfigFile = null
   }
 
-  return { connected: false, protocol: null }
+  return { connected: false, protocol: null, proxyMode: false }
 }
 
 /** Check if any VPN (WireGuard or V2Ray+tun2socks) is currently active */
 export function isVpnActive(): boolean {
   if (isWireGuardUp()) return true
   if (isTunUp()) return true
+  // Local-proxy mode deliberately leaves system routing alone, so the RPC
+  // endpoint stays reachable — callers use this to decide whether to fall back
+  // to cached chain data, and in proxy mode they shouldn't.
+  if (activeMode === 'proxy') return false
   if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) return true
   return false
 }

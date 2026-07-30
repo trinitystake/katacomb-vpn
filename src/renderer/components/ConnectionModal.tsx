@@ -46,10 +46,17 @@ export default function ConnectionModal({ node, onClose }: Props) {
   // Protocol of the session we already paid for. Kept so a failed bring-up can be
   // retried against that session instead of buying a second one.
   const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
+  // Full tunnel vs. local SOCKS proxy. Only the child-proxy protocols expose a
+  // local listener, so the choice is hidden (and forced to 'tunnel') otherwise.
+  const [mode, setMode] = useState<'tunnel' | 'proxy'>('tunnel')
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
+
+  // v2ray(2)/xray(4)/hysteria2(6) run a local SOCKS5 listener, so they can be used
+  // as a plain proxy. WireGuard/AmneziaWG are the routing change — no proxy mode.
+  const proxyCapable = node.type === 2 || node.type === 4 || node.type === 6
 
   const gbPrice = getUdvpnPrice(node.gigabytePrices)
   const hrPrice = getUdvpnPrice(node.hourlyPrices)
@@ -145,7 +152,11 @@ export default function ConnectionModal({ node, onClose }: Props) {
    */
   async function connectTunnelOnly(protocol: TunnelProtocol, dnsFallback = false) {
     setCurrentStep('5/5')
-    await window.api.connectionConnect({ protocol, ...(dnsFallback ? { dnsFallback: true } : {}) })
+    await window.api.connectionConnect({
+      protocol,
+      ...(proxyCapable && mode === 'proxy' ? { mode: 'proxy' as const } : {}),
+      ...(dnsFallback ? { dnsFallback: true } : {}),
+    })
     setTunnelConnected(true)
   }
 
@@ -479,6 +490,39 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
             )}
 
+            {proxyCapable && (
+              <div className="space-y-1.5">
+                <div className="text-xs text-text-secondary">Connection mode</div>
+                <div className="flex gap-4 text-sm">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="connect-mode"
+                      checked={mode === 'tunnel'}
+                      onChange={() => setMode('tunnel')}
+                      className="accent-accent"
+                    />
+                    <span className="text-text-primary">Full tunnel</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="connect-mode"
+                      checked={mode === 'proxy'}
+                      onChange={() => setMode('proxy')}
+                      className="accent-accent"
+                    />
+                    <span className="text-text-primary">Local proxy</span>
+                  </label>
+                </div>
+                <p className="text-text-tertiary text-xs">
+                  {mode === 'tunnel'
+                    ? 'Routes your whole device through the node (needs admin rights).'
+                    : 'Runs a SOCKS5 proxy on 127.0.0.1:1080 — no admin password, but only apps you point at it are tunneled. No kill switch.'}
+                </p>
+              </div>
+            )}
+
             <button
               onClick={handleSubscribe}
               disabled={!active || !isProtocolSupported(node.type) || (!matchingAllocation && !selectedPrice)}
@@ -540,14 +584,21 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             <div className="flex items-center gap-2 text-sm">
               <span className="status-dot status-dot-active" />
-              <span className="text-success font-medium">VPN tunnel active</span>
+              <span className="text-success font-medium">
+                {proxyCapable && mode === 'proxy' ? 'Local proxy active' : 'VPN tunnel active'}
+              </span>
             </div>
 
-            {node.type === 1 && (
+            {proxyCapable && mode === 'proxy' ? (
+              <p className="text-text-tertiary text-sm">
+                SOCKS5 proxy at <span className="font-mono text-text-secondary">127.0.0.1:1080</span> — only apps
+                configured to use it are tunneled. The rest of your traffic still goes out directly.
+              </p>
+            ) : node.type === 1 ? (
               <p className="text-text-tertiary text-sm">
                 WireGuard interface is up. Your traffic is now routed through this node.
               </p>
-            )}
+            ) : null}
 
             <button onClick={onClose} className="btn btn-primary w-full">
               Done

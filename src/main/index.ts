@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Tray, Menu, nativeImage, dialog } from 'electron'
+import { app, BrowserWindow, shell, Tray, Menu, nativeImage, dialog, nativeTheme } from 'electron'
 import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
@@ -20,10 +20,20 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let forceQuit = false
 
-function getIconPath(filename: string): string {
+/**
+ * Icons ship in a `light/` and a `dark/` variant (scripts/build-icons.mjs), named
+ * for the SURFACE they sit on: the dark variant is the light-on-dark mark for a
+ * dark panel. The OS theme — not the app's own theme toggle — decides, because
+ * these render on the desktop's taskbar/tray, not inside our window.
+ */
+function iconVariant(): 'light' | 'dark' {
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+}
+
+function getIconPath(filename: string, variant: 'light' | 'dark' = iconVariant()): string {
   return is.dev
-    ? join(__dirname, '../../build/icons', filename)
-    : join(process.resourcesPath, 'icons', filename)
+    ? join(__dirname, '../../build/icons', variant, filename)
+    : join(process.resourcesPath, 'icons', variant, filename)
 }
 
 function showWindow(): void {
@@ -63,12 +73,16 @@ function showAbout(): void {
   })
 }
 
+/** The tray image for the current OS theme (32x32 is the tray size; fall back to
+ *  256 if that file is somehow empty so we never construct a Tray with a blank
+ *  image — the broken-image triangle). */
+function trayImage(): Electron.NativeImage {
+  const icon = nativeImage.createFromPath(getIconPath('32x32.png'))
+  return icon.isEmpty() ? nativeImage.createFromPath(getIconPath('256x256.png')) : icon
+}
+
 function createTrayIcon(): void {
-  // 32x32 is the tray size; fall back to 256 if that file is somehow empty so we
-  // never construct a Tray with a blank image (the broken-image triangle).
-  let icon = nativeImage.createFromPath(getIconPath('32x32.png'))
-  if (icon.isEmpty()) icon = nativeImage.createFromPath(getIconPath('256x256.png'))
-  tray = new Tray(icon)
+  tray = new Tray(trayImage())
   tray.on('click', () => toggleWindow())
   refreshTray(getConnectionInfo())
 }
@@ -278,6 +292,15 @@ app.whenReady().then(() => {
   // Keep the tray tooltip + menu in sync with connect/disconnect (incl. from the
   // renderer, auto-reconnect, or the tray itself).
   onConnectionStateChanged(refreshTray)
+
+  // Repaint the taskbar + tray icons when the desktop flips light/dark, so the
+  // mark keeps its contrast against the panel it sits on.
+  nativeTheme.on('updated', () => {
+    tray?.setImage(trayImage())
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setIcon(nativeImage.createFromPath(getIconPath('256x256.png')))
+    }
+  })
 
   // Background prefetch so the Plans tab feels instant on first open.
   // Safely returns cached data if VPN is already active.

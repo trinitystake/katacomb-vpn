@@ -20,7 +20,7 @@ import { SettingsProvider } from './contexts/SettingsContext'
 import { NodesProvider } from './contexts/NodesContext'
 import { NavigationProvider, useNavigation } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
-import appIcon from './assets/sentinel.svg'
+import AppLogo from './components/AppLogo'
 
 function AppInner() {
   const wallet = useWallet()
@@ -74,7 +74,7 @@ function AppInner() {
       <header className="flex items-center justify-between px-5 py-3 border-b border-border bg-bg-secondary shrink-0">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2.5">
-            <img src={appIcon} alt="" width={22} height={22} className="shrink-0" />
+            <AppLogo size={30} className="shrink-0" />
             <h1 className="text-accent font-semibold text-base">
               Sentinel dVPN
             </h1>

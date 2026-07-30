@@ -1,0 +1,247 @@
+<div align="center">
+  <img src="build/icons/128x128.png" alt="Katacomb VPN" width="96" height="96">
+  <h1>Katacomb VPN</h1>
+  <p><strong>A desktop client for the Sentinel decentralized VPN network.</strong></p>
+</div>
+
+Pick a node anywhere in the world, pay for a session on-chain, and Katacomb brings up the
+tunnel — WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or Hysteria2, whichever that node
+speaks. No accounts, no subscriptions to a single provider: bandwidth is bought directly
+from independent node operators with a wallet you hold the keys to.
+
+Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
+
+> **Status:** pre-release (0.1.0). Connecting spends real funds — see
+> [Money](#money-this-app-spends-real-funds).
+
+---
+
+## Features
+
+**Finding a node**
+
+- **Map** — 3D globe with per-country node counts, plus a country sidebar.
+- **Nodes** — virtualized table over the whole network (thousands of nodes). Filter by
+  country, city, protocol, residential/whitelisted, bookmarks; hide duplicates; sort on
+  any column. Latency probes (single or batch) and a download speed test.
+- **Plans** — discover provider plans, subscribe, then start sessions on any node in the
+  plan. Includes a subscription manager for cancelling and for the auto-renewal policy.
+- **Sessions** — every active session with usage, price and remaining allowance;
+  reconnect or end it from here.
+
+**Connecting**
+
+- **Kill switch** — iptables rules that drop everything outside the tunnel, armed on
+  connect and torn down on disconnect (with a self-healing marker if the app dies mid-way).
+- **DNS** — pick a resolver (Cloudflare, Quad9, NextDNS, …) applied on connect. On the
+  V2Ray-family protocols the queries go out over DoH, so the node can't read them.
+- **Split tunneling** — CIDR routes that bypass the tunnel; private ranges are excluded
+  by default.
+- **Auto-reconnect** — up to 5 attempts with backoff when a tunnel drops.
+- **Proxy mode** — for the SOCKS-capable protocols, run just the local listener at
+  `127.0.0.1:1080` without touching system routing or asking for root.
+- Live traffic stats, real egress IP/geo check, tray connect.
+
+**Wallet**
+
+- BIP-39 import or generate (12 or 24 words), multiple wallets, subaccounts derived at a
+  chosen account index.
+- Seeds are encrypted at rest with Electron `safeStorage` (the OS keyring — libsecret on
+  Linux). If the keyring is unavailable, secrets are **not** written in plaintext instead.
+
+## Protocol support
+
+`type` is the numeric protocol tag from the node-list feed. Each node runs exactly one.
+
+| # | Protocol | Interface | How it runs | Notes |
+|---|----------|-----------|-------------|-------|
+| 1 | WireGuard | `sntl0` | root (`wg-quick`) | Uses the distro `wireguard-tools` |
+| 2 | V2Ray | `sntl-tun` | userspace core + tun2socks | Bundled `v2ray`; encrypted DNS via DoH |
+| 3 | OpenVPN | `sntl-ovpn` | root (`openvpn`) | Distro client; the node's PKI issues the client cert |
+| 4 | XRAY | `sntl-tun` | userspace core + tun2socks | VLESS + Reality; bundled `xray` |
+| 5 | AmneziaWG | `sntl0` | root (`awg-quick`) | WireGuard fork with DPI-evasion params; bundled userspace trio |
+| 6 | Hysteria2 | `sntl-tun` | userspace core + tun2socks | QUIC; refuses to connect without a TLS pin |
+
+Type 0 (unknown) is the only kind the client will not connect to.
+
+Bundled binaries live in [resources/linux/v2ray/](resources/linux/v2ray/) and are
+SHA-256 pinned in [binary-integrity.ts](src/main/binary-integrity.ts) — both the app and
+the root daemon refuse to execute one whose hash doesn't match. The AmneziaWG trio is
+built from source at the commits upstream pins (no prebuilt `amneziawg-go` exists), via
+[scripts/build-amneziawg.sh](scripts/build-amneziawg.sh).
+
+## Install
+
+Both artifacts land in `dist/` after a packaging build.
+
+### .deb — recommended
+
+```bash
+sudo apt install ./dist/katacomb-vpn_0.1.0_amd64.deb
+```
+
+Pulls in `wireguard-tools`, `policykit-1` and `openvpn`. The postinstall also installs
+and enables a small root daemon (systemd unit `katacomb-vpn-daemon`), so **connect and
+disconnect never prompt for a password**. The GUI talks to it over a Unix socket at
+`/run/katacomb-vpn/daemon.sock`.
+
+### AppImage
+
+```bash
+chmod +x dist/katacomb-vpn-0.1.0.AppImage
+./dist/katacomb-vpn-0.1.0.AppImage
+```
+
+No daemon here, so each privileged operation goes through `pkexec` (one prompt, cached
+for a while). Install `wireguard-tools` and `openvpn` yourself if you want those
+protocols.
+
+## Build from source
+
+Requires **Node 22 or newer** (the test runner relies on native TypeScript type
+stripping) and a Linux x86_64 host.
+
+```bash
+npm ci
+npm run dev            # Electron + Vite dev server with HMR
+npm run typecheck      # tsc --noEmit on both projects — must pass clean
+npm test               # unit tests (Node's built-in runner, zero test deps)
+npm run dist:deb       # package the .deb
+npm run dist:appimage  # package the AppImage
+npm run dist           # both
+```
+
+## How a connection is made
+
+The order matters, because step 2 costs money:
+
+1. **Preflight** — bundled binaries present and hash-verified, privilege escalation
+   available, and the node's *own* `service_type` matches what the aggregator claims.
+   Nothing has been spent yet, so a mismatch here is free.
+2. **Pay** — a session transaction on-chain, priced per GB or per hour in `udvpn`.
+3. **Handshake** — exchange key material with the node's API; its answer becomes a
+   WireGuard/OpenVPN config or a proxy-core JSON config.
+4. **Validate** — everything the node sent goes through `config-guard` before a byte of
+   it is written to disk or handed to root.
+5. **Bring up** — the daemon (or `pkexec`) raises the interface, then the kill switch,
+   DNS and split-tunnel routes are applied.
+
+Any failure in step 3 or 4 **cancels the session, refunding it**. A failure in step 5
+keeps the already-paid config in memory, so the connect dialog offers "Retry connection"
+rather than making you buy a second session.
+
+## Security model
+
+The design assumption worth stating plainly: **node operators are adversaries.** Their
+handshake data turns into configs that `wg-quick`, `openvpn` and `iptables` execute as
+root, and a single `PostUp = …` line in a WireGuard config is a root shell. So:
+
+- Every node-supplied config passes through [config-guard.ts](src/main/config-guard.ts)
+  first — **allow-lists**, not blocklists. Anything not explicitly permitted is rejected,
+  including every OpenVPN directive that can run a script (`up`, `down`, `route-up`,
+  `plugin`, `tls-verify`, …).
+- The privileged helper re-validates in bash, independently, because its socket is the
+  real trust boundary.
+- Binary blobs from a node (certificates, keys, TLS pins) are decoded and re-armored by
+  us, so no node byte can become a config directive. A malformed one throws before the
+  handshake completes, which means the session is refunded.
+- Operational flags that must not come from a node (`--script-security 0`, `--dev`, …)
+  are passed on the command line by the helper, after `--config`.
+- Renderer runs with `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`.
+  The only bridge is `window.api`, and IPC calls from any frame that isn't our own
+  renderer are rejected.
+- Split-tunnel routes are sanitized: a node cannot hand back `0.0.0.0/1` and quietly
+  exclude your traffic from the tunnel.
+
+More detail — including the invariants that must not regress — is in
+[CLAUDE.md](CLAUDE.md).
+
+## Money: this app spends real funds
+
+Connecting is a blockchain transaction. Prices are in `udvpn` (1 DVPN = 1,000,000 udvpn),
+paid to the node operator, and the wallet needs a balance before you connect (the app
+checks first). Failures on the client side are refunded automatically; a session you
+actually used is not. Cancelling a subscription marks it inactive-pending — it is not an
+instant refund.
+
+## Architecture
+
+Three process boundaries, with everything sensitive in the main process:
+
+```
+src/
+├── main/        Node.js — wallet crypto, chain RPC, tunnel management, root ops
+├── preload/     the single contextBridge surface (window.api)
+├── renderer/    React UI, no Node access
+└── shared/      IPC channel names, error markers, chain constants
+```
+
+Notable modules:
+
+| File | Role |
+|------|------|
+| [wallet.ts](src/main/wallet.ts) | BIP-39 import, key derivation, `safeStorage` encryption |
+| [chain-service.ts](src/main/chain-service.ts) | On-chain sessions, node handshakes per protocol |
+| [vpn-manager.ts](src/main/vpn-manager.ts) | Tunnel lifecycle for all six protocols |
+| [config-guard.ts](src/main/config-guard.ts) | Validators for untrusted node data |
+| [daemon-core.ts](src/main/daemon-core.ts) | Root daemon: socket server, op dispatch, validation |
+| [privileged.ts](src/main/privileged.ts) | Routes privileged ops to the daemon, else `pkexec` |
+| [ipc-handlers.ts](src/main/ipc-handlers.ts) | Every IPC channel; connect orchestration, refunds, reconnect |
+| [kill-switch.ts](src/main/kill-switch.ts) | iptables kill switch |
+
+Per-protocol config builders are pure, Electron-free and unit-tested:
+[openvpn-config.ts](src/main/openvpn-config.ts),
+[amneziawg-config.ts](src/main/amneziawg-config.ts),
+[xray-config.ts](src/main/xray-config.ts),
+[hysteria-config.ts](src/main/hysteria-config.ts).
+
+Privileged surface: [resources/linux/](resources/linux/) holds the polkit helper script,
+its policy, the systemd unit and the install/remove hooks.
+
+## Development notes
+
+- **No linter.** `tsc` runs `strict` with `noUnusedLocals`/`noUnusedParameters`;
+  `npm run typecheck` is the gate. CI runs typecheck, tests and `npm audit`.
+- **Tests** use Node's native `--test` against `src/**/*.test.ts`. They import the
+  module under test with a `.ts` extension (the native runner requires it) and cover the
+  pure security/IO/decision helpers. No Vitest, no Jest, no extra dependency.
+- **Bundling.** `electron.vite.config.ts` must bundle the whole CosmJS/dVPN SDK tree
+  (`DEPS_TO_BUNDLE`) — those packages have ESM-only transitive deps and the main process
+  loads as CJS. Adding a `@cosmjs/*` dependency without listing it there fails at
+  runtime with `ERR_REQUIRE_ESM`.
+- **Dark theme only**, on purpose. Semantic tokens live in `tokens.css`; components read
+  those and never a `dark:` variant.
+- App data lives in `~/.config/katacomb-vpn`.
+
+## Troubleshooting
+
+**Connect fails with a DNS provisioning error.** `wg-quick`/`awg-quick` need
+`resolvconf` and fail the whole bring-up without it. Install it, or accept the offered
+retry — that one strips the `DNS =` lines, which means DNS queries leave the tunnel.
+The app says so before you agree.
+
+**"Restart katacomb-vpn-daemon" after an upgrade.** The GUI is newer than the running
+daemon: `sudo systemctl restart katacomb-vpn-daemon`.
+
+**Wallet asks to re-import after upgrading from Sentinel dVPN.** `safeStorage` keys its
+libsecret entry by application name, so seeds encrypted under the old name cannot be
+decrypted under the new one. Settings, the wallet list and sessions migrate; the seed has
+to be re-imported once from your mnemonic.
+
+**No internet after a crash while connected.** The kill switch may still be armed.
+Starting the app again heals the stranded rules.
+
+**`npm run dev` exits immediately inside VS Code's terminal.** VS Code leaks
+`ELECTRON_RUN_AS_NODE=1`; run `env -u ELECTRON_RUN_AS_NODE npm run dev`.
+
+## Relationship to Sentinel
+
+The product is Katacomb VPN; the network is [Sentinel](https://sentinel.co), a Cosmos SDK
+chain. The client talks to it over `rpc.sentinel.co` (configurable, with a public RPC
+picker in Settings) using the `sentinel-js-sdk`, address prefix `sent`. Node discovery
+uses the `api.sentnodes.com` aggregator. Those names stay in the code because they are
+the chain's, not the product's.
+
+## License
+
+No license declared yet.

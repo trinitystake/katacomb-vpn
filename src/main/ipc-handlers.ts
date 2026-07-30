@@ -20,7 +20,7 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect } from './connect-decisions'
+import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
@@ -45,12 +45,13 @@ import {
   isWireGuardUp,
   binaryExists,
   isBinaryAvailable,
+  protocolRuntimeError,
 } from './vpn-manager'
-import { runPrivileged } from './privileged'
+import { runPrivileged, canEscalatePrivileges } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes } from './traffic-stats'
-import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
+import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
@@ -61,6 +62,8 @@ const RECONNECT_MAX_ATTEMPTS = 5
 // Bound the refund (endSession) so a slow RPC during the failure path can't itself
 // hang the connect flow — see establishSessionOrRefund (finding H1).
 const REFUND_TIMEOUT_MS = 10_000
+// Bound the pre-payment protocol check — it blocks the connect button.
+const NODE_PROTOCOL_CHECK_TIMEOUT_MS = 10_000
 // The kill switch drops any DNS that isn't tunnel-routed, so when it's on we
 // need a resolver reachable through the tunnel. A 'system' resolver is usually a
 // LAN/systemd-resolved address that won't route through the tunnel — fall back to
@@ -251,6 +254,60 @@ function describeHandshakeError(err: unknown): string {
     return `node returned HTTP ${response.status ?? '?'}${detailStr ? ` — ${detailStr}` : ''}`
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+const NODE_TYPE_TO_PROTOCOL: Record<number, 'wireguard' | 'v2ray' | 'xray' | 'amneziawg' | 'hysteria2'> = {
+  1: 'wireguard', 2: 'v2ray', 4: 'xray', 5: 'amneziawg', 6: 'hysteria2',
+}
+
+/**
+ * Checks that run BEFORE the paying tx is broadcast, so a mislabeled node or a
+ * runtime that can't bring the protocol up costs the user nothing. (Everything
+ * after the tx is covered by establishSessionOrRefund, but a refund still burns
+ * gas and a block of the user's time.)
+ *
+ * 1. Can we run this protocol at all — binaries present + integrity-verified,
+ *    and for the root protocols, a daemon or the polkit helper to run them with.
+ * 2. Does the node agree it runs this protocol? The node list is an aggregator
+ *    cache; the node's own service_type is the authority.
+ *
+ * Throws with an actionable message; never silently downgrades.
+ */
+async function preflightConnect(nodeType: number, apiField: string): Promise<void> {
+  const protocol = NODE_TYPE_TO_PROTOCOL[nodeType]
+  if (!protocol) throw new Error(`Unsupported nodeType ${nodeType}`)
+
+  const runtimeError = protocolRuntimeError(protocol)
+  if (runtimeError) throw new Error(`Can't connect — not charged. ${runtimeError}`)
+
+  // WireGuard/AmneziaWG go up as root: without the daemon or the helper the
+  // bring-up has no way to escalate and would fail after payment.
+  if (protocol === 'wireguard' || protocol === 'amneziawg') {
+    if (!canEscalatePrivileges()) {
+      throw new Error(
+        `Can't connect — not charged. The privileged helper isn't installed, so ${protocol === 'wireguard' ? 'WireGuard' : 'AmneziaWG'} can't be brought up. Restart the app and accept the helper setup prompt.`
+      )
+    }
+  }
+
+  let reported: string | number
+  try {
+    // nodeFetch's own 8s timeout only covers socket inactivity, not the TCP
+    // connect — a blackholed node hangs well past it (measured). This gate sits
+    // in front of the connect button, so bound the whole wait.
+    reported = await withTimeout(fetchNodeServiceType(apiField), NODE_PROTOCOL_CHECK_TIMEOUT_MS, 'node protocol check')
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'unknown error'
+    throw new Error(`Node is unreachable — not charged (${reason}). Pick another node.`)
+  }
+
+  const actualType = serviceTypeToNodeType(reported)
+  if (actualType !== nodeType) {
+    throw new Error(
+      `Node protocol mismatch — not charged. The node reports "${reported}" but the node list says ` +
+      `${protocol}. Refresh the node list and pick another node.`
+    )
+  }
 }
 
 /**
@@ -954,6 +1011,9 @@ export function registerIpcHandlers(): void {
       throw new Error('Wallet not loaded. Please re-import your mnemonic.')
     }
 
+    // Verify the node + our runtime BEFORE spending anything (see preflightConnect).
+    await preflightConnect(params.nodeType, params.apiField)
+
     // Pre-check balance (only for udvpn denom)
     if (params.denom === 'udvpn') {
       const balances = await getBalance()
@@ -1421,6 +1481,8 @@ export function registerIpcHandlers(): void {
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
 
+    await preflightConnect(params.nodeType, params.apiField)
+
     const { sessionId, subscriptionId } = await subscribeToPlan({
       wallet,
       address,
@@ -1472,6 +1534,8 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
+
+    await preflightConnect(params.nodeType, params.apiField)
 
     const { sessionId, subscriptionId } = await startSessionWithExistingSubscription({
       wallet,

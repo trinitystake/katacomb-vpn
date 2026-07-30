@@ -13,6 +13,15 @@ import { isDaemonAvailable, daemonRequest, DaemonUnreachableError } from './daem
 
 const HELPER_PATH = '/usr/local/bin/sentinel-vpn-helper'
 
+/**
+ * Is there any route to root right now — the daemon socket or the installed
+ * helper? The connect preflight checks this before charging for a session that
+ * needs a privileged bring-up (WireGuard/AmneziaWG).
+ */
+export function canEscalatePrivileges(): boolean {
+  return isDaemonAvailable() || existsSync(HELPER_PATH)
+}
+
 export async function runPrivileged(args: string[]): Promise<void> {
   if (isDaemonAvailable()) {
     try {

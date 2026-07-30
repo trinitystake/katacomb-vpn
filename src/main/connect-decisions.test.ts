@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs } from './connect-decisions.ts'
+import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType } from './connect-decisions.ts'
 
 // --- sessionFailureMessage ---
 
@@ -93,4 +93,46 @@ test('backoffDelayMs: exponential growth', () => {
 test('backoffDelayMs: capped at 60000', () => {
   assert.equal(backoffDelayMs(6), 60000)
   assert.equal(backoffDelayMs(10), 60000)
+})
+
+// --- serviceTypeToNodeType ---
+
+test('serviceTypeToNodeType: canonical names', () => {
+  assert.equal(serviceTypeToNodeType('wireguard'), 1)
+  assert.equal(serviceTypeToNodeType('v2ray'), 2)
+  assert.equal(serviceTypeToNodeType('openvpn'), 3)
+  assert.equal(serviceTypeToNodeType('xray'), 4)
+  assert.equal(serviceTypeToNodeType('amneziawg'), 5)
+  assert.equal(serviceTypeToNodeType('hysteria2'), 6)
+})
+
+test('serviceTypeToNodeType: separator and case variants nodes actually report', () => {
+  assert.equal(serviceTypeToNodeType('WireGuard'), 1)
+  assert.equal(serviceTypeToNodeType('wire_guard'), 1)
+  assert.equal(serviceTypeToNodeType('V2Ray'), 2)
+  assert.equal(serviceTypeToNodeType('open-vpn'), 3)
+  assert.equal(serviceTypeToNodeType('amnezia_wg'), 5)
+  assert.equal(serviceTypeToNodeType('Amnezia WG'), 5)
+  assert.equal(serviceTypeToNodeType('awg'), 5)
+  assert.equal(serviceTypeToNodeType('HYSTERIA2'), 6)
+  assert.equal(serviceTypeToNodeType('hysteria_2'), 6)
+  assert.equal(serviceTypeToNodeType('hy2'), 6)
+})
+
+test('serviceTypeToNodeType: numeric passthrough only inside 1-6', () => {
+  assert.equal(serviceTypeToNodeType(1), 1)
+  assert.equal(serviceTypeToNodeType(6), 6)
+  assert.equal(serviceTypeToNodeType('4'), 4)
+  assert.equal(serviceTypeToNodeType(0), null)
+  assert.equal(serviceTypeToNodeType(7), null)
+  assert.equal(serviceTypeToNodeType(1.5), null)
+})
+
+test('serviceTypeToNodeType: unknown or malformed input is null', () => {
+  assert.equal(serviceTypeToNodeType('shadowsocks'), null)
+  assert.equal(serviceTypeToNodeType(''), null)
+  assert.equal(serviceTypeToNodeType(undefined), null)
+  assert.equal(serviceTypeToNodeType(null), null)
+  assert.equal(serviceTypeToNodeType({}), null)
+  assert.equal(serviceTypeToNodeType(['wireguard']), null)
 })

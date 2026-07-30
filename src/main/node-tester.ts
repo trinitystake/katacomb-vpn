@@ -128,6 +128,28 @@ export async function probeNode(remoteUrl: string, nodeAddress: string): Promise
   }
 }
 
+/**
+ * Ask a node what protocol it actually runs. Sentinel nodes serve their info at
+ * the ROOT path as `{success, result:{…, service_type}}` (there is no /info route
+ * — it 404s); `service_type` is a string on v9 nodes ("amneziawg", "hysteria2").
+ * Throws when the node is unreachable or the response isn't the expected shape,
+ * so the caller can tell "mismatch" apart from "couldn't ask".
+ */
+export async function fetchNodeServiceType(remoteUrl: string): Promise<string | number> {
+  if (typeof remoteUrl !== 'string' || remoteUrl.trim() === '') {
+    throw new Error('Node has no API endpoint')
+  }
+  const normalizedUrl = remoteUrl.startsWith('http') ? remoteUrl : `https://${remoteUrl}`
+  const response = await nodeFetch(normalizedUrl.replace(/\/+$/, '') + '/', 8000)
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Node returned HTTP ${response.status}`)
+  }
+  const json = JSON.parse(response.body) as { result?: { service_type?: string | number } }
+  const serviceType = json.result?.service_type
+  if (serviceType === undefined) throw new Error('Node did not report a service type')
+  return serviceType
+}
+
 export async function probeBatch(
   nodes: Array<{ nodeAddress: string; remoteUrl: string }>,
   signal: AbortSignal,

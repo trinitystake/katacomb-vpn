@@ -124,6 +124,32 @@ export function isBinaryAvailable(name: string): boolean {
   return binaryExists(name)
 }
 
+/**
+ * Can this install actually bring `protocol` up? Resolves the binaries the
+ * bring-up needs (which also runs their SHA-256 integrity check) without
+ * spawning anything. Returns null when the runtime is fine, otherwise the
+ * reason — the connect preflight uses it to fail BEFORE any funds move.
+ */
+export function protocolRuntimeError(protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'): string | null {
+  try {
+    if (protocol === 'wireguard') {
+      return binaryExists('wg-quick') ? null : 'wg-quick is not installed — install the wireguard-tools package.'
+    }
+    if (protocol === 'amneziawg') {
+      resolveAmneziaWgBinDir()
+      return null
+    }
+    const bin = protocol === 'v2ray' ? 'v2ray' : protocol === 'xray' ? 'xray' : 'hysteria'
+    if (!isBinaryAvailable(bin)) return `The ${bin} binary is missing from this build. Reinstall the app.`
+    if (!isBinaryAvailable('tun2socks')) return 'The tun2socks binary is missing from this build. Reinstall the app.'
+    return null
+  } catch (err) {
+    // resolveBundled throws on a failed integrity check, resolveAmneziaWgBinDir
+    // when the trio is missing — both are already user-facing messages.
+    return err instanceof Error ? err.message : 'Required VPN binaries are unavailable.'
+  }
+}
+
 /** Check if our Sentinel WireGuard interface (sntl0) is currently up */
 export function isWireGuardUp(): boolean {
   try {

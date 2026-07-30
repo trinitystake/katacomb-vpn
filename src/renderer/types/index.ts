@@ -27,7 +27,9 @@ export interface SentNode {
   leases: number
   sessions: number
   peers: number
-  errorMessage: string
+  // Why the node failed the aggregator's health probe ('VPN connect failed',
+  // 'Handshake failed', …). Absent on healthy nodes — see utils/node-status.ts.
+  errorMessage: string | null
   fetchedAt: string
 }
 

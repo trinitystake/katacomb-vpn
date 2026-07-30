@@ -86,6 +86,12 @@
     background-color: var(--color-text-tertiary);
   }
 
+  /* Active on-chain but failing the network health check — a steady warning, not
+     the pending pulse (nothing is in progress). */
+  .status-dot-warning {
+    background-color: var(--color-warning);
+  }
+
   .status-dot-pending {
     background-color: var(--color-warning);
     animation: pulse-subtle 1.5s ease-in-out infinite;

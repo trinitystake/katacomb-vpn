@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import type { SentNode, NodeFilter } from '../types'
 import { useNodesContext } from '../contexts/NodesContext'
 import { v2rayConnectionCategory } from '../utils/v2ray-connection'
+import { nodeStatusRank } from '../utils/node-status'
 
 const DEFAULT_FILTER: NodeFilter = {
   country: '',
@@ -62,12 +63,11 @@ function compareNodes(
       cmp = va - vb
       break
     }
-    case 'status': {
-      const sa = a.isActive && a.isHealthy ? 1 : 0
-      const sb = b.isActive && b.isHealthy ? 1 : 0
-      cmp = sa - sb
+    case 'status':
+      // Three ranks, not two — an active-but-unhealthy node sorts between
+      // healthy and inactive rather than tying with inactive.
+      cmp = nodeStatusRank(a) - nodeStatusRank(b)
       break
-    }
   }
   return dir === 'asc' ? cmp : -cmp
 }

@@ -7,6 +7,7 @@ import ConnectErrorActions from './ConnectErrorActions'
 import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
+import { nodeStatusMeta, isNodeConnectable } from '../utils/node-status'
 
 const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited placeholder set by the provider
 const PLAN_DISCOVERY_MAX = 500
@@ -1770,7 +1771,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
               <div className="border border-border bg-bg-tertiary rounded-md max-h-[260px] overflow-y-auto divide-y divide-border">
                 {candidates.map(({ addr, node }) => {
                   const active = selectedAddr === addr
-                  const reachable = node?.isActive && node?.isHealthy
+                  const status = node ? nodeStatusMeta(node) : null
                   return (
                     <button
                       key={addr}
@@ -1806,9 +1807,9 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
                             'Not in node directory — refresh Nodes tab'
                           )}
                         </span>
-                        {node && (
-                          <span className={reachable ? 'text-success' : 'text-text-tertiary'}>
-                            {reachable ? 'Active' : 'Inactive'}
+                        {status && (
+                          <span className={status.textClass} title={status.detail}>
+                            {status.label}
                           </span>
                         )}
                       </div>
@@ -1820,7 +1821,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
 
             <button
               onClick={handleConnect}
-              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy) || !isProtocolSupported(selected.node.type)}
+              disabled={!selected || !selected.node || !isNodeConnectable(selected.node) || !isProtocolSupported(selected.node.type)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Connect via Existing Plan
@@ -2088,7 +2089,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
               <div className="border border-border bg-bg-tertiary rounded-md max-h-[260px] overflow-y-auto divide-y divide-border">
                 {candidates.map(({ addr, node }) => {
                   const active = selectedAddr === addr
-                  const reachable = node?.isActive && node?.isHealthy
+                  const status = node ? nodeStatusMeta(node) : null
                   return (
                     <button
                       key={addr}
@@ -2124,9 +2125,9 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
                             'Not in node directory — refresh Nodes tab'
                           )}
                         </span>
-                        {node && (
-                          <span className={reachable ? 'text-success' : 'text-text-tertiary'}>
-                            {reachable ? 'Active' : 'Inactive'}
+                        {status && (
+                          <span className={status.textClass} title={status.detail}>
+                            {status.label}
                           </span>
                         )}
                       </div>
@@ -2151,7 +2152,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
 
             <button
               onClick={handleConnect}
-              disabled={!selected || !selected.node || !(selected.node.isActive && selected.node.isHealthy) || !isProtocolSupported(selected.node.type)}
+              disabled={!selected || !selected.node || !isNodeConnectable(selected.node) || !isProtocolSupported(selected.node.type)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Subscribe & Connect

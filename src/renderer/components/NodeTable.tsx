@@ -10,6 +10,7 @@ import Spinner from './Spinner'
 import type { SentNode } from '../types'
 import { COUNTRY_CODES } from '../utils/country-codes'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
+import { nodeStatusMeta } from '../utils/node-status'
 import { protocolMeta } from '../utils/protocols'
 
 function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
@@ -145,7 +146,7 @@ export default function NodeTable() {
             const node = nodes[virtualRow.index]
             if (!node) return null
             const code = COUNTRY_CODES[node.country] || ''
-            const active = node.isActive && node.isHealthy
+            const nodeStatus = nodeStatusMeta(node)
             const isConnected = connectedAddress === node.address
 
             return (
@@ -233,7 +234,10 @@ export default function NodeTable() {
                   })()}
                 </button>
                 <div className="w-[60px] shrink-0 flex justify-center">
-                  <span className={`status-dot ${active ? 'status-dot-active' : 'status-dot-inactive'}`} />
+                  <span
+                    className={`status-dot ${nodeStatus.dotClass}`}
+                    title={`${nodeStatus.label} — ${nodeStatus.detail}`}
+                  />
                 </div>
               </div>
             )

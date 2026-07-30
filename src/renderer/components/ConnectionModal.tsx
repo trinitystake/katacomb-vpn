@@ -7,6 +7,7 @@ import { useNavigation } from '../contexts/NavigationContext'
 import { useConnection } from '../hooks/useConnection'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
+import { nodeStatusMeta, isNodeConnectable } from '../utils/node-status'
 
 interface Props {
   node: SentNode
@@ -21,7 +22,8 @@ function getUdvpnPrice(prices: { denom: string; value: string }[]): { raw: strin
 }
 
 export default function ConnectionModal({ node, onClose }: Props) {
-  const active = node.isActive && node.isHealthy
+  const nodeStatus = nodeStatusMeta(node)
+  const connectable = isNodeConnectable(node)
   const { goToPlansForNode } = useNavigation()
   // Live connection status — when the tunnel is already up to THIS node we show a
   // "Connected" panel + Disconnect instead of the subscribe form (which would create
@@ -328,12 +330,20 @@ export default function ConnectionModal({ node, onClose }: Props) {
           <div className="flex justify-between">
             <span className="text-text-secondary">Status</span>
             <span className="flex items-center gap-2">
-              <span className={`status-dot ${active ? 'status-dot-active' : 'status-dot-inactive'}`} />
-              <span className={active ? 'text-success' : 'text-text-tertiary'}>
-                {active ? 'Active' : 'Inactive'}
-              </span>
+              <span className={`status-dot ${nodeStatus.dotClass}`} />
+              <span className={nodeStatus.textClass}>{nodeStatus.label}</span>
             </span>
           </div>
+          {nodeStatus.state !== 'active' && (
+            <div className="text-text-tertiary text-xs">
+              {nodeStatus.detail}
+              {nodeStatus.state === 'unhealthy' && (
+                <> Reported by the node list, not measured here — the latency below is this
+                client's own probe of the node's API port, so a node can answer that and still
+                fail to build a tunnel.</>
+              )}
+            </div>
+          )}
           <div className="flex justify-between">
             <span className="text-text-secondary">Latency</span>
             {probing ? (
@@ -525,7 +535,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             <button
               onClick={handleSubscribe}
-              disabled={!active || !isProtocolSupported(node.type) || (!matchingAllocation && !selectedPrice)}
+              disabled={!connectable || !isProtocolSupported(node.type) || (!matchingAllocation && !selectedPrice)}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {matchingAllocation ? 'Connect via Plan' : 'Subscribe & Connect'}
@@ -534,6 +544,14 @@ export default function ConnectionModal({ node, onClose }: Props) {
             {!isProtocolSupported(node.type) && (
               <div className="text-xs text-warning text-center pt-1">
                 {protocolMeta(node.type).label} isn't supported by this client yet — this node is shown for filtering only.
+              </div>
+            )}
+
+            {isProtocolSupported(node.type) && !connectable && (
+              <div className="text-xs text-warning text-center pt-1">
+                {nodeStatus.state === 'unhealthy'
+                  ? 'Connecting is disabled because this node is failing the network health check.'
+                  : 'Connecting is disabled because this node is not active on-chain.'}
               </div>
             )}
 

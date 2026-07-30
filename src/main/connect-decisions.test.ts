@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType } from './connect-decisions.ts'
+import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines } from './connect-decisions.ts'
 
 // --- sessionFailureMessage ---
 
@@ -135,4 +135,54 @@ test('serviceTypeToNodeType: unknown or malformed input is null', () => {
   assert.equal(serviceTypeToNodeType(null), null)
   assert.equal(serviceTypeToNodeType({}), null)
   assert.equal(serviceTypeToNodeType(['wireguard']), null)
+})
+
+// --- isDnsProvisionError ---
+
+test('isDnsProvisionError: matches the resolvconf failures wg-quick/awg-quick emit', () => {
+  assert.equal(isDnsProvisionError('/usr/bin/wg-quick: line 32: resolvconf: command not found'), true)
+  assert.equal(isDnsProvisionError('RESOLVCONF: command not found'), true)
+  assert.equal(isDnsProvisionError('sh: 1: resolvconf: not found'), true)
+  assert.equal(isDnsProvisionError('Error: resolvconf is required but missing'), true)
+})
+
+test('isDnsProvisionError: unrelated bring-up failures are not DNS failures', () => {
+  assert.equal(isDnsProvisionError('RTNETLINK answers: Operation not permitted'), false)
+  assert.equal(isDnsProvisionError('wg-quick: `sntl0` already exists'), false)
+  assert.equal(isDnsProvisionError(''), false)
+})
+
+// --- stripDnsLines ---
+
+test('stripDnsLines: removes DNS lines, leaves the rest of the INI byte-identical', () => {
+  const config = [
+    '[Interface]',
+    'PrivateKey = abc123',
+    'Address = 10.0.0.2/32',
+    'DNS = 1.1.1.1, 8.8.8.8',
+    '',
+    '[Peer]',
+    'PublicKey = def456',
+    'Endpoint = 1.2.3.4:51820',
+  ].join('\n')
+  const stripped = stripDnsLines(config)
+  assert.doesNotMatch(stripped, /DNS/)
+  assert.match(stripped, /PrivateKey = abc123/)
+  assert.match(stripped, /Endpoint = 1\.2\.3\.4:51820/)
+  assert.match(stripped, /\[Peer\]/)
+})
+
+test('stripDnsLines: tolerates spacing/case variants and leading whitespace', () => {
+  assert.equal(stripDnsLines('DNS=1.1.1.1\nAddress = 10.0.0.2/32'), 'Address = 10.0.0.2/32')
+  assert.equal(stripDnsLines('  dns   =  1.1.1.1  \nAddress = 10.0.0.2/32'), 'Address = 10.0.0.2/32')
+})
+
+test('stripDnsLines: a config without DNS is returned unchanged', () => {
+  const config = '[Interface]\nPrivateKey = abc\nAddress = 10.0.0.2/32'
+  assert.equal(stripDnsLines(config), config)
+})
+
+test('stripDnsLines: does not eat keys that merely start with DNS', () => {
+  const config = 'DNSSomething = keepme\nDNS = 1.1.1.1'
+  assert.equal(stripDnsLines(config), 'DNSSomething = keepme')
 })

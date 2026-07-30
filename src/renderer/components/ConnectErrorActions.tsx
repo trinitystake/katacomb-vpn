@@ -1,3 +1,5 @@
+import { displayConnectError, isDnsProvisionFailure } from '../utils/connect-errors'
+
 interface Props {
   error: string
   /**
@@ -8,6 +10,11 @@ interface Props {
   paidSessionId: string | null
   onRetryTunnel: () => void
   onStartOver: () => void
+  /**
+   * WireGuard/AmneziaWG only: retry with the tunnel's DNS stripped. Offered when
+   * the failure was wg-quick/awg-quick not finding resolvconf.
+   */
+  onRetryWithoutDns?: () => void
 }
 
 /**
@@ -16,18 +23,43 @@ interface Props {
  * its config until disconnect. Dropping the user back on the subscribe form
  * (the "Start over" path) would buy a second session.
  */
-export default function ConnectErrorActions({ error, paidSessionId, onRetryTunnel, onStartOver }: Props) {
+export default function ConnectErrorActions({
+  error,
+  paidSessionId,
+  onRetryTunnel,
+  onStartOver,
+  onRetryWithoutDns,
+}: Props) {
+  const dnsFailure = isDnsProvisionFailure(error)
+
   return (
     <div className="space-y-3">
       <div className="bg-danger-subtle border border-danger p-3 rounded-md">
-        <p className="text-danger text-sm">{error}</p>
+        <p className="text-danger text-sm">{displayConnectError(error)}</p>
       </div>
+
+      {dnsFailure && onRetryWithoutDns && (
+        <div className="space-y-2">
+          <p className="text-text-tertiary text-xs">
+            This system has no <span className="font-mono">resolvconf</span>, so the tunnel's DNS couldn't be
+            applied. You can connect anyway using your system DNS — but then DNS queries may leave the tunnel
+            and your provider can see which sites you look up.
+          </p>
+          <button onClick={onRetryWithoutDns} className="btn btn-primary w-full">
+            Retry without VPN DNS
+          </button>
+        </div>
+      )}
+
       {paidSessionId ? (
         <>
           <p className="text-text-tertiary text-xs">
             Session {paidSessionId} is already paid for — retrying the connection won't charge you again.
           </p>
-          <button onClick={onRetryTunnel} className="btn btn-primary w-full">
+          <button
+            onClick={onRetryTunnel}
+            className={dnsFailure && onRetryWithoutDns ? 'btn btn-secondary w-full' : 'btn btn-primary w-full'}
+          >
             Retry connection
           </button>
           <button

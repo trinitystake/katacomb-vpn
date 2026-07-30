@@ -1682,18 +1682,18 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
   }
 
   /** Tunnel bring-up alone — main reuses the paid session's stashed config. */
-  async function connectTunnelOnly(protocol: TunnelProtocol) {
+  async function connectTunnelOnly(protocol: TunnelProtocol, dnsFallback = false) {
     setCurrentStep('5/5')
-    await window.api.connectionConnect({ protocol })
+    await window.api.connectionConnect({ protocol, ...(dnsFallback ? { dnsFallback: true } : {}) })
     setTunnelConnected(true)
   }
 
-  async function handleRetryTunnel() {
+  async function handleRetryTunnel(dnsFallback = false) {
     if (!paidProtocol) return
     setConnecting(true)
     setError(null)
     try {
-      await connectTunnelOnly(paidProtocol)
+      await connectTunnelOnly(paidProtocol, dnsFallback)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -1839,7 +1839,8 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
           <ConnectErrorActions
             error={error}
             paidSessionId={paidProtocol ? sessionId : null}
-            onRetryTunnel={handleRetryTunnel}
+            onRetryTunnel={() => handleRetryTunnel()}
+            onRetryWithoutDns={paidProtocol ? () => handleRetryTunnel(true) : undefined}
             onStartOver={() => {
               setError(null)
               setCurrentStep(null)
@@ -1986,18 +1987,18 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
   }
 
   /** Tunnel bring-up alone — main reuses the paid session's stashed config. */
-  async function connectTunnelOnly(protocol: TunnelProtocol) {
+  async function connectTunnelOnly(protocol: TunnelProtocol, dnsFallback = false) {
     setCurrentStep('5/5')
-    await window.api.connectionConnect({ protocol })
+    await window.api.connectionConnect({ protocol, ...(dnsFallback ? { dnsFallback: true } : {}) })
     setTunnelConnected(true)
   }
 
-  async function handleRetryTunnel() {
+  async function handleRetryTunnel(dnsFallback = false) {
     if (!paidProtocol) return
     setConnecting(true)
     setError(null)
     try {
-      await connectTunnelOnly(paidProtocol)
+      await connectTunnelOnly(paidProtocol, dnsFallback)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -2169,7 +2170,8 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
           <ConnectErrorActions
             error={error}
             paidSessionId={paidProtocol ? sessionId : null}
-            onRetryTunnel={handleRetryTunnel}
+            onRetryTunnel={() => handleRetryTunnel()}
+            onRetryWithoutDns={paidProtocol ? () => handleRetryTunnel(true) : undefined}
             onStartOver={() => {
               setError(null)
               setCurrentStep(null)

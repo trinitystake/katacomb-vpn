@@ -20,7 +20,7 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType } from './connect-decisions'
+import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, updateSubscriptionPolicy } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
@@ -1113,6 +1113,7 @@ export function registerIpcHandlers(): void {
   handle(IPC.CONNECTION_CONNECT, async (_event, params: {
     protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
     configString?: string
+    dnsFallback?: boolean
   }) => {
     if (params.protocol !== 'wireguard' && params.protocol !== 'amneziawg' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2') {
       throw new Error('Invalid protocol: must be wireguard, amneziawg, v2ray, xray or hysteria2')
@@ -1120,11 +1121,23 @@ export function registerIpcHandlers(): void {
     if (params.configString !== undefined && typeof params.configString !== 'string') {
       throw new Error('Invalid configString')
     }
+    // User-consented retry after a resolvconf-missing bring-up failure: drop the
+    // tunnel's DNS= lines so wg-quick/awg-quick never touch resolvconf. Only the
+    // root protocols provision DNS this way, and only an explicit user action
+    // sets this — auto-reconnect never silently downgrades DNS.
+    const dnsFallback = params.dnsFallback === true &&
+      (params.protocol === 'wireguard' || params.protocol === 'amneziawg')
     // Serialize tunnel bring-up against disconnect/reconnect so overlapping ops
     // can't orphan a child process (finding M1).
     return withConnectionLock(async () => {
       if (params.protocol === 'wireguard') {
-        if (activeWg) {
+        if (dnsFallback) {
+          // Same config, minus DNS. config-guard still validates it (DNS is an
+          // optional key in the allow-list).
+          const base = params.configString ?? activeWg?.buildConfigString()
+          if (!base) throw new Error('No WireGuard instance or config available')
+          await connectWireGuardFromConfig(stripDnsLines(base))
+        } else if (activeWg) {
           await connectWireGuard(activeWg)
         } else if (params.configString) {
           await connectWireGuardFromConfig(params.configString)
@@ -1148,7 +1161,7 @@ export function registerIpcHandlers(): void {
         if (!awgConfig) {
           throw new Error('No AmneziaWG config available')
         }
-        await connectAmneziaWgFromConfig(awgConfig)
+        await connectAmneziaWgFromConfig(dnsFallback ? stripDnsLines(awgConfig) : awgConfig)
 
         await applyPostConnectSettings('amneziawg')
 

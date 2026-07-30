@@ -84,6 +84,12 @@ export interface SubscriptionSummary {
 export interface ConnectParams {
   protocol: TunnelProtocol
   configString?: string
+  /**
+   * WireGuard/AmneziaWG only: bring the tunnel up with its `DNS =` lines
+   * stripped, for hosts without resolvconf. Explicit user consent only — DNS
+   * queries then use the system resolver, outside the tunnel.
+   */
+  dnsFallback?: boolean
 }
 
 export interface SubscribeResult {

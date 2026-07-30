@@ -84,3 +84,25 @@ export function serviceTypeToNodeType(value: unknown): number | null {
   }
   return SERVICE_TYPE_ALIASES[key] ?? null
 }
+
+/**
+ * Does this bring-up failure come from wg-quick/awg-quick being unable to set
+ * DNS? Both shell out to `resolvconf`, which isn't present on distros without
+ * openresolv or the systemd-resolved shim — the tunnel itself is fine, only the
+ * DNS step failed, so it's worth offering a retry without it.
+ */
+export function isDnsProvisionError(msg: string): boolean {
+  return /resolvconf/i.test(msg)
+}
+
+/**
+ * Drop `DNS = …` lines from a WireGuard/AmneziaWG INI, leaving everything else
+ * untouched. Used for the user-consented retry when resolvconf is missing: the
+ * tunnel comes up, but DNS stays on the system resolver.
+ */
+export function stripDnsLines(config: string): string {
+  return config
+    .split('\n')
+    .filter((line) => !/^\s*DNS\s*=/i.test(line))
+    .join('\n')
+}

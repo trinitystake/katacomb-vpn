@@ -143,19 +143,19 @@ export default function ConnectionModal({ node, onClose }: Props) {
    * (activeWg/activeV2ray/…) until disconnect, so calling this after a failed
    * bring-up reuses that session — no second subscribe tx, no second payment.
    */
-  async function connectTunnelOnly(protocol: TunnelProtocol) {
+  async function connectTunnelOnly(protocol: TunnelProtocol, dnsFallback = false) {
     setCurrentStep('5/5')
-    await window.api.connectionConnect({ protocol })
+    await window.api.connectionConnect({ protocol, ...(dnsFallback ? { dnsFallback: true } : {}) })
     setTunnelConnected(true)
   }
 
   /** Error-state retry when the payment succeeded but the tunnel didn't come up. */
-  async function handleRetryTunnel() {
+  async function handleRetryTunnel(dnsFallback = false) {
     if (!paidProtocol) return
     setConnecting(true)
     setError(null)
     try {
-      await connectTunnelOnly(paidProtocol)
+      await connectTunnelOnly(paidProtocol, dnsFallback)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -518,8 +518,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
           <ConnectErrorActions
             error={error}
             paidSessionId={paidProtocol ? sessionId : null}
-            onRetryTunnel={handleRetryTunnel}
+            onRetryTunnel={() => handleRetryTunnel()}
             onStartOver={resetToSubscribe}
+            onRetryWithoutDns={paidProtocol ? () => handleRetryTunnel(true) : undefined}
           />
         )}
 

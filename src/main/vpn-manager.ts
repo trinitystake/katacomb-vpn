@@ -20,6 +20,8 @@ import { verifyBinaryIntegrity } from './binary-integrity'
 import { runPrivileged } from './privileged'
 import { loadSettings } from './settings'
 import { parseDefaultRoute, v2rayRunArgs, firstIPv4FromGetent } from './vpn-parse'
+import { isDnsProvisionError } from './connect-decisions'
+import { DNS_PROVISION_FAILED } from '../shared/error-markers'
 
 const WG_IFACE = 'sntl0'
 
@@ -238,6 +240,12 @@ async function bringUpWireGuard(configFile: string): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('dismissed') || msg.includes('cancelled') || msg.includes('Not authorized')) {
       throw new Error('Admin authentication was cancelled. WireGuard requires root privileges.')
+    }
+    // Marker prefix so the renderer can offer the DNS-less retry (see
+    // isDnsProvisionError). The tunnel itself is fine — only wg-quick's
+    // resolvconf step failed.
+    if (isDnsProvisionError(msg)) {
+      throw new Error(`${DNS_PROVISION_FAILED}: Failed to bring up WireGuard interface: ${msg}`)
     }
     throw new Error(`Failed to bring up WireGuard interface: ${msg}`)
   }
@@ -588,6 +596,9 @@ async function bringUpAmneziaWg(configFile: string, binDir: string): Promise<voi
       throw new Error(
         'The Sentinel privileged service is out of date. Restart it (sudo systemctl restart sentinel-dvpn-daemon) or reboot, then reconnect.'
       )
+    }
+    if (isDnsProvisionError(msg)) {
+      throw new Error(`${DNS_PROVISION_FAILED}: Failed to bring up AmneziaWG interface: ${msg}`)
     }
     throw new Error(`Failed to bring up AmneziaWG interface: ${msg}`)
   }

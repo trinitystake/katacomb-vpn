@@ -24,6 +24,12 @@ function getUdvpnPrice(prices: { denom: string; value: string }[]): { raw: strin
 export default function ConnectionModal({ node, onClose }: Props) {
   const nodeStatus = nodeStatusMeta(node)
   const connectable = isNodeConnectable(node)
+  // The node list's health flag is third-party and can be hours stale, so an
+  // active-but-unhealthy node may be tried on explicit acknowledgement — a failed
+  // handshake is refunded (establishSessionOrRefund), so it costs a wait, not funds.
+  // An INACTIVE node is not overridable: the chain itself rejects those sessions.
+  const canOverrideHealth = nodeStatus.state === 'unhealthy'
+  const [healthAcknowledged, setHealthAcknowledged] = useState(false)
   const { goToPlansForNode } = useNavigation()
   // Live connection status — when the tunnel is already up to THIS node we show a
   // "Connected" panel + Disconnect instead of the subscribe form (which would create
@@ -533,9 +539,36 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
             )}
 
+            {/* Gate above the action it unlocks. */}
+            {isProtocolSupported(node.type) && !connectable && canOverrideHealth && (
+              <div className="bg-warning-subtle border border-warning p-3 rounded-md space-y-2">
+                <p className="text-warning text-xs">
+                  This node last failed the network health check, so connecting is disabled by
+                  default. That check runs elsewhere and can be hours out of date — the node may
+                  well be working.
+                </p>
+                <label className="flex items-start gap-2 cursor-pointer text-xs text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={healthAcknowledged}
+                    onChange={(e) => setHealthAcknowledged(e.target.checked)}
+                    className="accent-accent mt-0.5"
+                  />
+                  <span>
+                    Try it anyway. If the handshake fails, the session is cancelled and refunded
+                    automatically.
+                  </span>
+                </label>
+              </div>
+            )}
+
             <button
               onClick={handleSubscribe}
-              disabled={!connectable || !isProtocolSupported(node.type) || (!matchingAllocation && !selectedPrice)}
+              disabled={
+                !(connectable || (canOverrideHealth && healthAcknowledged)) ||
+                !isProtocolSupported(node.type) ||
+                (!matchingAllocation && !selectedPrice)
+              }
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {matchingAllocation ? 'Connect via Plan' : 'Subscribe & Connect'}
@@ -547,11 +580,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
             )}
 
-            {isProtocolSupported(node.type) && !connectable && (
+            {isProtocolSupported(node.type) && !connectable && !canOverrideHealth && (
               <div className="text-xs text-warning text-center pt-1">
-                {nodeStatus.state === 'unhealthy'
-                  ? 'Connecting is disabled because this node is failing the network health check.'
-                  : 'Connecting is disabled because this node is not active on-chain.'}
+                Connecting is disabled because this node is not active on-chain.
               </div>
             )}
 

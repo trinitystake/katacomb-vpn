@@ -63,6 +63,11 @@ export const IPC = {
   PLAN_NODES: 'plan:nodes',
   PLAN_LIST_FOR_NODE: 'plan:list-for-node',
 
+  // Subscription management (cancel / auto-renewal policy)
+  SUBSCRIPTION_LIST: 'subscription:list',
+  SUBSCRIPTION_CANCEL: 'subscription:cancel',
+  SUBSCRIPTION_UPDATE_POLICY: 'subscription:update-policy',
+
   // Providers
   PROVIDER_GET: 'provider:get',
   PROVIDER_LIST: 'provider:list',

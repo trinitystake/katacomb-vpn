@@ -69,6 +69,18 @@ export interface ReconnectParams {
 
 export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
 
+/** A subscription as listed by the Subscriptions manager. */
+export interface SubscriptionSummary {
+  id: string
+  /** '0' = a node (per-GB/hour) subscription; otherwise the plan it belongs to. */
+  planId: string
+  status: number
+  /** sentinel.types.v1.RenewalPricePolicy — 0 = never renew, 7 = always. */
+  renewalPricePolicy: number
+  startAt: string | null
+  inactiveAt: string | null
+}
+
 export interface ConnectParams {
   protocol: TunnelProtocol
   configString?: string
@@ -266,6 +278,7 @@ export interface ElectronAPI {
     nodeCountry: string
     nodeType: number
     apiField: string
+    renewalPolicy?: number
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planStartSessionFromSub: (params: {
     subscriptionId: string
@@ -277,6 +290,9 @@ export interface ElectronAPI {
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planNodes: (planId: string) => Promise<string[]>
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
+  subscriptionList: () => Promise<SubscriptionSummary[]>
+  subscriptionCancel: (subscriptionId: string) => Promise<void>
+  subscriptionUpdatePolicy: (subscriptionId: string, policy: number) => Promise<void>
   onPlanDiscoverProgress: (callback: (progress: DiscoverProgress) => void) => () => void
 
   providerGet: (address: string) => Promise<ProviderInfo | null>

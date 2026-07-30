@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePlans } from '../hooks/usePlans'
 import { useConnection } from '../hooks/useConnection'
 import { useNavigation } from '../contexts/NavigationContext'
-import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode, TunnelProtocol } from '../types'
+import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode, SubscriptionSummary, TunnelProtocol } from '../types'
 import ConnectErrorActions from './ConnectErrorActions'
 import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
@@ -970,6 +970,11 @@ export default function PlanDiscovery() {
         </details>
       )}
 
+      {/* Manage subscriptions: cancel, or change the auto-renewal policy. Covers
+          node (per-GB/hour) subscriptions too, which the allocations footer above
+          — plan-only, and about connecting — never showed. */}
+      <SubscriptionManager tunnelUp={tunnelUp} activeSessionId={connStatus.sessionId ?? null} />
+
       {connectingAllocation && (
         <AllocationConnectModal
           allocation={connectingAllocation}
@@ -987,6 +992,152 @@ export default function PlanDiscovery() {
         />
       )}
     </div>
+  )
+}
+
+// sentinel.types.v1.RenewalPricePolicy. The enum has eight comparison variants;
+// these are the three that make sense to a user. 0 (UNSPECIFIED) is the hub's own
+// "no renewal" marker — Subscription.RenewalAt() returns the zero time for it, and
+// cancelling a subscription sets it to 0.
+const RENEWAL_POLICY_OPTIONS: { value: number; label: string }[] = [
+  { value: 7, label: 'Always renew' },
+  { value: 2, label: 'Renew if price ≤ current' },
+  { value: 0, label: "Don't renew" },
+]
+
+function renewalPolicyLabel(policy: number): string {
+  return RENEWAL_POLICY_OPTIONS.find((o) => o.value === policy)?.label ?? `Policy ${policy}`
+}
+
+function subscriptionStatusLabel(status: number): string {
+  if (status === 1) return 'Active'
+  if (status === 2) return 'Ending'
+  if (status === 3) return 'Inactive'
+  return `Status ${status}`
+}
+
+/**
+ * Cancel / renewal-policy management for every subscription the wallet owns.
+ * Both actions are on-chain txs, so each is confirmed first (same native-confirm
+ * convention ActiveSessions uses for ending a session).
+ */
+function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean; activeSessionId: string | null }) {
+  const [subs, setSubs] = useState<SubscriptionSummary[] | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    window.api
+      .subscriptionList()
+      .then(setSubs)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load subscriptions'))
+  }, [])
+
+  useEffect(() => {
+    // RPC is unreachable through our own tunnel; main returns [] while connected.
+    if (!tunnelUp) load()
+  }, [tunnelUp, load])
+
+  async function handleCancel(sub: SubscriptionSummary) {
+    if (!confirm(
+      `Cancel subscription #${sub.id}?\n\nIt stops renewing and ends at the close of the current period; ` +
+      `any sessions running under it will end. This is an on-chain transaction and cannot be undone.`
+    )) return
+
+    setBusyId(sub.id)
+    setError(null)
+    try {
+      await window.api.subscriptionCancel(sub.id)
+      // If the live tunnel is running on a session of this subscription, it's
+      // about to stop working — offer to tear it down now.
+      const sessions = await window.api.walletSessions().catch(() => [])
+      const activeBelongs = sessions.some((s) => s.id === activeSessionId && s.subscriptionId === sub.id)
+      if (activeBelongs && confirm('Your active VPN session belongs to that subscription. Disconnect now?')) {
+        await window.api.connectionDisconnect()
+      }
+      load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Cancel failed')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function handlePolicyChange(sub: SubscriptionSummary, policy: number) {
+    if (policy === sub.renewalPricePolicy) return
+    if (!confirm(`Set subscription #${sub.id} to "${renewalPolicyLabel(policy)}"?\n\nThis is an on-chain transaction.`)) {
+      load() // reset the select back to the stored value
+      return
+    }
+    setBusyId(sub.id)
+    setError(null)
+    try {
+      await window.api.subscriptionUpdatePolicy(sub.id, policy)
+      load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Update failed')
+      load()
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  if (tunnelUp || !subs || subs.length === 0) return null
+
+  return (
+    <details className="border-t border-border shrink-0 bg-bg-secondary">
+      <summary className="px-5 py-2 cursor-pointer text-text-secondary text-xs font-medium uppercase tracking-wide hover:text-text-primary list-none flex items-center justify-between">
+        <span>Manage subscriptions ({subs.length})</span>
+        <span className="text-text-tertiary text-[10px]">▼</span>
+      </summary>
+      <div className="max-h-[220px] overflow-y-auto px-5 pb-3 space-y-1.5">
+        {error && <p className="text-danger text-xs">{error}</p>}
+        {subs.map((sub) => (
+          <div
+            key={sub.id}
+            className="border border-border bg-bg-tertiary rounded-md px-3 py-2 text-xs flex items-center gap-3"
+          >
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-3">
+                <span className="text-accent font-mono">sub #{sub.id}</span>
+                <span className="text-text-secondary font-mono">
+                  {sub.planId === '0' ? 'node' : `plan #${sub.planId}`}
+                </span>
+                <span className="text-text-secondary">{subscriptionStatusLabel(sub.status)}</span>
+              </div>
+              <div className="text-text-tertiary text-xs mt-1">
+                {sub.inactiveAt ? `Ends ${new Date(sub.inactiveAt).toLocaleString()}` : 'No end date'}
+                {' · '}
+                {renewalPolicyLabel(sub.renewalPricePolicy)}
+              </div>
+            </div>
+            <select
+              value={sub.renewalPricePolicy}
+              onChange={(e) => handlePolicyChange(sub, parseInt(e.target.value, 10))}
+              disabled={sub.status !== 1 || busyId === sub.id}
+              title={sub.status === 1 ? 'Auto-renewal policy' : 'Only active subscriptions can be updated'}
+              className="bg-bg-secondary border border-border text-text-primary text-xs px-2 py-1 rounded-sm focus:outline-none focus:border-border-focus shrink-0 disabled:opacity-30"
+            >
+              {RENEWAL_POLICY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+              {!RENEWAL_POLICY_OPTIONS.some((o) => o.value === sub.renewalPricePolicy) && (
+                <option value={sub.renewalPricePolicy}>{renewalPolicyLabel(sub.renewalPricePolicy)}</option>
+              )}
+            </select>
+            <button
+              type="button"
+              onClick={() => handleCancel(sub)}
+              disabled={sub.status !== 1 || busyId === sub.id}
+              className="btn btn-danger text-xs py-1.5 px-3 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+              title={sub.status === 1 ? 'Cancel this subscription on-chain' : 'Only active subscriptions can be cancelled'}
+            >
+              {busyId === sub.id ? '…' : 'Cancel'}
+            </button>
+          </div>
+        ))}
+      </div>
+    </details>
   )
 }
 
@@ -1754,6 +1905,9 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
   // Protocol of the session we already paid for — lets a failed bring-up be
   // retried against it instead of subscribing (and paying) a second time.
   const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
+  // Auto-renewal policy for the subscription this creates. 7 (always) is what the
+  // app used to hardcode, so it stays the default.
+  const [renewalPolicy, setRenewalPolicy] = useState(7)
   const [disconnecting, setDisconnecting] = useState(false)
 
   useEffect(() => {
@@ -1813,6 +1967,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
       const res = await window.api.planSubscribe({
         planId: plan.id,
         denom: 'udvpn',
+        renewalPolicy,
         nodeAddress: selected.node.address,
         nodeMoniker: selected.node.moniker,
         nodeCountry: selected.node.country,
@@ -1979,6 +2134,19 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
                 })}
               </div>
             )}
+
+            <label className="flex items-center justify-between gap-3 text-xs text-text-secondary">
+              <span>When this subscription expires</span>
+              <select
+                value={renewalPolicy}
+                onChange={(e) => setRenewalPolicy(parseInt(e.target.value, 10))}
+                className="bg-bg-tertiary border border-border text-text-primary text-xs px-2 py-1 rounded-sm focus:outline-none focus:border-border-focus"
+              >
+                {RENEWAL_POLICY_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
 
             <button
               onClick={handleConnect}

@@ -229,8 +229,117 @@ type SentinelSubscription = {
   accAddress: string
   planId: Long
   status: number
+  renewalPricePolicy?: number
   inactiveAt?: Date
   startAt?: Date
+}
+
+export type SubscriptionInfo = {
+  id: string
+  /** '0' for a node (per-GB/hour) subscription; otherwise the plan it belongs to. */
+  planId: string
+  status: number
+  /**
+   * sentinel.types.v1.RenewalPricePolicy. 0 (UNSPECIFIED) means "never renew" —
+   * the hub's Subscription.RenewalAt() returns the zero time for it, so the
+   * subscription is never indexed for renewal. 7 (ALWAYS) renews at any price.
+   */
+  renewalPricePolicy: number
+  startAt: string | null
+  inactiveAt: string | null
+}
+
+/**
+ * Every subscription this wallet owns — plan-based AND node (per-GB/hour) ones,
+ * which is what makes this different from queryPlanAllocations (plan-only, and
+ * its callers depend on that filter).
+ */
+export async function querySubscriptions(walletAddress: string): Promise<SubscriptionInfo[]> {
+  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  try {
+    const resp = await client.sentinelQuery?.subscription.subscriptionsForAccount(walletAddress, {
+      key: new Uint8Array(),
+      offset: Long.fromNumber(0, true),
+      limit: Long.fromNumber(50, true),
+      countTotal: false,
+      reverse: false,
+    })
+    const subs = (resp?.subscriptions || []) as unknown as SentinelSubscription[]
+    return subs.map((s) => ({
+      id: s.id.toString(),
+      planId: s.planId ? s.planId.toString() : '0',
+      status: s.status,
+      renewalPricePolicy: s.renewalPricePolicy ?? 0,
+      startAt: s.startAt ? s.startAt.toISOString() : null,
+      inactiveAt: s.inactiveAt ? s.inactiveAt.toISOString() : null,
+    }))
+  } finally {
+    client.disconnect()
+  }
+}
+
+/**
+ * Cancel a subscription. On-chain this marks it inactive-pending and clears its
+ * renewal policy — it stops renewing and its sessions end; it is NOT an instant
+ * refund. Only an ACTIVE subscription can be cancelled (the hub rejects others).
+ */
+export async function cancelSubscription(params: {
+  wallet: DirectSecp256k1HdWallet
+  address: string
+  subscriptionId: string
+}): Promise<void> {
+  const { wallet, address, subscriptionId } = params
+  const client = await withTimeout(
+    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
+  try {
+    const tx = await broadcastOrTimeout(
+      client.subscriptionCancel({
+        from: address,
+        id: Long.fromString(subscriptionId, true),
+        memo: 'sentinel-dvpn-app: cancel subscription',
+      } as Parameters<typeof client.subscriptionCancel>[0]),
+      TX_TIMEOUT_MESSAGE,
+    )
+    if (tx.code !== 0) {
+      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
+    }
+  } finally {
+    client.disconnect()
+  }
+}
+
+/** Change a subscription's auto-renewal price policy (0 = never renew). */
+export async function updateSubscriptionPolicy(params: {
+  wallet: DirectSecp256k1HdWallet
+  address: string
+  subscriptionId: string
+  policy: number
+}): Promise<void> {
+  const { wallet, address, subscriptionId, policy } = params
+  const client = await withTimeout(
+    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
+  try {
+    const tx = await broadcastOrTimeout(
+      client.subscriptionUpdate({
+        from: address,
+        id: Long.fromString(subscriptionId, true),
+        renewalPricePolicy: policy as RenewalPricePolicy,
+        memo: 'sentinel-dvpn-app: update renewal policy',
+      } as Parameters<typeof client.subscriptionUpdate>[0]),
+      TX_TIMEOUT_MESSAGE,
+    )
+    if (tx.code !== 0) {
+      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
+    }
+  } finally {
+    client.disconnect()
+  }
 }
 
 export async function queryPlanAllocations(walletAddress: string): Promise<PlanAllocationInfo[]> {
@@ -329,8 +438,11 @@ export async function subscribeToPlan(params: {
   planId: string
   denom: string
   nodeAddress: string
+  /** sentinel.types.v1.RenewalPricePolicy; defaults to ALWAYS (previous behavior). */
+  renewalPricePolicy?: number
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, planId, denom, nodeAddress } = params
+  const renewalPricePolicy = params.renewalPricePolicy ?? RenewalPricePolicy.RENEWAL_PRICE_POLICY_ALWAYS
   const client = await withTimeout(
     SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
     RPC_CONNECT_TIMEOUT_MS,
@@ -342,7 +454,7 @@ export async function subscribeToPlan(params: {
         from: address,
         id: Long.fromString(planId, true),
         denom,
-        renewalPricePolicy: RenewalPricePolicy.RENEWAL_PRICE_POLICY_ALWAYS,
+        renewalPricePolicy: renewalPricePolicy as RenewalPricePolicy,
         nodeAddress,
         memo: 'sentinel-dvpn-app: plan start session',
       } as Parameters<typeof client.planStartSession>[0]),

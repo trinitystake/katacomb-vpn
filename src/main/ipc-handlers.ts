@@ -21,7 +21,7 @@ import {
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, updateSubscriptionPolicy } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, type AppSettings } from './settings'
@@ -1466,10 +1466,12 @@ export function registerIpcHandlers(): void {
     nodeCountry: string
     nodeType: number
     apiField: string
+    renewalPolicy?: number
   }) => {
     assertString(params.planId, 'planId')
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     assertString(params.denom, 'denom')
+    if (params.renewalPolicy !== undefined) assertNumber(params.renewalPolicy, 'renewalPolicy', 0, 7)
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
@@ -1489,6 +1491,7 @@ export function registerIpcHandlers(): void {
       planId: params.planId,
       denom: params.denom,
       nodeAddress: params.nodeAddress,
+      renewalPricePolicy: params.renewalPolicy,
     })
 
     const result = await establishSessionOrRefund({
@@ -1586,6 +1589,36 @@ export function registerIpcHandlers(): void {
     } catch {
       return []
     }
+  })
+
+  handle(IPC.SUBSCRIPTION_LIST, async () => {
+    const address = getAddress()
+    if (!address) throw new Error('Wallet not loaded')
+    // RPC is unreachable through the tunnel; there's no cache for this list, so
+    // the UI hides the section while connected rather than showing stale rows.
+    if (isVpnActive()) return []
+    return await querySubscriptions(address)
+  })
+
+  handle(IPC.SUBSCRIPTION_CANCEL, async (_event, params: { subscriptionId: string }) => {
+    assertString(params?.subscriptionId, 'subscriptionId')
+    if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    const wallet = getWallet()
+    const address = getAddress()
+    if (!wallet || !address) throw new Error('Wallet not loaded')
+    await cancelSubscription({ wallet, address, subscriptionId: params.subscriptionId })
+  })
+
+  handle(IPC.SUBSCRIPTION_UPDATE_POLICY, async (_event, params: { subscriptionId: string; policy: number }) => {
+    assertString(params?.subscriptionId, 'subscriptionId')
+    if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    // RenewalPricePolicy enum range (0 UNSPECIFIED … 7 ALWAYS); the hub rejects
+    // anything outside it, so don't waste a tx finding out.
+    assertNumber(params.policy, 'policy', 0, 7)
+    const wallet = getWallet()
+    const address = getAddress()
+    if (!wallet || !address) throw new Error('Wallet not loaded')
+    await updateSubscriptionPolicy({ wallet, address, subscriptionId: params.subscriptionId, policy: params.policy })
   })
 
   handle(IPC.PROVIDER_GET, async (_event, params: { address: string }) => {

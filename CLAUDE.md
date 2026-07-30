@@ -160,7 +160,9 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 - Hooks in `src/renderer/hooks/`: `useWallet` (balance polling 300s), `useNodes` (node fetch + filter/sort, 60s refresh), `useConnection` (status polling 3s). Polling intervals are hardcoded per-hook — not user-tunable.
 - Node table uses `@tanstack/react-virtual` for virtualized rendering (5000+ nodes).
 - BIP-39 validation uses direct JSON wordlist import + Set lookup (not `bip39.validateMnemonic` — that function's dynamic require fails in Vite's renderer bundle).
-- Cypherpunk dark theme: bg `#0a0a0f`, accent green `#00ff88`.
+- **Dark-only** — bg `#0f172a`, accent `#60a5fa`. There is deliberately no theme switch:
+  `tokens.css` `:root` holds the only semantic tokens, and components read those (never
+  primitives, never a `dark:` variant). Don't reintroduce a `.dark` selector.
 - `@` alias maps to `src/renderer/`.
 - Types for renderer in `src/renderer/types/index.ts` — includes `ElectronAPI` interface matching preload bridge and `declare global` for `window.api`.
 

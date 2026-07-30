@@ -1,6 +1,10 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: ['./src/renderer/**/*.{html,tsx,ts}'],
+  // The app is dark-only and nothing ever sets a `.dark` class, so this makes the
+  // `dark:` variant permanently unreachable. Keep it — deleting the line falls back
+  // to Tailwind's `media` default, which would let a stray `dark:` utility follow the
+  // OS preference and reintroduce a light/dark split.
   darkMode: 'class',
   theme: {
     extend: {

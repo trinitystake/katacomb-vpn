@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { WalletEntry, AppSettings, PublicRpc } from '../types'
 import Toggle from './Toggle'
-import ThemeToggle from './ThemeToggle'
 import Spinner from './Spinner'
 import { useSettings } from '../contexts/SettingsContext'
 
@@ -207,20 +206,6 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {tab === 'general' && (
             <>
-              {/* Appearance */}
-              <div className="space-y-3">
-                <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
-                  Appearance
-                </label>
-                <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
-                  <div>
-                    <span className="text-text-primary text-sm">Theme</span>
-                    <p className="text-text-tertiary text-xs mt-0.5">Light, system, or dark color scheme</p>
-                  </div>
-                  <ThemeToggle />
-                </div>
-              </div>
-
               {/* VPN Security */}
               <div className="space-y-3">
                 <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">

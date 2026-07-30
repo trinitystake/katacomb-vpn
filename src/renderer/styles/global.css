@@ -90,16 +90,6 @@
     background-color: var(--color-warning);
     animation: pulse-subtle 1.5s ease-in-out infinite;
   }
-
-  /* App mark (AppLogo.tsx). Painted from the theme tokens so the logo tracks
-     light/dark with the rest of the UI instead of being baked into an image. */
-  .logo-mark {
-    fill: var(--color-text-primary);
-  }
-
-  .logo-accent {
-    fill: var(--color-accent);
-  }
 }
 
 @keyframes pulse-subtle {

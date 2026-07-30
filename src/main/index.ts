@@ -245,6 +245,17 @@ function ensurePolkitSetup(): void {
   }
 }
 
+// Single-instance lock. A second instance would race the first over the sntl0
+// interface, the daemon socket, the kill-switch chain and the settings/wallet
+// files. The loser exits at once and focuses the winner's window.
+// app.exit (not app.quit) on purpose: app.quit() fires our before-quit handler,
+// which tears down the *shared* tunnel — the primary's connection must survive.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0)
+} else {
+  app.on('second-instance', () => showWindow())
+}
+
 app.whenReady().then(() => {
   checkSystemDeps()
   // The root daemon (deb install) handles privileged ops password-free, so the

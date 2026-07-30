@@ -52,3 +52,57 @@ export function decideReconnect(opts: {
 export function backoffDelayMs(attempt: number): number {
   return Math.min(2 ** attempt * 1000, 60000)
 }
+
+/** Node `/info` service_type spellings → our numeric protocol tag. */
+const SERVICE_TYPE_ALIASES: Record<string, number> = {
+  wireguard: 1,
+  v2ray: 2,
+  openvpn: 3,
+  xray: 4,
+  amneziawg: 5,
+  awg: 5,
+  hysteria2: 6,
+  hy2: 6,
+}
+
+/**
+ * Normalize a node's self-reported `service_type` to the numeric protocol tag the
+ * node list uses (1=WireGuard … 6=Hysteria2). v9 nodes report strings and spell
+ * them inconsistently (`amnezia_wg`, `AmneziaWG`, `hysteria_2`), older ones report
+ * the number. Returns null for anything we don't recognise — the caller treats
+ * that as "can't verify", never as a match.
+ */
+export function serviceTypeToNodeType(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 1 && value <= 6 ? value : null
+  }
+  if (typeof value !== 'string') return null
+  const key = value.toLowerCase().replace(/[\s_-]/g, '')
+  if (/^\d+$/.test(key)) {
+    const n = parseInt(key, 10)
+    return n >= 1 && n <= 6 ? n : null
+  }
+  return SERVICE_TYPE_ALIASES[key] ?? null
+}
+
+/**
+ * Does this bring-up failure come from wg-quick/awg-quick being unable to set
+ * DNS? Both shell out to `resolvconf`, which isn't present on distros without
+ * openresolv or the systemd-resolved shim — the tunnel itself is fine, only the
+ * DNS step failed, so it's worth offering a retry without it.
+ */
+export function isDnsProvisionError(msg: string): boolean {
+  return /resolvconf/i.test(msg)
+}
+
+/**
+ * Drop `DNS = …` lines from a WireGuard/AmneziaWG INI, leaving everything else
+ * untouched. Used for the user-consented retry when resolvconf is missing: the
+ * tunnel comes up, but DNS stays on the system resolver.
+ */
+export function stripDnsLines(config: string): string {
+  return config
+    .split('\n')
+    .filter((line) => !/^\s*DNS\s*=/i.test(line))
+    .join('\n')
+}

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs } from './connect-decisions.ts'
+import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines } from './connect-decisions.ts'
 
 // --- sessionFailureMessage ---
 
@@ -93,4 +93,96 @@ test('backoffDelayMs: exponential growth', () => {
 test('backoffDelayMs: capped at 60000', () => {
   assert.equal(backoffDelayMs(6), 60000)
   assert.equal(backoffDelayMs(10), 60000)
+})
+
+// --- serviceTypeToNodeType ---
+
+test('serviceTypeToNodeType: canonical names', () => {
+  assert.equal(serviceTypeToNodeType('wireguard'), 1)
+  assert.equal(serviceTypeToNodeType('v2ray'), 2)
+  assert.equal(serviceTypeToNodeType('openvpn'), 3)
+  assert.equal(serviceTypeToNodeType('xray'), 4)
+  assert.equal(serviceTypeToNodeType('amneziawg'), 5)
+  assert.equal(serviceTypeToNodeType('hysteria2'), 6)
+})
+
+test('serviceTypeToNodeType: separator and case variants nodes actually report', () => {
+  assert.equal(serviceTypeToNodeType('WireGuard'), 1)
+  assert.equal(serviceTypeToNodeType('wire_guard'), 1)
+  assert.equal(serviceTypeToNodeType('V2Ray'), 2)
+  assert.equal(serviceTypeToNodeType('open-vpn'), 3)
+  assert.equal(serviceTypeToNodeType('amnezia_wg'), 5)
+  assert.equal(serviceTypeToNodeType('Amnezia WG'), 5)
+  assert.equal(serviceTypeToNodeType('awg'), 5)
+  assert.equal(serviceTypeToNodeType('HYSTERIA2'), 6)
+  assert.equal(serviceTypeToNodeType('hysteria_2'), 6)
+  assert.equal(serviceTypeToNodeType('hy2'), 6)
+})
+
+test('serviceTypeToNodeType: numeric passthrough only inside 1-6', () => {
+  assert.equal(serviceTypeToNodeType(1), 1)
+  assert.equal(serviceTypeToNodeType(6), 6)
+  assert.equal(serviceTypeToNodeType('4'), 4)
+  assert.equal(serviceTypeToNodeType(0), null)
+  assert.equal(serviceTypeToNodeType(7), null)
+  assert.equal(serviceTypeToNodeType(1.5), null)
+})
+
+test('serviceTypeToNodeType: unknown or malformed input is null', () => {
+  assert.equal(serviceTypeToNodeType('shadowsocks'), null)
+  assert.equal(serviceTypeToNodeType(''), null)
+  assert.equal(serviceTypeToNodeType(undefined), null)
+  assert.equal(serviceTypeToNodeType(null), null)
+  assert.equal(serviceTypeToNodeType({}), null)
+  assert.equal(serviceTypeToNodeType(['wireguard']), null)
+})
+
+// --- isDnsProvisionError ---
+
+test('isDnsProvisionError: matches the resolvconf failures wg-quick/awg-quick emit', () => {
+  assert.equal(isDnsProvisionError('/usr/bin/wg-quick: line 32: resolvconf: command not found'), true)
+  assert.equal(isDnsProvisionError('RESOLVCONF: command not found'), true)
+  assert.equal(isDnsProvisionError('sh: 1: resolvconf: not found'), true)
+  assert.equal(isDnsProvisionError('Error: resolvconf is required but missing'), true)
+})
+
+test('isDnsProvisionError: unrelated bring-up failures are not DNS failures', () => {
+  assert.equal(isDnsProvisionError('RTNETLINK answers: Operation not permitted'), false)
+  assert.equal(isDnsProvisionError('wg-quick: `sntl0` already exists'), false)
+  assert.equal(isDnsProvisionError(''), false)
+})
+
+// --- stripDnsLines ---
+
+test('stripDnsLines: removes DNS lines, leaves the rest of the INI byte-identical', () => {
+  const config = [
+    '[Interface]',
+    'PrivateKey = abc123',
+    'Address = 10.0.0.2/32',
+    'DNS = 1.1.1.1, 8.8.8.8',
+    '',
+    '[Peer]',
+    'PublicKey = def456',
+    'Endpoint = 1.2.3.4:51820',
+  ].join('\n')
+  const stripped = stripDnsLines(config)
+  assert.doesNotMatch(stripped, /DNS/)
+  assert.match(stripped, /PrivateKey = abc123/)
+  assert.match(stripped, /Endpoint = 1\.2\.3\.4:51820/)
+  assert.match(stripped, /\[Peer\]/)
+})
+
+test('stripDnsLines: tolerates spacing/case variants and leading whitespace', () => {
+  assert.equal(stripDnsLines('DNS=1.1.1.1\nAddress = 10.0.0.2/32'), 'Address = 10.0.0.2/32')
+  assert.equal(stripDnsLines('  dns   =  1.1.1.1  \nAddress = 10.0.0.2/32'), 'Address = 10.0.0.2/32')
+})
+
+test('stripDnsLines: a config without DNS is returned unchanged', () => {
+  const config = '[Interface]\nPrivateKey = abc\nAddress = 10.0.0.2/32'
+  assert.equal(stripDnsLines(config), config)
+})
+
+test('stripDnsLines: does not eat keys that merely start with DNS', () => {
+  const config = 'DNSSomething = keepme\nDNS = 1.1.1.1'
+  assert.equal(stripDnsLines(config), 'DNSSomething = keepme')
 })

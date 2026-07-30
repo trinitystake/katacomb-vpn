@@ -67,9 +67,34 @@ export interface ReconnectParams {
   sessionId: string
 }
 
+export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+
+/** A subscription as listed by the Subscriptions manager. */
+export interface SubscriptionSummary {
+  id: string
+  /** '0' = a node (per-GB/hour) subscription; otherwise the plan it belongs to. */
+  planId: string
+  status: number
+  /** sentinel.types.v1.RenewalPricePolicy — 0 = never renew, 7 = always. */
+  renewalPricePolicy: number
+  startAt: string | null
+  inactiveAt: string | null
+}
+
 export interface ConnectParams {
-  protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
+  protocol: TunnelProtocol
+  /**
+   * 'tunnel' (default) routes the whole device. 'proxy' is v2ray/xray/hysteria2
+   * only: just their local SOCKS5 listener, no TUN and no root.
+   */
+  mode?: 'tunnel' | 'proxy'
   configString?: string
+  /**
+   * WireGuard/AmneziaWG only: bring the tunnel up with its `DNS =` lines
+   * stripped, for hosts without resolvconf. Explicit user consent only — DNS
+   * queries then use the system resolver, outside the tunnel.
+   */
+  dnsFallback?: boolean
 }
 
 export interface SubscribeResult {
@@ -112,6 +137,10 @@ export interface ConnectionStatus {
   v2raySummary?: string
   killSwitchFailed?: boolean
   killSwitchTeardownFailed?: boolean
+  /** Connected in local-proxy mode: SOCKS5 only, system routing untouched. */
+  proxyMode?: boolean
+  /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */
+  socksAddr?: string
   sessionId?: string
   error?: string
   reconnectAttempt?: number
@@ -264,6 +293,7 @@ export interface ElectronAPI {
     nodeCountry: string
     nodeType: number
     apiField: string
+    renewalPolicy?: number
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planStartSessionFromSub: (params: {
     subscriptionId: string
@@ -275,6 +305,9 @@ export interface ElectronAPI {
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planNodes: (planId: string) => Promise<string[]>
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
+  subscriptionList: () => Promise<SubscriptionSummary[]>
+  subscriptionCancel: (subscriptionId: string) => Promise<void>
+  subscriptionUpdatePolicy: (subscriptionId: string, policy: number) => Promise<void>
   onPlanDiscoverProgress: (callback: (progress: DiscoverProgress) => void) => () => void
 
   providerGet: (address: string) => Promise<ProviderInfo | null>

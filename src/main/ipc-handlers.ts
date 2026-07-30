@@ -20,8 +20,8 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './sentinel-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription } from './plan-service'
+import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
+import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, updateSubscriptionPolicy } from './plan-service'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, type AppSettings } from './settings'
@@ -45,12 +45,13 @@ import {
   isWireGuardUp,
   binaryExists,
   isBinaryAvailable,
+  protocolRuntimeError,
 } from './vpn-manager'
-import { runPrivileged } from './privileged'
+import { runPrivileged, canEscalatePrivileges } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes } from './traffic-stats'
-import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults } from './node-tester'
+import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
@@ -61,6 +62,8 @@ const RECONNECT_MAX_ATTEMPTS = 5
 // Bound the refund (endSession) so a slow RPC during the failure path can't itself
 // hang the connect flow — see establishSessionOrRefund (finding H1).
 const REFUND_TIMEOUT_MS = 10_000
+// Bound the pre-payment protocol check — it blocks the connect button.
+const NODE_PROTOCOL_CHECK_TIMEOUT_MS = 10_000
 // The kill switch drops any DNS that isn't tunnel-routed, so when it's on we
 // need a resolver reachable through the tunnel. A 'system' resolver is usually a
 // LAN/systemd-resolved address that won't route through the tunnel — fall back to
@@ -157,6 +160,10 @@ function withConnectionLock<T>(fn: () => Promise<T>): Promise<T> {
 // (finding L8 — the two are not duplication, so they're named apart, not merged).
 // V2Ray has a process exit callback; WireGuard has no process to watch, so we poll.
 let desiredProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | null = null
+// Tunnel vs. local-proxy for the current session — a runtime choice, so it is
+// deliberately NOT persisted in SavedSessionConfig (a session-tab reconnect is
+// always full-tunnel). Auto-reconnect replays whatever the user picked.
+let desiredMode: 'tunnel' | 'proxy' = 'tunnel'
 let wgMonitorTimer: ReturnType<typeof setInterval> | null = null
 
 function startWireGuardMonitor(): void {
@@ -251,6 +258,60 @@ function describeHandshakeError(err: unknown): string {
     return `node returned HTTP ${response.status ?? '?'}${detailStr ? ` — ${detailStr}` : ''}`
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+const NODE_TYPE_TO_PROTOCOL: Record<number, 'wireguard' | 'v2ray' | 'xray' | 'amneziawg' | 'hysteria2'> = {
+  1: 'wireguard', 2: 'v2ray', 4: 'xray', 5: 'amneziawg', 6: 'hysteria2',
+}
+
+/**
+ * Checks that run BEFORE the paying tx is broadcast, so a mislabeled node or a
+ * runtime that can't bring the protocol up costs the user nothing. (Everything
+ * after the tx is covered by establishSessionOrRefund, but a refund still burns
+ * gas and a block of the user's time.)
+ *
+ * 1. Can we run this protocol at all — binaries present + integrity-verified,
+ *    and for the root protocols, a daemon or the polkit helper to run them with.
+ * 2. Does the node agree it runs this protocol? The node list is an aggregator
+ *    cache; the node's own service_type is the authority.
+ *
+ * Throws with an actionable message; never silently downgrades.
+ */
+async function preflightConnect(nodeType: number, apiField: string): Promise<void> {
+  const protocol = NODE_TYPE_TO_PROTOCOL[nodeType]
+  if (!protocol) throw new Error(`Unsupported nodeType ${nodeType}`)
+
+  const runtimeError = protocolRuntimeError(protocol)
+  if (runtimeError) throw new Error(`Can't connect — not charged. ${runtimeError}`)
+
+  // WireGuard/AmneziaWG go up as root: without the daemon or the helper the
+  // bring-up has no way to escalate and would fail after payment.
+  if (protocol === 'wireguard' || protocol === 'amneziawg') {
+    if (!canEscalatePrivileges()) {
+      throw new Error(
+        `Can't connect — not charged. The privileged helper isn't installed, so ${protocol === 'wireguard' ? 'WireGuard' : 'AmneziaWG'} can't be brought up. Restart the app and accept the helper setup prompt.`
+      )
+    }
+  }
+
+  let reported: string | number
+  try {
+    // nodeFetch's own 8s timeout only covers socket inactivity, not the TCP
+    // connect — a blackholed node hangs well past it (measured). This gate sits
+    // in front of the connect button, so bound the whole wait.
+    reported = await withTimeout(fetchNodeServiceType(apiField), NODE_PROTOCOL_CHECK_TIMEOUT_MS, 'node protocol check')
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'unknown error'
+    throw new Error(`Node is unreachable — not charged (${reason}). Pick another node.`)
+  }
+
+  const actualType = serviceTypeToNodeType(reported)
+  if (actualType !== nodeType) {
+    throw new Error(
+      `Node protocol mismatch — not charged. The node reports "${reported}" but the node list says ` +
+      `${protocol}. Refresh the node list and pick another node.`
+    )
+  }
 }
 
 /**
@@ -472,6 +533,7 @@ export async function performDisconnect(): Promise<void> {
     activeHysteria2Config = null
     activeAmneziaWgConfig = null
     desiredProtocol = null
+    desiredMode = 'tunnel'
     activeSessionId = null
     activeNodeInfo = null
     isIntentionalDisconnect = false
@@ -549,14 +611,17 @@ async function attemptReconnect(): Promise<void> {
           await connectAmneziaWgFromConfig(saved.configString)
         } else {
           // v2ray, xray and hysteria2 share the child-process + tun2socks bring-up.
+          // Replay the mode the user connected with — a proxy-mode session must
+          // not silently come back as a full tunnel (that would take root).
+          const proxyOnly = desiredMode === 'proxy'
           if (saved.protocol === 'hysteria2') {
-            connectHysteria2FromConfig(saved.configString) // no DoH (see connectHysteria2FromConfig)
+            connectHysteria2FromConfig(saved.configString, { proxyOnly }) // no DoH (see connectHysteria2FromConfig)
           } else {
             const dohIp = effectiveV2RayResolverIp(loadSettings())
             if (saved.protocol === 'xray') {
-              connectXRayFromConfig(saved.configString, dohIp)
+              connectXRayFromConfig(saved.configString, dohIp, { proxyOnly })
             } else {
-              connectV2RayFromConfig(saved.configString, dohIp)
+              connectV2RayFromConfig(saved.configString, dohIp, { proxyOnly })
             }
           }
           await new Promise((r) => setTimeout(r, 1500))
@@ -564,7 +629,7 @@ async function attemptReconnect(): Promise<void> {
           if (!status.connected) {
             throw new Error('Proxy failed to start on reconnect')
           }
-          await bringUpV2RayTunnel()
+          if (!proxyOnly) await bringUpV2RayTunnel()
         }
 
         // The user disconnected while we were bringing the tunnel up — undo it and
@@ -575,8 +640,11 @@ async function attemptReconnect(): Promise<void> {
           return
         }
 
-        // Apply post-connect settings
-        await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2')
+        // Apply post-connect settings (proxy mode touches no system state — see
+        // the CONNECTION_CONNECT branches)
+        if (desiredMode !== 'proxy') {
+          await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2')
+        }
 
         desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
         if (desiredProtocol === 'wireguard' || desiredProtocol === 'amneziawg') startWireGuardMonitor()
@@ -954,6 +1022,9 @@ export function registerIpcHandlers(): void {
       throw new Error('Wallet not loaded. Please re-import your mnemonic.')
     }
 
+    // Verify the node + our runtime BEFORE spending anything (see preflightConnect).
+    await preflightConnect(params.nodeType, params.apiField)
+
     // Pre-check balance (only for udvpn denom)
     if (params.denom === 'udvpn') {
       const balances = await getBalance()
@@ -1053,18 +1124,42 @@ export function registerIpcHandlers(): void {
   handle(IPC.CONNECTION_CONNECT, async (_event, params: {
     protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2'
     configString?: string
+    dnsFallback?: boolean
+    mode?: 'tunnel' | 'proxy'
   }) => {
+    if (params.mode !== undefined && params.mode !== 'tunnel' && params.mode !== 'proxy') {
+      throw new Error('Invalid mode: must be tunnel or proxy')
+    }
+    // Local-proxy mode = the child core's SOCKS5 listener only: no TUN, no root,
+    // no routing change. WireGuard/AmneziaWG have no such listener — they ARE the
+    // routing change — so the mode is meaningless (and unimplementable) for them.
+    const proxyOnly = params.mode === 'proxy'
+    if (proxyOnly && (params.protocol === 'wireguard' || params.protocol === 'amneziawg')) {
+      throw new Error('Local-proxy mode is not available for WireGuard or AmneziaWG — they route the whole device.')
+    }
     if (params.protocol !== 'wireguard' && params.protocol !== 'amneziawg' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2') {
       throw new Error('Invalid protocol: must be wireguard, amneziawg, v2ray, xray or hysteria2')
     }
     if (params.configString !== undefined && typeof params.configString !== 'string') {
       throw new Error('Invalid configString')
     }
+    // User-consented retry after a resolvconf-missing bring-up failure: drop the
+    // tunnel's DNS= lines so wg-quick/awg-quick never touch resolvconf. Only the
+    // root protocols provision DNS this way, and only an explicit user action
+    // sets this — auto-reconnect never silently downgrades DNS.
+    const dnsFallback = params.dnsFallback === true &&
+      (params.protocol === 'wireguard' || params.protocol === 'amneziawg')
     // Serialize tunnel bring-up against disconnect/reconnect so overlapping ops
     // can't orphan a child process (finding M1).
     return withConnectionLock(async () => {
       if (params.protocol === 'wireguard') {
-        if (activeWg) {
+        if (dnsFallback) {
+          // Same config, minus DNS. config-guard still validates it (DNS is an
+          // optional key in the allow-list).
+          const base = params.configString ?? activeWg?.buildConfigString()
+          if (!base) throw new Error('No WireGuard instance or config available')
+          await connectWireGuardFromConfig(stripDnsLines(base))
+        } else if (activeWg) {
           await connectWireGuard(activeWg)
         } else if (params.configString) {
           await connectWireGuardFromConfig(params.configString)
@@ -1076,6 +1171,7 @@ export function registerIpcHandlers(): void {
         await applyPostConnectSettings('wireguard')
 
         desiredProtocol = 'wireguard'
+        desiredMode = 'tunnel'
         startWireGuardMonitor()
         sendStateChange('connected')
         return { protocol: 'wireguard' }
@@ -1088,11 +1184,12 @@ export function registerIpcHandlers(): void {
         if (!awgConfig) {
           throw new Error('No AmneziaWG config available')
         }
-        await connectAmneziaWgFromConfig(awgConfig)
+        await connectAmneziaWgFromConfig(dnsFallback ? stripDnsLines(awgConfig) : awgConfig)
 
         await applyPostConnectSettings('amneziawg')
 
         desiredProtocol = 'amneziawg'
+        desiredMode = 'tunnel'
         startWireGuardMonitor()
         sendStateChange('connected')
         return { protocol: 'amneziawg' }
@@ -1103,9 +1200,9 @@ export function registerIpcHandlers(): void {
         // (same value applyPostConnectSettings uses for resolv.conf + kill switch).
         const dohIp = effectiveV2RayResolverIp(loadSettings())
         if (activeV2ray) {
-          connectV2Ray(activeV2ray, dohIp)
+          connectV2Ray(activeV2ray, dohIp, { proxyOnly })
         } else if (params.configString) {
-          connectV2RayFromConfig(params.configString, dohIp)
+          connectV2RayFromConfig(params.configString, dohIp, { proxyOnly })
         } else {
           throw new Error('No V2Ray instance or config available')
         }
@@ -1130,17 +1227,24 @@ export function registerIpcHandlers(): void {
 
         // V2Ray is running — bring up the TUN interface. If this fails the child is
         // still running, so tear it down rather than orphan a SOCKS proxy (finding M4).
-        try {
-          await bringUpV2RayTunnel()
-        } catch (err) {
-          await disconnect()
-          throw err
+        // In local-proxy mode there is no TUN and no system state to change: the
+        // kill switch and dns-set are deliberately skipped, so proxy mode leaks by
+        // design (only apps pointed at the SOCKS address are tunneled) and the
+        // kill-switch setting is intentionally ignored.
+        if (!proxyOnly) {
+          try {
+            await bringUpV2RayTunnel()
+          } catch (err) {
+            await disconnect()
+            throw err
+          }
+
+          // Apply DNS and kill switch if enabled
+          await applyPostConnectSettings('v2ray')
         }
 
-        // Apply DNS and kill switch if enabled
-        await applyPostConnectSettings('v2ray')
-
         desiredProtocol = 'v2ray'
+        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
         sendStateChange('connected')
         return { protocol: 'v2ray' }
       }
@@ -1154,7 +1258,7 @@ export function registerIpcHandlers(): void {
         if (!xrayConfig) {
           throw new Error('No Xray config available')
         }
-        connectXRayFromConfig(xrayConfig, dohIp)
+        connectXRayFromConfig(xrayConfig, dohIp, { proxyOnly })
 
         // Wait briefly and verify the xray process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
@@ -1171,17 +1275,21 @@ export function registerIpcHandlers(): void {
           )
         }
 
-        // Xray is running — bring up the TUN interface (same tun2socks path as v2ray).
-        try {
-          await bringUpV2RayTunnel()
-        } catch (err) {
-          await disconnect()
-          throw err
+        // Xray is running — bring up the TUN interface (same tun2socks path as v2ray),
+        // unless this is local-proxy mode (see the v2ray branch).
+        if (!proxyOnly) {
+          try {
+            await bringUpV2RayTunnel()
+          } catch (err) {
+            await disconnect()
+            throw err
+          }
+
+          await applyPostConnectSettings('xray')
         }
 
-        await applyPostConnectSettings('xray')
-
         desiredProtocol = 'xray'
+        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
         sendStateChange('connected')
         return { protocol: 'xray' }
       }
@@ -1195,7 +1303,7 @@ export function registerIpcHandlers(): void {
         if (!hysteria2Config) {
           throw new Error('No Hysteria2 config available')
         }
-        connectHysteria2FromConfig(hysteria2Config)
+        connectHysteria2FromConfig(hysteria2Config, { proxyOnly })
 
         // Wait briefly and verify the hysteria process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
@@ -1212,17 +1320,21 @@ export function registerIpcHandlers(): void {
           )
         }
 
-        // Hysteria2 is running — bring up the TUN interface (same tun2socks path as v2ray).
-        try {
-          await bringUpV2RayTunnel()
-        } catch (err) {
-          await disconnect()
-          throw err
+        // Hysteria2 is running — bring up the TUN interface (same tun2socks path as
+        // v2ray), unless this is local-proxy mode (see the v2ray branch).
+        if (!proxyOnly) {
+          try {
+            await bringUpV2RayTunnel()
+          } catch (err) {
+            await disconnect()
+            throw err
+          }
+
+          await applyPostConnectSettings('hysteria2')
         }
 
-        await applyPostConnectSettings('hysteria2')
-
         desiredProtocol = 'hysteria2'
+        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
         sendStateChange('connected')
         return { protocol: 'hysteria2' }
       }
@@ -1250,6 +1362,8 @@ export function registerIpcHandlers(): void {
       killSwitchFailed: killSwitchFailed || undefined,
       killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
       sessionId: activeSessionId,
+      proxyMode: vpnStatus.proxyMode || undefined,
+      socksAddr: vpnStatus.socksAddr,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,
     }
@@ -1406,10 +1520,12 @@ export function registerIpcHandlers(): void {
     nodeCountry: string
     nodeType: number
     apiField: string
+    renewalPolicy?: number
   }) => {
     assertString(params.planId, 'planId')
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     assertString(params.denom, 'denom')
+    if (params.renewalPolicy !== undefined) assertNumber(params.renewalPolicy, 'renewalPolicy', 0, 7)
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
@@ -1421,12 +1537,15 @@ export function registerIpcHandlers(): void {
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
 
+    await preflightConnect(params.nodeType, params.apiField)
+
     const { sessionId, subscriptionId } = await subscribeToPlan({
       wallet,
       address,
       planId: params.planId,
       denom: params.denom,
       nodeAddress: params.nodeAddress,
+      renewalPricePolicy: params.renewalPolicy,
     })
 
     const result = await establishSessionOrRefund({
@@ -1472,6 +1591,8 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
+
+    await preflightConnect(params.nodeType, params.apiField)
 
     const { sessionId, subscriptionId } = await startSessionWithExistingSubscription({
       wallet,
@@ -1522,6 +1643,36 @@ export function registerIpcHandlers(): void {
     } catch {
       return []
     }
+  })
+
+  handle(IPC.SUBSCRIPTION_LIST, async () => {
+    const address = getAddress()
+    if (!address) throw new Error('Wallet not loaded')
+    // RPC is unreachable through the tunnel; there's no cache for this list, so
+    // the UI hides the section while connected rather than showing stale rows.
+    if (isVpnActive()) return []
+    return await querySubscriptions(address)
+  })
+
+  handle(IPC.SUBSCRIPTION_CANCEL, async (_event, params: { subscriptionId: string }) => {
+    assertString(params?.subscriptionId, 'subscriptionId')
+    if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    const wallet = getWallet()
+    const address = getAddress()
+    if (!wallet || !address) throw new Error('Wallet not loaded')
+    await cancelSubscription({ wallet, address, subscriptionId: params.subscriptionId })
+  })
+
+  handle(IPC.SUBSCRIPTION_UPDATE_POLICY, async (_event, params: { subscriptionId: string; policy: number }) => {
+    assertString(params?.subscriptionId, 'subscriptionId')
+    if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    // RenewalPricePolicy enum range (0 UNSPECIFIED … 7 ALWAYS); the hub rejects
+    // anything outside it, so don't waste a tx finding out.
+    assertNumber(params.policy, 'policy', 0, 7)
+    const wallet = getWallet()
+    const address = getAddress()
+    if (!wallet || !address) throw new Error('Wallet not loaded')
+    await updateSubscriptionPolicy({ wallet, address, subscriptionId: params.subscriptionId, policy: params.policy })
   })
 
   handle(IPC.PROVIDER_GET, async (_event, params: { address: string }) => {

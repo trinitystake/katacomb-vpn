@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
-import type { SessionInfo } from '../types'
+import type { SessionInfo, TunnelProtocol } from '../types'
+import { displayConnectError } from '../utils/connect-errors'
 
 export interface ReconnectOutcome {
   ok: boolean
@@ -18,7 +19,7 @@ export function useReconnect(): (session: SessionInfo) => Promise<ReconnectOutco
     try {
       const res = await window.api.connectionReconnect({ sessionId: session.id })
       await window.api.connectionConnect({
-        protocol: res.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2',
+        protocol: res.protocol as TunnelProtocol,
         configString: res.configString,
       })
       return { ok: true }
@@ -30,7 +31,9 @@ export function useReconnect(): (session: SessionInfo) => Promise<ReconnectOutco
           error: `Session #${session.id}: No saved tunnel config. You can end this session to free it, then create a new subscription.`,
         }
       }
-      return { ok: false, error: msg }
+      // Session-tab reconnect has no DNS-fallback affordance, so just strip the
+      // internal marker prefix rather than showing it to the user.
+      return { ok: false, error: displayConnectError(msg) }
     }
   }, [])
 }

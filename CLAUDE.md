@@ -44,7 +44,7 @@ Strict Electron security isolation with three process boundaries:
 - `config-guard.ts`: **pure validators for untrusted-node data** — `assertSafeWireguardConfig` (allow-list keys, reject `PostUp`/`PreUp`/… so a node config can't run shell as root via `wg-quick`), `assertSafeV2RayConfig`, `isAllowedBypassCidr`/`sanitizeBypassRoutes` (reject `0.0.0.0/x` split-tunnel routes), `extractWireguardEndpointHost`. Unit-tested; see the node-trust invariant below.
 - `fs-utils.ts`: `writeFileAtomic(path, data, mode=0o600)` (temp + rename). Use it for all settings/wallet/session/cache writes — never `writeFileSync` directly for persisted state.
 - `kill-switch.ts`: iptables-based kill switch (helper `killswitch-on`/`killswitch-off`); `traffic-stats.ts`, `node-tester.ts`, `plan-service.ts`/`provider-service.ts` and their `*-cache.ts`, `nodes-cache.ts` round out the main process.
-- `async-utils.ts` (`withTimeout`), `connect-decisions.ts` (pure refund-message + reconnect/backoff decisions), `tx-utils.ts` (`broadcastOrTimeout`): the **Electron-free, unit-tested** reliability helpers. Keep new pure decision logic here rather than inline in the Electron-coupled modules, so it stays testable under the native runner.
+- `async-utils.ts` (`withTimeout`), `connect-decisions.ts` (pure refund-message + reconnect/backoff decisions, `serviceTypeToNodeType` for the preflight, `isDnsProvisionError`/`stripDnsLines` for the DNS fallback), `tx-utils.ts` (`broadcastOrTimeout`): the **Electron-free, unit-tested** reliability helpers. Keep new pure decision logic here rather than inline in the Electron-coupled modules, so it stays testable under the native runner.
 
 ### Privilege Escalation
 
@@ -109,7 +109,20 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `vpn-manager`'s `activeProtocol` (actual, cleared on interface drop) — don't merge them.
 - **Bound every wait.** RPC connects go through `withTimeout`; session-creating broadcasts
   go through `broadcastOrTimeout` and set a `timeoutHeight`. `provider-service.ts` is the
-  reference for the timeout pattern.
+  reference for the timeout pattern. (`node-tester.ts`'s `nodeFetch` timeout does NOT
+  cover the TCP connect — a blackholed node hangs past it — so wrap its callers.)
+- **Preflight before paying.** The three session-creating handlers call
+  `preflightConnect(nodeType, apiField)` BEFORE the tx: `protocolRuntimeError()`
+  (binaries present + SHA-verified; WG/AWG also need `canEscalatePrivileges()`), then
+  the node's own `service_type` — fetched from its ROOT path, `/info` 404s — mapped via
+  the pure `serviceTypeToNodeType()` and required to match the aggregator's type.
+- **Retry, don't re-buy.** A failed bring-up leaves the paid session's config stashed in
+  main (cleared only by `performDisconnect`), so the connect modals offer "Retry
+  connection" (`connectionConnect` alone) instead of resetting to the subscribe form.
+  Shared UI: `ConnectErrorActions.tsx`.
+- **One instance.** `src/main/index.ts` takes `requestSingleInstanceLock()` and the loser
+  exits via `app.exit(0)` — `app.quit()` would fire before-quit and tear down the
+  *primary's* tunnel.
 
 ### Vite Bundling (Critical)
 
@@ -228,6 +241,31 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   `sntl0IsKernelWireGuard()` (teardown via `ensureSntl0Down`, adoption, status,
   `detectOtherVpn` exclusion). DNS is owned by awg-quick (resolvconf) like wg-quick
   — no `dns-set`, no DoH.
+
+**Connection modes.** `ConnectParams.mode` is `'tunnel'` (default, routes the whole
+device) or `'proxy'`. Local-proxy mode applies ONLY to the child-proxy protocols
+(v2ray/xray/hysteria2 — the ones with a local SOCKS5 listener at `127.0.0.1:1080`):
+it spawns the core and stops there — no tun2socks, no root, no password prompt. The
+branches skip `bringUpV2RayTunnel()` AND `applyPostConnectSettings()`, so **proxy mode
+leaks by design** (only apps pointed at the SOCKS address are tunneled) and the
+kill-switch setting is deliberately ignored. WG/AWG + `mode:'proxy'` throws. Keep
+`isVpnActive()` meaning "system traffic is redirected" — it returns FALSE in proxy
+mode, because routing is untouched and callers must not fall back to cached chain
+data. The mode is runtime-only (never in `SavedSessionConfig`): auto-reconnect replays
+`desiredMode`, a session-tab reconnect is always full-tunnel.
+
+**DNS fallback.** wg-quick/awg-quick fail the whole bring-up when `resolvconf` is
+missing. Those catch paths rethrow with the `DNS_PROVISION_FAILED` marker
+(`src/shared/error-markers.ts`), and `CONNECTION_CONNECT`'s `dnsFallback` retries the
+same config through `stripDnsLines()`. User consent only — auto-reconnect never strips
+DNS, and the renderer states that system DNS then leaves the tunnel.
+
+**Subscriptions.** `plan-service.ts` has `querySubscriptions` / `cancelSubscription` /
+`updateSubscriptionPolicy` behind `SUBSCRIPTION_*` IPC, surfaced as "Manage
+subscriptions" in the Plans tab. `RenewalPricePolicy` 0 (UNSPECIFIED) is the hub's own
+"never renew" (`Subscription.RenewalAt()` returns the zero time for it; cancel sets it
+to 0); 7 (ALWAYS) stays the default. Cancel marks the subscription inactive-pending —
+it is NOT an instant refund, so don't word it as one.
 
 v9.0.0 nodes expose a `service_metadata` array on `/info` (Xray Reality keys,
 Hysteria2 obfs, transport variants) that the SDK's `NodeInfo` type lacks — the xray

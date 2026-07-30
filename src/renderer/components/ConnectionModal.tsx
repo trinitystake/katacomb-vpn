@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../types'
+import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation, TunnelProtocol } from '../types'
+import ConnectErrorActions from './ConnectErrorActions'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
 import { useNavigation } from '../contexts/NavigationContext'
@@ -42,10 +43,20 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // Protocol of the session we already paid for. Kept so a failed bring-up can be
+  // retried against that session instead of buying a second one.
+  const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
+  // Full tunnel vs. local SOCKS proxy. Only the child-proxy protocols expose a
+  // local listener, so the choice is hidden (and forced to 'tunnel') otherwise.
+  const [mode, setMode] = useState<'tunnel' | 'proxy'>('tunnel')
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
+
+  // v2ray(2)/xray(4)/hysteria2(6) run a local SOCKS5 listener, so they can be used
+  // as a plain proxy. WireGuard/AmneziaWG are the routing change — no proxy mode.
+  const proxyCapable = node.type === 2 || node.type === 4 || node.type === 6
 
   const gbPrice = getUdvpnPrice(node.gigabytePrices)
   const hrPrice = getUdvpnPrice(node.hourlyPrices)
@@ -134,6 +145,43 @@ export default function ConnectionModal({ node, onClose }: Props) {
     }
   }, [node.address, node.api])
 
+  /**
+   * The tunnel bring-up step on its own. Main keeps the paid session's config
+   * (activeWg/activeV2ray/…) until disconnect, so calling this after a failed
+   * bring-up reuses that session — no second subscribe tx, no second payment.
+   */
+  async function connectTunnelOnly(protocol: TunnelProtocol, dnsFallback = false) {
+    setCurrentStep('5/5')
+    await window.api.connectionConnect({
+      protocol,
+      ...(proxyCapable && mode === 'proxy' ? { mode: 'proxy' as const } : {}),
+      ...(dnsFallback ? { dnsFallback: true } : {}),
+    })
+    setTunnelConnected(true)
+  }
+
+  /** Error-state retry when the payment succeeded but the tunnel didn't come up. */
+  async function handleRetryTunnel(dnsFallback = false) {
+    if (!paidProtocol) return
+    setConnecting(true)
+    setError(null)
+    try {
+      await connectTunnelOnly(paidProtocol, dnsFallback)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  /** Drop the paid-session context and go back to the subscribe form. */
+  function resetToSubscribe() {
+    setError(null)
+    setCurrentStep(null)
+    setSessionId(null)
+    setPaidProtocol(null)
+  }
+
   async function handleSubscribe() {
     if (!matchingAllocation && !selectedPrice) return
 
@@ -186,12 +234,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
         throw new Error('No valid subscription selected')
       }
 
-      setCurrentStep('5/5')
-      await window.api.connectionConnect({
-        protocol: protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2',
-      })
-
-      setTunnelConnected(true)
+      const tunnelProtocol = protocol as TunnelProtocol
+      setPaidProtocol(tunnelProtocol)
+      await connectTunnelOnly(tunnelProtocol)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connection failed')
     } finally {
@@ -445,6 +490,39 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
             )}
 
+            {proxyCapable && (
+              <div className="space-y-1.5">
+                <div className="text-xs text-text-secondary">Connection mode</div>
+                <div className="flex gap-4 text-sm">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="connect-mode"
+                      checked={mode === 'tunnel'}
+                      onChange={() => setMode('tunnel')}
+                      className="accent-accent"
+                    />
+                    <span className="text-text-primary">Full tunnel</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="connect-mode"
+                      checked={mode === 'proxy'}
+                      onChange={() => setMode('proxy')}
+                      className="accent-accent"
+                    />
+                    <span className="text-text-primary">Local proxy</span>
+                  </label>
+                </div>
+                <p className="text-text-tertiary text-xs">
+                  {mode === 'tunnel'
+                    ? 'Routes your whole device through the node (needs admin rights).'
+                    : 'Runs a SOCKS5 proxy on 127.0.0.1:1080 — no admin password, but only apps you point at it are tunneled. No kill switch.'}
+                </p>
+              </div>
+            )}
+
             <button
               onClick={handleSubscribe}
               disabled={!active || !isProtocolSupported(node.type) || (!matchingAllocation && !selectedPrice)}
@@ -481,17 +559,13 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
         {/* Error with retry */}
         {error && !connecting && (
-          <div className="space-y-3">
-            <div className="bg-danger-subtle border border-danger p-3 rounded-md">
-              <p className="text-danger text-sm">{error}</p>
-            </div>
-            <button
-              onClick={() => { setError(null); setCurrentStep(null); setSessionId(null) }}
-              className="btn btn-primary w-full"
-            >
-              Try Again
-            </button>
-          </div>
+          <ConnectErrorActions
+            error={error}
+            paidSessionId={paidProtocol ? sessionId : null}
+            onRetryTunnel={() => handleRetryTunnel()}
+            onStartOver={resetToSubscribe}
+            onRetryWithoutDns={paidProtocol ? () => handleRetryTunnel(true) : undefined}
+          />
         )}
 
         {/* Connected state */}
@@ -510,14 +584,21 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             <div className="flex items-center gap-2 text-sm">
               <span className="status-dot status-dot-active" />
-              <span className="text-success font-medium">VPN tunnel active</span>
+              <span className="text-success font-medium">
+                {proxyCapable && mode === 'proxy' ? 'Local proxy active' : 'VPN tunnel active'}
+              </span>
             </div>
 
-            {node.type === 1 && (
+            {proxyCapable && mode === 'proxy' ? (
+              <p className="text-text-tertiary text-sm">
+                SOCKS5 proxy at <span className="font-mono text-text-secondary">127.0.0.1:1080</span> — only apps
+                configured to use it are tunneled. The rest of your traffic still goes out directly.
+              </p>
+            ) : node.type === 1 ? (
               <p className="text-text-tertiary text-sm">
                 WireGuard interface is up. Your traffic is now routed through this node.
               </p>
-            )}
+            ) : null}
 
             <button onClick={onClose} className="btn btn-primary w-full">
               Done

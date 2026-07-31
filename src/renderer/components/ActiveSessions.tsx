@@ -252,7 +252,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                         className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
                         title={vpnConnected ? 'Disconnect current VPN first' : undefined}
                       >
-                        {isBusy ? <Spinner className="text-white" /> : 'Connect'}
+                        {isBusy ? <Spinner /> : 'Connect'}
                       </button>
                     )}
                     <button
@@ -260,7 +260,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                       disabled={isBusy || busy !== null}
                       className="btn btn-danger text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
                     >
-                      {isBusy ? <Spinner className="text-white" /> : 'End'}
+                      {isBusy ? <Spinner /> : 'End'}
                     </button>
                   </div>
                 </div>

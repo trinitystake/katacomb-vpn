@@ -760,7 +760,7 @@ export default function PlanDiscovery() {
             >
               {discovering ? (
                 <span className="flex items-center gap-2">
-                  <Spinner className="text-white" /> Scanning…
+                  <Spinner /> Scanning…
                 </span>
               ) : plans.length === 0 ? (
                 'Discover'
@@ -1981,7 +1981,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
             >
               {disconnecting ? (
                 <>
-                  <Spinner className="text-white" /> Disconnecting…
+                  <Spinner /> Disconnecting…
                 </>
               ) : (
                 'Disconnect'
@@ -2321,7 +2321,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
             >
               {disconnecting ? (
                 <>
-                  <Spinner className="text-white" /> Disconnecting…
+                  <Spinner /> Disconnecting…
                 </>
               ) : (
                 'Disconnect'

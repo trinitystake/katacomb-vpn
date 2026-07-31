@@ -302,7 +302,7 @@ export default function MnemonicInput({ onImport, onBackToWallets, onUseExisting
                   onClick={() => setWordCount(12)}
                   className={`flex-1 py-2 px-4 text-sm border transition-colors rounded-md ${
                     wordCount === 12
-                      ? 'bg-accent border-accent text-white'
+                      ? 'bg-accent border-accent text-text-on-accent'
                       : 'border-border text-text-secondary hover:border-text-secondary'
                   }`}
                 >
@@ -312,7 +312,7 @@ export default function MnemonicInput({ onImport, onBackToWallets, onUseExisting
                   onClick={() => setWordCount(24)}
                   className={`flex-1 py-2 px-4 text-sm border transition-colors rounded-md ${
                     wordCount === 24
-                      ? 'bg-accent border-accent text-white'
+                      ? 'bg-accent border-accent text-text-on-accent'
                       : 'border-border text-text-secondary hover:border-text-secondary'
                   }`}
                 >

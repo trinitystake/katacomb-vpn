@@ -175,9 +175,21 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   require fails in Vite's renderer bundle. `MnemonicInput` imports `check.phrase` (NFKD,
   lowercase, single-spaced), not the raw textarea value: that is the form the checksum was
   verified against and the only one CosmJS's `EnglishMnemonic` accepts.
-- **Dark-only** — bg `#0f172a`, accent `#60a5fa`. There is deliberately no theme switch:
+- **Dark-only** — bg `#16181d`, accent `#e1bc99`. There is deliberately no theme switch:
   `tokens.css` `:root` holds the only semantic tokens, and components read those (never
   primitives, never a `dark:` variant). Don't reintroduce a `.dark` selector.
+- **The palette is derived from the app icon** (`build/icons/1024x1024.svg`) and both
+  primitive ramps are sampled from it: `gunmetal-*` extends the icon's charcoal at its own
+  hue (`gunmetal-850` IS `#1e2127` verbatim), `bronze-*` is its gradient stops verbatim.
+  Regenerate the PNGs with `node scripts/build-icons.mjs` after editing the SVG, and keep
+  `AppLogo.tsx` (the same paths, inlined) in step.
+  - **Every fill in this palette is a light colour**, so filled controls take
+    `text-text-on-accent` (dark) — `text-white` on the accent is 1.8:1. That's why
+    `.btn-primary`/`.btn-danger` set a dark label and `Spinner` just inherits `currentColor`.
+  - Accent and status hues are separated by **saturation, not hue**: the accent is the only
+    pale/desaturated colour, the status hues are vivid. The tightest pair (accent vs danger)
+    is ΔE 43, so `danger` must keep its slightly cool cast — warming it toward terracotta
+    collapses it into the bronze.
 - `@` alias maps to `src/renderer/`.
 - Types for renderer in `src/renderer/types/index.ts` — includes `ElectronAPI` interface matching preload bridge and `declare global` for `window.api`.
 

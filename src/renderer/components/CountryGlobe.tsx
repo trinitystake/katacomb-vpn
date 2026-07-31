@@ -36,25 +36,30 @@ function makeColorFns(counts: Map<string, number>) {
     return Math.log(count + 1) / maxLog
   }
 
-  // Blue ramp matching the app's slate/blue accent palette.
-  // Start: deep cool blue (1 node) -> base blue-500 #3b82f6 (median)
-  // -> pale near-white blue #cfe3ff for top-quartile glow.
+  // Bronze ramp, walking the app icon's own gradient from its dark end to its
+  // highlight — this is the one place the brand gradient is used as a gradient
+  // rather than a flat accent, and node density is a real quantity to encode.
+  // Start: deep bronze (1 node) -> bronze-400 #c39874 (median)
+  // -> champagne highlight #f2d5b2 for top-quartile glow.
   function capColor(count: number): string {
     if (count <= 0 || maxLog <= 0) return 'rgba(0, 0, 0, 0)'
     const t = norm(count)
     const glow = count >= top75
-    const rEnd = glow ? 0xcf : 0x3b
-    const gEnd = glow ? 0xe3 : 0x82
-    const bEnd = glow ? 0xff : 0xf6
-    const r = lerp(0x0f, rEnd, t)
-    const g = lerp(0x29, gEnd, t)
-    const b = lerp(0x4d, bEnd, t)
+    const rEnd = glow ? 0xf2 : 0xc3
+    const gEnd = glow ? 0xd5 : 0x98
+    const bEnd = glow ? 0xb2 : 0x74
+    const r = lerp(0x4d, rEnd, t)
+    const g = lerp(0x38, gEnd, t)
+    const b = lerp(0x26, bEnd, t)
     const a = 0.82 + 0.16 * t
     return `rgba(${r},${g},${b},${a.toFixed(2)})`
   }
 
+  // Outline for countries with no nodes. Champagne is a much lighter colour than
+  // the blue-400 this replaced (0.55 vs 0.36 relative luminance), so the alpha
+  // drops to keep the empty-country mesh at the same perceived weight.
   function strokeColor(count: number): string {
-    if (count <= 0) return 'rgba(96, 165, 250, 0.55)'
+    if (count <= 0) return 'rgba(225, 188, 153, 0.38)'
     return 'rgba(0, 0, 0, 0.55)'
   }
 
@@ -191,8 +196,10 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     if (ready) doResume()
   }, [size.w, size.h, ready])
 
+  // gunmetal-950 — the sphere reads as the app's deepest surface, so the ocean
+  // recedes behind the bronze landmasses instead of framing them in cold black.
   const darkMatte = useMemo(
-    () => new THREE.MeshPhongMaterial({ color: 0x0c0c10 }),
+    () => new THREE.MeshPhongMaterial({ color: 0x101114 }),
     [],
   )
 
@@ -231,7 +238,10 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     (d: object) => {
       const name = polyKey(d as Feature)
       const c = countFor(d)
-      return `<div style="background:#0a0a0f;color:#e5e5e5;padding:4px 8px;border:1px solid #333;border-radius:3px;font-size:12px;">${name}${c > 0 ? ` (${c})` : ''}</div>`
+      // globe.gl takes raw HTML, so this is styled inline rather than by class —
+      // but the custom properties still resolve against :root, so it tracks the
+      // theme tokens like everything else.
+      return `<div style="background:var(--color-bg-primary);color:var(--color-text-primary);padding:4px 8px;border:1px solid var(--color-border);border-radius:3px;font-size:12px;">${name}${c > 0 ? ` (${c})` : ''}</div>`
     },
     [countFor],
   )

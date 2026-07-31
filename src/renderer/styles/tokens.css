@@ -9,81 +9,101 @@
 
    Categories: bg, text, border, accent, success, danger, warning, info
    Components reference ONLY semantic tokens (never primitives).
+
+   The palette is derived from the app icon (build/icons/1024x1024.svg): a
+   gunmetal "K" behind a bronze-to-champagne "A". Both primitive ramps below are
+   sampled from that file — see the per-ramp notes. Keep them in step with it.
    ============================================================ */
 
 :root {
-  /* ---- Primitive palette (mode-independent) ---- */
-  --color-slate-50:  #f8fafc;
-  --color-slate-100: #f1f5f9;
-  --color-slate-200: #e2e8f0;
-  --color-slate-300: #cbd5e1;
-  --color-slate-400: #94a3b8;
-  --color-slate-500: #64748b;
-  --color-slate-600: #475569;
-  --color-slate-700: #334155;
-  --color-slate-800: #1e293b;
-  --color-slate-900: #0f172a;
-  --color-slate-950: #020617;
+  /* ---- Primitive palette (mode-independent) ----
 
-  --color-blue-50:  #eff6ff;
-  --color-blue-400: #60a5fa;
-  --color-blue-500: #3b82f6;
-  --color-blue-600: #2563eb;
+     Gunmetal: the icon's charcoal, extended into a ramp at its own hue
+     (hsl 220, 12%). `gunmetal-850` IS the icon's `#1e2127` verbatim, which is
+     why the card surface below resolves to that exact value. Deliberately far
+     less saturated than the slate ramp it replaced (slate-900 was 47%
+     saturation) — a blue-tinted neutral turns the bronze accent muddy. */
+  --color-gunmetal-100: #eeeff2;
+  --color-gunmetal-300: #c6cad2;
+  --color-gunmetal-400: #9ea5b3;
+  --color-gunmetal-500: #818a9c;
+  --color-gunmetal-600: #3a404a;
+  --color-gunmetal-700: #2c3038;
+  --color-gunmetal-800: #24272e;
+  --color-gunmetal-850: #1e2127;
+  --color-gunmetal-900: #16181d;
+  --color-gunmetal-950: #101114;
 
-  --color-teal-50:  #f0fdfa;
-  --color-teal-400: #2dd4bf;
-  --color-teal-500: #14b8a6;
-  --color-teal-600: #0d9488;
+  /* Bronze: the icon's gradient stops verbatim, darkest to lightest. The "A"
+     runs deep bronze -> champagne highlight -> deep bronze; only the light half
+     is legible as text on a dark surface, so 50–300 are the usable UI values
+     and 400–700 exist for fills and the node-density ramp on the globe. */
+  --color-bronze-700: #705441;
+  --color-bronze-600: #805436;
+  --color-bronze-500: #a57d5c;
+  --color-bronze-400: #c39874;
+  --color-bronze-300: #d1b391;
+  --color-bronze-200: #e1bc99;
+  --color-bronze-100: #ebcaa6;
+  --color-bronze-50:  #f2d5b2;
 
-  --color-green-50:  #f0fdf4;
-  --color-green-400: #4ade80;
-  --color-green-500: #22c55e;
-  --color-green-600: #16a34a;
+  /* Status hues. Kept conventional (green = connected, red = failed) and tuned
+     vivid on purpose: the accent is the only pale, desaturated colour in the
+     app, so saturation — not hue — is what separates "brand" from "signal".
+     Info is verdigris, the patina bronze actually weathers to. */
+  --color-green-400: #5fd98b;
+  --color-green-500: #34c46c;
 
-  --color-red-50:  #fef2f2;
-  --color-red-400: #f87171;
-  --color-red-500: #ef4444;
-  --color-red-600: #dc2626;
+  --color-red-400: #f5767c;
+  --color-red-500: #e8434c;
 
-  --color-amber-50:  #fffbeb;
-  --color-amber-400: #fbbf24;
-  --color-amber-500: #f59e0b;
-  --color-amber-600: #d97706;
+  --color-amber-400: #f0b429;
+  --color-amber-500: #d99406;
+
+  --color-teal-400: #5fc8d4;
+  --color-teal-500: #2aa7b6;
 
   /* ---- Semantic tokens ----
      The app is dark-only by design: there is no theme switch, and these are the
      only semantic values. Do NOT reintroduce a `.dark` selector or a light
      variant — components read these tokens unconditionally. */
-  --color-bg-primary:    var(--color-slate-900);
-  --color-bg-secondary:  var(--color-slate-800);
-  --color-bg-tertiary:   var(--color-slate-700);
-  --color-bg-hover:      var(--color-slate-700);
+  --color-bg-primary:    var(--color-gunmetal-900);
+  --color-bg-secondary:  var(--color-gunmetal-850);
+  --color-bg-tertiary:   var(--color-gunmetal-700);
+  --color-bg-hover:      var(--color-gunmetal-700);
 
-  --color-text-primary:   var(--color-slate-100);
-  --color-text-secondary: var(--color-slate-400);
-  --color-text-tertiary:  var(--color-slate-500);
+  --color-text-primary:   var(--color-gunmetal-100);
+  --color-text-secondary: var(--color-gunmetal-400);
+  --color-text-tertiary:  var(--color-gunmetal-500);
 
-  --color-border:        var(--color-slate-700);
-  --color-border-focus:  var(--color-blue-400);
+  /* Text to place ON a filled accent/status swatch. White fails badly on every
+     one of them (white on `bronze-200` is 1.8:1); the darkest gunmetal is
+     10.1:1. Any new filled control must use this, never `text-white`. */
+  --color-text-on-accent: var(--color-gunmetal-950);
 
-  --color-accent:        var(--color-blue-400);
-  --color-accent-hover:  var(--color-blue-500);
-  --color-accent-subtle: rgba(59, 130, 246, 0.1);
+  --color-border:        var(--color-gunmetal-700);
+  --color-border-focus:  var(--color-bronze-200);
+
+  --color-accent:        var(--color-bronze-200);
+  --color-accent-hover:  var(--color-bronze-50);
+  --color-accent-subtle: rgba(225, 188, 153, 0.12);
 
   --color-success:        var(--color-green-400);
-  --color-success-subtle: rgba(34, 197, 94, 0.1);
+  --color-success-subtle: rgba(95, 217, 139, 0.12);
   --color-danger:         var(--color-red-400);
-  --color-danger-subtle:  rgba(239, 68, 68, 0.1);
+  --color-danger-subtle:  rgba(245, 118, 124, 0.12);
   --color-warning:        var(--color-amber-400);
-  --color-warning-subtle: rgba(245, 158, 11, 0.1);
+  --color-warning-subtle: rgba(240, 180, 41, 0.12);
   --color-info:           var(--color-teal-400);
-  --color-info-subtle:    rgba(20, 184, 166, 0.1);
+  --color-info-subtle:    rgba(95, 200, 212, 0.12);
 
-  /* ---- Shadows ---- */
-  --shadow-sm:      0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md:      0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
-  --shadow-lg:      0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
-  --shadow-overlay: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+  /* ---- Shadows ----
+     Warmed off pure black so they sit inside the gunmetal surfaces rather than
+     punching a cold hole in them. */
+  --shadow-sm:      0 1px 2px rgba(8, 9, 11, 0.4);
+  --shadow-md:      0 4px 6px -1px rgba(8, 9, 11, 0.5), 0 2px 4px -2px rgba(8, 9, 11, 0.4);
+  --shadow-lg:      0 10px 15px -3px rgba(8, 9, 11, 0.6), 0 4px 6px -4px rgba(8, 9, 11, 0.4);
+  --shadow-overlay: 0 20px 25px -5px rgba(8, 9, 11, 0.6), 0 8px 10px -6px rgba(8, 9, 11, 0.5);
 
   /* ---- Border radius ---- */
   --radius-sm:   6px;

@@ -110,7 +110,7 @@ function createWindow(): void {
     minHeight: 600,
     // Must match --color-bg-primary (tokens.css) — this paints the window between
     // OS-level creation and first React paint.
-    backgroundColor: '#0f172a',
+    backgroundColor: '#16181d',
     titleBarStyle: 'hiddenInset',
     icon: getIconPath('256x256.png'),
     show: false,

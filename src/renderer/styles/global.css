@@ -38,8 +38,10 @@
     background-color: var(--color-text-secondary);
   }
 
+  /* Derived from the accent rather than a second hardcoded rgba — `accent-subtle`
+     (12%) is too faint to read as a selection. */
   ::selection {
-    background-color: rgba(59, 130, 246, 0.2);
+    background-color: color-mix(in srgb, var(--color-accent) 22%, transparent);
     color: var(--color-accent);
   }
 }
@@ -49,8 +51,12 @@
     @apply px-4 py-2 text-sm font-medium rounded-sm border transition-colors duration-150;
   }
 
+  /* Filled buttons carry DARK labels. Every fill in this palette is a light
+     colour — white on the champagne accent is 1.8:1, on danger 2.7:1 — so
+     `text-white` here would be unreadable. `text-on-accent` is 10.1:1 and 6.6:1
+     respectively. Same rule applies to any spinner rendered inside them. */
   .btn-primary {
-    @apply bg-accent border-accent text-white;
+    @apply bg-accent border-accent text-text-on-accent;
   }
 
   .btn-primary:hover {
@@ -66,7 +72,7 @@
   }
 
   .btn-danger {
-    @apply bg-danger border-danger text-white;
+    @apply bg-danger border-danger text-text-on-accent;
   }
 
   .btn-danger:hover {

@@ -16,6 +16,10 @@ module.exports = {
         'text-primary':   'var(--color-text-primary)',
         'text-secondary': 'var(--color-text-secondary)',
         'text-tertiary':  'var(--color-text-tertiary)',
+        // For labels sitting ON a filled accent/status swatch. The palette's
+        // accent and status colours are all light, so `text-white` on them is
+        // unreadable — use this instead.
+        'text-on-accent': 'var(--color-text-on-accent)',
         'border':       'var(--color-border)',
         'border-focus': 'var(--color-border-focus)',
         accent: {

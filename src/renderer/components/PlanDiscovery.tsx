@@ -4,10 +4,18 @@ import { useConnection } from '../hooks/useConnection'
 import { useNavigation } from '../contexts/NavigationContext'
 import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode, SubscriptionSummary, TunnelProtocol } from '../types'
 import ConnectErrorActions from './ConnectErrorActions'
+import CountryFlag from './CountryFlag'
 import Spinner from './Spinner'
 import ProgressSteps from './ProgressSteps'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
 import { nodeStatusMeta, isNodeConnectable } from '../utils/node-status'
+import { useBalance } from '../hooks/useBalance'
+import { checkFunds, insufficientFundsMessage } from '../../shared/funds'
+import { displayConnectError } from '../utils/connect-errors'
+import InsufficientFunds from './InsufficientFunds'
+import ChainUnreachable from './ChainUnreachable'
+import { useRpcHealth } from '../hooks/useRpcHealth'
+import { isChainUnreachable } from '../../shared/rpc-health'
 
 const UNLIMITED_BYTES_THRESHOLD = 1024 ** 5 // 1 PiB — anything larger is a pseudo-unlimited placeholder set by the provider
 const PLAN_DISCOVERY_MAX = 500
@@ -218,7 +226,7 @@ function IconNode({ className = '' }: { className?: string }) {
 
 export default function PlanDiscovery() {
   const { plansNodeFilter, clearPlansNodeFilter } = useNavigation()
-  const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached } = usePlans()
+  const { plans, fetchedAt, allocations, discovering, progress, discover, refreshCached, refreshAllocations } = usePlans()
   // A rescan re-queries the chain over RPC, which is unreachable while OUR tunnel
   // is up (traffic routes to the dVPN node). External VPNs like Mullvad don't
   // trigger this — only this app's own tunnel does.
@@ -774,6 +782,9 @@ export default function PlanDiscovery() {
               <p className="text-text-tertiary text-xs">
                 Click "Discover Plans" to scan active plans on-chain
               </p>
+              <div className="mt-2">
+                <ChainUnreachable what="the on-chain plan scan" />
+              </div>
             </div>
           )}
           {plans.length > 0 && filtered.length === 0 && hasNodesBulkLoading && (
@@ -971,10 +982,14 @@ export default function PlanDiscovery() {
         </details>
       )}
 
-      {/* Manage subscriptions: cancel, or change the auto-renewal policy. Covers
-          node (per-GB/hour) subscriptions too, which the allocations footer above
-          — plan-only, and about connecting — never showed. */}
-      <SubscriptionManager tunnelUp={tunnelUp} activeSessionId={connStatus.sessionId ?? null} />
+      {/* Manage subscriptions: cancel, renew, or change the auto-renewal policy.
+          Covers node (per-GB/hour) subscriptions too, which the allocations footer
+          above — plan-only, and about connecting — never showed. */}
+      <SubscriptionManager
+        tunnelUp={tunnelUp}
+        activeSessionId={connStatus.sessionId ?? null}
+        onSubscriptionsChanged={refreshAllocations}
+      />
 
       {connectingAllocation && (
         <AllocationConnectModal
@@ -1018,14 +1033,29 @@ function subscriptionStatusLabel(status: number): string {
 }
 
 /**
- * Cancel / renewal-policy management for every subscription the wallet owns.
- * Both actions are on-chain txs, so each is confirmed first (same native-confirm
+ * Cancel / renew / renewal-policy management for every subscription the wallet
+ * owns. All three are on-chain txs, so each is confirmed first (same native-confirm
  * convention ActiveSessions uses for ending a session).
+ *
+ * Always rendered as an open section rather than a collapsed <details>: it is the
+ * only place a subscription can be cancelled, and being tucked away at the bottom
+ * of the tab made that hard to find. While the tunnel is up it stays visible but
+ * read-only — RPC is unreachable through our own tunnel, so main returns [] and
+ * there is nothing to act on, but silently disappearing read as "gone".
+ *
+ * `onSubscriptionsChanged` refreshes the OTHER views of the same data (the
+ * allocations footer, ConnectionModal's reuse path). Without it they kept offering
+ * a subscription this component had just cancelled, until the 120s poll caught up.
  */
-function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean; activeSessionId: string | null }) {
+function SubscriptionManager({ tunnelUp, activeSessionId, onSubscriptionsChanged }: {
+  tunnelUp: boolean
+  activeSessionId: string | null
+  onSubscriptionsChanged: () => void
+}) {
   const [subs, setSubs] = useState<SubscriptionSummary[] | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const { state: rpcState } = useRpcHealth()
 
   const load = useCallback(() => {
     window.api
@@ -1038,6 +1068,12 @@ function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean;
     // RPC is unreachable through our own tunnel; main returns [] while connected.
     if (!tunnelUp) load()
   }, [tunnelUp, load])
+
+  /** Reload this list AND every other view of the same subscriptions. */
+  const reloadAll = useCallback(() => {
+    load()
+    onSubscriptionsChanged()
+  }, [load, onSubscriptionsChanged])
 
   async function handleCancel(sub: SubscriptionSummary) {
     if (!confirm(
@@ -1056,9 +1092,32 @@ function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean;
       if (activeBelongs && confirm('Your active VPN session belongs to that subscription. Disconnect now?')) {
         await window.api.connectionDisconnect()
       }
-      load()
+      reloadAll()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Cancel failed')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  /**
+   * Buy another period on an existing plan subscription instead of creating a new
+   * one. Charges the plan price again. Node (per-GB/hour) subscriptions have no
+   * plan price, so main rejects them and the button isn't offered for those.
+   */
+  async function handleRenew(sub: SubscriptionSummary) {
+    if (!confirm(
+      `Renew subscription #${sub.id} for another period?\n\nThis charges the plan's current price again ` +
+      `and is an on-chain transaction.`
+    )) return
+
+    setBusyId(sub.id)
+    setError(null)
+    try {
+      await window.api.subscriptionRenew(sub.id, sub.planId, 'udvpn')
+      reloadAll()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Renew failed')
     } finally {
       setBusyId(null)
     }
@@ -1074,7 +1133,7 @@ function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean;
     setError(null)
     try {
       await window.api.subscriptionUpdatePolicy(sub.id, policy)
-      load()
+      reloadAll()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Update failed')
       load()
@@ -1083,16 +1142,35 @@ function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean;
     }
   }
 
-  if (tunnelUp || !subs || subs.length === 0) return null
+  if (tunnelUp) {
+    return (
+      <div className="border-t border-border shrink-0 bg-bg-secondary px-5 py-2">
+        <span className="text-text-secondary text-xs font-medium uppercase tracking-wide">Manage subscriptions</span>
+        <p className="text-text-tertiary text-xs mt-1">
+          Disconnect to cancel, renew or re-price a subscription — the blockchain isn&apos;t reachable through your own tunnel.
+        </p>
+      </div>
+    )
+  }
+
+  // An empty list here is ambiguous: it's also what main returns when the chain
+  // couldn't be reached. Say which, instead of silently rendering nothing.
+  if (!subs || subs.length === 0) {
+    if (!isChainUnreachable(rpcState)) return null
+    return (
+      <div className="border-t border-border shrink-0 bg-bg-secondary px-5 py-2">
+        <ChainUnreachable what="your subscriptions" />
+      </div>
+    )
+  }
 
   return (
-    <details className="border-t border-border shrink-0 bg-bg-secondary">
-      <summary className="px-5 py-2 cursor-pointer text-text-secondary text-xs font-medium uppercase tracking-wide hover:text-text-primary list-none flex items-center justify-between">
-        <span>Manage subscriptions ({subs.length})</span>
-        <span className="text-text-tertiary text-[10px]">▼</span>
-      </summary>
+    <div className="border-t border-border shrink-0 bg-bg-secondary">
+      <div className="px-5 py-2 text-text-secondary text-xs font-medium uppercase tracking-wide">
+        Manage subscriptions ({subs.length})
+      </div>
       <div className="max-h-[220px] overflow-y-auto px-5 pb-3 space-y-1.5">
-        {error && <p className="text-danger text-xs">{error}</p>}
+        {error && <p className="text-danger text-xs">{displayConnectError(error)}</p>}
         {subs.map((sub) => (
           <div
             key={sub.id}
@@ -1126,6 +1204,17 @@ function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean;
                 <option value={sub.renewalPricePolicy}>{renewalPolicyLabel(sub.renewalPricePolicy)}</option>
               )}
             </select>
+            {sub.planId !== '0' && (
+              <button
+                type="button"
+                onClick={() => handleRenew(sub)}
+                disabled={sub.status !== 1 || busyId === sub.id}
+                className="btn btn-secondary text-xs py-1.5 px-3 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+                title={sub.status === 1 ? 'Buy another period on this plan' : 'Only active subscriptions can be renewed'}
+              >
+                Renew
+              </button>
+            )}
             <button
               type="button"
               onClick={() => handleCancel(sub)}
@@ -1138,7 +1227,7 @@ function SubscriptionManager({ tunnelUp, activeSessionId }: { tunnelUp: boolean;
           </div>
         ))}
       </div>
-    </details>
+    </div>
   )
 }
 
@@ -1494,6 +1583,7 @@ function PlanDetail({
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
+                          {node && <CountryFlag country={node.country} />}
                           <span className="text-text-primary truncate font-medium">
                             {node?.moniker || (node ? '(no moniker)' : 'Unknown node')}
                           </span>
@@ -1617,6 +1707,12 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
   // retried against it instead of starting a second session.
   const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
+  const { udvpn, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
+
+  // The allocation is prepaid, so only gas is due. No balance line is shown here —
+  // it would muddy the "no new charge" framing — just the warning if it's short.
+  const funds = udvpn === null ? null : checkFunds(udvpn, 0)
+  const cantAfford = funds !== null && !funds.ok
 
   useEffect(() => {
     let cancelled = false
@@ -1786,9 +1882,12 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
                           : 'opacity-40 cursor-not-allowed'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span className={`font-medium ${active ? 'text-accent' : 'text-text-primary'}`}>
-                          {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`flex items-center gap-1.5 min-w-0 font-medium ${active ? 'text-accent' : 'text-text-primary'}`}>
+                          {node && <CountryFlag country={node.country} />}
+                          <span className="truncate">
+                            {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
+                          </span>
                         </span>
                         {node && (
                           <span className={`text-[10px] font-medium ${protocolMeta(node.type).color}`}>
@@ -1819,9 +1918,17 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
               </div>
             )}
 
+            {cantAfford && (
+              <InsufficientFunds
+                message={insufficientFundsMessage(funds)}
+                onRefresh={refreshBalance}
+                refreshing={refreshingBalance}
+              />
+            )}
+
             <button
               onClick={handleConnect}
-              disabled={!selected || !selected.node || !isNodeConnectable(selected.node) || !isProtocolSupported(selected.node.type)}
+              disabled={!selected || !selected.node || !isNodeConnectable(selected.node) || !isProtocolSupported(selected.node.type) || cantAfford}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Connect via Existing Plan
@@ -1898,7 +2005,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
   const [addresses, setAddresses] = useState<string[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedAddr, setSelectedAddr] = useState<string | null>(null)
-  const [balance, setBalance] = useState<string | null>(null)
+  const { udvpn, display: balance, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
   const [connecting, setConnecting] = useState(false)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1928,16 +2035,14 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
   }, [plan.id])
 
   useEffect(() => {
-    window.api.walletGetBalance().then((balances) => {
-      const udvpn = balances.find((b: { denom: string }) => b.denom === 'udvpn')
-      setBalance(udvpn ? (parseInt(udvpn.amount, 10) / 1e6).toFixed(2) : '0.00')
-    })
-  }, [])
-
-  useEffect(() => {
     const unsub = window.api.onConnectionProgress((step) => setCurrentStep(step))
     return unsub
   }, [])
+
+  // null while the balance is unknown — an unreadable balance must never grey out
+  // the pay button; main re-checks against a fresh one before broadcasting.
+  const funds = udvpn === null ? null : checkFunds(udvpn, priceUdvpn(plan))
+  const cantAfford = funds !== null && !funds.ok
 
   const candidates = useMemo(() => {
     if (!addresses) return null
@@ -2104,9 +2209,12 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
                           : 'opacity-40 cursor-not-allowed'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span className={`font-medium ${active ? 'text-accent' : 'text-text-primary'}`}>
-                          {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`flex items-center gap-1.5 min-w-0 font-medium ${active ? 'text-accent' : 'text-text-primary'}`}>
+                          {node && <CountryFlag country={node.country} />}
+                          <span className="truncate">
+                            {node?.moniker || `${addr.slice(0, 16)}…${addr.slice(-6)}`}
+                          </span>
                         </span>
                         {node && (
                           <span className={`text-[10px] font-medium ${protocolMeta(node.type).color}`}>
@@ -2150,9 +2258,17 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
               </select>
             </label>
 
+            {cantAfford && (
+              <InsufficientFunds
+                message={insufficientFundsMessage(funds)}
+                onRefresh={refreshBalance}
+                refreshing={refreshingBalance}
+              />
+            )}
+
             <button
               onClick={handleConnect}
-              disabled={!selected || !selected.node || !isNodeConnectable(selected.node) || !isProtocolSupported(selected.node.type)}
+              disabled={!selected || !selected.node || !isNodeConnectable(selected.node) || !isProtocolSupported(selected.node.type) || cantAfford}
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Subscribe & Connect

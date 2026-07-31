@@ -8,6 +8,9 @@ import { useConnection } from '../hooks/useConnection'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
 import { protocolMeta, isProtocolSupported } from '../utils/protocols'
 import { nodeStatusMeta, isNodeConnectable } from '../utils/node-status'
+import { useBalance } from '../hooks/useBalance'
+import { checkFunds, formatP2p, insufficientFundsMessage } from '../../shared/funds'
+import InsufficientFunds from './InsufficientFunds'
 
 interface Props {
   node: SentNode
@@ -17,8 +20,7 @@ interface Props {
 function getUdvpnPrice(prices: { denom: string; value: string }[]): { raw: string; display: string } | null {
   const p = prices.find((x) => x.denom === 'udvpn')
   if (!p) return null
-  const display = (parseInt(p.value, 10) / 1e6).toFixed(2)
-  return { raw: p.value, display }
+  return { raw: p.value, display: formatP2p(parseInt(p.value, 10)) }
 }
 
 export default function ConnectionModal({ node, onClose }: Props) {
@@ -45,7 +47,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [allocations, setAllocations] = useState<PlanAllocation[]>([])
   const [subType, setSubType] = useState<'gigabytes' | 'hours'>('gigabytes')
   const [amount, setAmount] = useState(1)
-  const [balance, setBalance] = useState<string | null>(null)
+  const { udvpn, display: balance, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
   const [connecting, setConnecting] = useState(false)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -69,14 +71,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const gbPrice = getUdvpnPrice(node.gigabytePrices)
   const hrPrice = getUdvpnPrice(node.hourlyPrices)
   const selectedPrice = subType === 'gigabytes' ? gbPrice : hrPrice
-  const totalCost = selectedPrice ? (parseInt(selectedPrice.raw, 10) * amount / 1e6).toFixed(2) : '—'
-
-  useEffect(() => {
-    window.api.walletGetBalance().then((balances) => {
-      const udvpn = balances.find((b: { denom: string }) => b.denom === 'udvpn')
-      setBalance(udvpn ? (parseInt(udvpn.amount, 10) / 1e6).toFixed(2) : '0.00')
-    })
-  }, [])
+  const costUdvpn = selectedPrice ? parseInt(selectedPrice.raw, 10) * amount : 0
+  const totalCost = selectedPrice ? formatP2p(costUdvpn) : '—'
 
   useEffect(() => {
     let cancelled = false
@@ -115,6 +111,11 @@ export default function ConnectionModal({ node, onClose }: Props) {
     const compatibleIds = new Set(compatiblePlans.map((p) => p.id))
     return allocations.find((a) => a.status === 1 && compatibleIds.has(a.planId)) ?? null
   })()
+
+  // Reusing an allocation buys nothing on-chain — only gas is due. null while the
+  // balance is unknown: never block the pay button on a balance we couldn't read.
+  const funds = udvpn === null ? null : checkFunds(udvpn, matchingAllocation ? 0 : costUdvpn)
+  const cantAfford = funds !== null && !funds.ok
 
   useEffect(() => {
     const unsub = window.api.onConnectionProgress((step, _detail) => {
@@ -392,7 +393,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
             <div className="flex gap-2">
               <button
                 onClick={() => handleSubscribe()}
-                className="btn btn-primary flex-1"
+                disabled={cantAfford}
+                className="btn btn-primary flex-1 disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 Continue Anyway
               </button>
@@ -506,6 +508,14 @@ export default function ConnectionModal({ node, onClose }: Props) {
               </div>
             )}
 
+            {cantAfford && (
+              <InsufficientFunds
+                message={insufficientFundsMessage(funds)}
+                onRefresh={refreshBalance}
+                refreshing={refreshingBalance}
+              />
+            )}
+
             {proxyCapable && (
               <div className="space-y-1.5">
                 <div className="text-xs text-text-secondary">Connection mode</div>
@@ -567,7 +577,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
               disabled={
                 !(connectable || (canOverrideHealth && healthAcknowledged)) ||
                 !isProtocolSupported(node.type) ||
-                (!matchingAllocation && !selectedPrice)
+                (!matchingAllocation && !selectedPrice) ||
+                cantAfford
               }
               className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >

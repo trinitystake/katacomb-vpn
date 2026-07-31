@@ -2,6 +2,7 @@ import { app, safeStorage } from 'electron'
 import { readFileSync, existsSync, unlinkSync, mkdirSync, cpSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { WALLET_EXISTS } from '../shared/error-markers'
 import { writeFileAtomic } from './fs-utils'
 
 // --- Pre-rename profile migration ---
@@ -55,6 +56,12 @@ export interface AppSettings {
   autoReconnect: boolean
   bookmarkedNodes: string[]
   splitTunnelRoutes: string[]
+  /**
+   * Reveals the Provider tab. Not a preference so much as a mode: the tab is also
+   * shown automatically once this wallet has a provider registered on chain, so
+   * this only matters before the first registration.
+   */
+  providerMode: boolean
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -65,6 +72,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoReconnect: false,
   bookmarkedNodes: [],
   splitTunnelRoutes: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
+  providerMode: false,
 }
 
 function settingsPath(): string {
@@ -125,9 +133,11 @@ export interface WalletEntry {
   id: string
   name: string
   address: string
-  // BIP-44 account index used to derive `address` from this entry's mnemonic.
-  // Missing on legacy entries — treat as 0.
+  // BIP-44 account and address indices used to derive `address` from this
+  // entry's mnemonic (`m/44'/118'/<account>'/0/<address>`). Missing on legacy
+  // entries — treat either as 0.
   accountIndex?: number
+  addressIndex?: number
 }
 
 function walletsDir(): string {
@@ -154,16 +164,31 @@ function saveWalletIndex(wallets: WalletEntry[]): void {
   writeFileAtomic(walletIndexPath(), JSON.stringify(wallets, null, 2))
 }
 
-export function addWalletEntry(name: string, address: string, mnemonic: string, accountIndex = 0): WalletEntry {
+export function addWalletEntry(
+  name: string,
+  address: string,
+  mnemonic: string,
+  { accountIndex = 0, addressIndex = 0 }: { accountIndex?: number; addressIndex?: number } = {},
+): WalletEntry {
   if (!isSecureStorageAvailable()) {
     throw new Error(INSECURE_STORAGE_MESSAGE)
+  }
+
+  // One entry per address, enforced here rather than at each caller — importing a
+  // seed that's already stored used to create a second entry for the same address
+  // (two rows, both showing as active, one wallet). The blank-address guard
+  // matters: migrateOldWallet writes `address: ''` until the first restore fills
+  // it in, and blank is not an identity.
+  const clash = listWallets().find((w) => w.address && w.address === address)
+  if (clash) {
+    throw new Error(`${WALLET_EXISTS}:${clash.id}: That seed is already stored as "${clash.name}".`)
   }
 
   const id = randomUUID()
   const encrypted = safeStorage.encryptString(mnemonic)
   writeFileAtomic(join(walletsDir(), `${id}.enc`), encrypted)
 
-  const entry: WalletEntry = { id, name, address, accountIndex }
+  const entry: WalletEntry = { id, name, address, accountIndex, addressIndex }
   const wallets = listWallets()
   wallets.push(entry)
   saveWalletIndex(wallets)
@@ -227,6 +252,93 @@ export function getWalletMnemonic(id: string): string {
       'Remove it and import the same seed phrase again — your funds are on-chain and unaffected.'
     )
   }
+}
+
+/**
+ * Can this wallet's seed actually be decrypted? Used to show a stored wallet as
+ * needing re-entry BEFORE the user picks it and hits a failure. Never returns
+ * the seed itself.
+ */
+export function canUnlockWallet(id: string): boolean {
+  try {
+    getWalletMnemonic(id)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Collapse index entries that share an address down to one, deleting the
+ * redundant `.enc` files. Repairs installs made before `addWalletEntry` enforced
+ * uniqueness, where re-importing an already-stored seed produced a second entry
+ * for the same wallet (both then rendered as "Active").
+ *
+ * The survivor is the oldest entry **whose seed can actually be decrypted** —
+ * not simply the oldest. A duplicate created by re-importing after the app
+ * rename is the common case, and there the older entry is precisely the one
+ * whose `.enc` no longer opens (safeStorage keys its entry by app name). Keeping
+ * it would throw away the only working copy.
+ *
+ * Entries with a blank address are left alone — migrateOldWallet writes one
+ * until the first restore fills it in, and blank is not an identity.
+ */
+export function dedupeWalletEntries(): void {
+  const wallets = listWallets()
+
+  const byAddress = new Map<string, WalletEntry[]>()
+  for (const wallet of wallets) {
+    if (!wallet.address) continue
+    const group = byAddress.get(wallet.address)
+    if (group) group.push(wallet)
+    else byAddress.set(wallet.address, [wallet])
+  }
+  if (![...byAddress.values()].some((group) => group.length > 1)) return
+
+  // Only decrypt when there's actually a duplicate to resolve, so a normal
+  // startup never pays for this.
+  const survivorId = new Map<string, string>() // address → id we keep
+  for (const [address, group] of byAddress) {
+    const survivor = group.find((w) => canUnlockWallet(w.id)) ?? group[0]
+    survivorId.set(address, survivor.id)
+  }
+
+  const kept: WalletEntry[] = []
+  const dropped: string[] = []
+  // id of the entry each dropped one collapsed into, so a stale activeWalletId
+  // can be repointed rather than cleared.
+  const survivorOf = new Map<string, string>()
+
+  for (const wallet of wallets) {
+    const survivor = wallet.address ? survivorId.get(wallet.address) : undefined
+    if (survivor !== undefined && survivor !== wallet.id) {
+      dropped.push(wallet.id)
+      survivorOf.set(wallet.id, survivor)
+      continue
+    }
+    kept.push(wallet)
+  }
+
+  if (dropped.length === 0) return
+
+  saveWalletIndex(kept)
+  for (const id of dropped) {
+    const encPath = join(walletsDir(), `${id}.enc`)
+    if (existsSync(encPath)) {
+      try {
+        unlinkSync(encPath)
+      } catch {
+        // Index is already correct; a leftover file is inert.
+      }
+    }
+  }
+
+  const activeWalletId = loadSettings().activeWalletId
+  if (activeWalletId && survivorOf.has(activeWalletId)) {
+    saveSettings({ activeWalletId: survivorOf.get(activeWalletId)! })
+  }
+
+  console.log(`[wallets] merged ${dropped.length} duplicate entr${dropped.length === 1 ? 'y' : 'ies'}`)
 }
 
 /**

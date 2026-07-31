@@ -1,16 +1,22 @@
-import { useState, useRef, useEffect } from 'react'
-import englishWordlist from 'bip39/src/wordlists/english.json'
-
-const wordSet = new Set<string>(englishWordlist)
+import { useState, useRef, useEffect, useMemo } from 'react'
+import { checkMnemonic } from '../../shared/mnemonic'
+import { parseWalletExists } from '../../shared/wallet-errors'
 
 interface Props {
   onImport: (mnemonic: string, name?: string) => Promise<void>
+  /** Present only when wallets are already stored — returns to the picker. */
+  onBackToWallets?: () => void
+  /** Open the wallet that already holds the entered seed's address. */
+  onUseExisting: (walletId: string) => Promise<void>
 }
 
 type Mode = 'choose' | 'import' | 'create'
 
-export default function MnemonicInput({ onImport }: Props) {
+export default function MnemonicInput({ onImport, onBackToWallets, onUseExisting }: Props) {
   const [mode, setMode] = useState<Mode>('choose')
+  // Set when the entered seed is already stored: nothing was created, so offer
+  // that wallet instead of leaving the user at a dead end.
+  const [duplicate, setDuplicate] = useState<{ id: string; message: string } | null>(null)
   const [mnemonic, setMnemonic] = useState('')
   const [walletName, setWalletName] = useState('')
   const [generatedMnemonic, setGeneratedMnemonic] = useState('')
@@ -23,32 +29,36 @@ export default function MnemonicInput({ onImport }: Props) {
     if (copyClearTimer.current !== null) window.clearTimeout(copyClearTimer.current)
   }, [])
 
-  function validateMnemonic(value: string): string | null {
-    const trimmed = value.trim()
-    const words = trimmed.split(/\s+/)
-    if (words.length !== 12 && words.length !== 24) {
-      return 'Mnemonic must be 12 or 24 words'
-    }
-    const invalid = words.filter((w) => !wordSet.has(w))
-    if (invalid.length > 0) {
-      return `Invalid word${invalid.length > 1 ? 's' : ''}: ${invalid.join(', ')}`
-    }
-    return null
-  }
+  // Word list, word count and checksum, re-run on every keystroke.
+  const check = useMemo(() => checkMnemonic(mnemonic), [mnemonic])
 
   async function handleImportSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
-    const err = validateMnemonic(mnemonic)
-    if (err) { setError(err); return }
+    setDuplicate(null)
+    if (check.status !== 'valid') return
     setLoading(true)
     try {
-      await onImport(mnemonic.trim(), walletName.trim() || undefined)
+      // The normalized phrase, not what was typed: it is the form the checksum
+      // was verified against and the only one CosmJS accepts.
+      await onImport(check.phrase, walletName.trim() || undefined)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to import wallet')
+      handleCreateFailure(err, 'Failed to import wallet')
     } finally {
       setLoading(false)
     }
+  }
+
+  /** Shared by import and create: both go through addWalletEntry's uniqueness guard. */
+  function handleCreateFailure(err: unknown, fallback: string) {
+    const message = err instanceof Error ? err.message : fallback
+    const existing = parseWalletExists(message)
+    if (existing) {
+      setDuplicate(existing)
+      setError('')
+      return
+    }
+    setError(message)
   }
 
   async function handleGenerate() {
@@ -71,7 +81,7 @@ export default function MnemonicInput({ onImport }: Props) {
     try {
       await onImport(generatedMnemonic, walletName.trim() || undefined)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create wallet')
+      handleCreateFailure(err, 'Failed to create wallet')
     } finally {
       setLoading(false)
     }
@@ -93,7 +103,25 @@ export default function MnemonicInput({ onImport }: Props) {
     setWalletName('')
     setGeneratedMnemonic('')
     setError('')
+    setDuplicate(null)
     setConfirmed(false)
+  }
+
+  /** Nothing was created — that seed is already on this device. */
+  function duplicatePanel() {
+    if (!duplicate) return null
+    return (
+      <div className="bg-warning-subtle border border-warning p-3 rounded-md space-y-2">
+        <p className="text-warning text-sm">{duplicate.message}</p>
+        <button
+          type="button"
+          onClick={() => onUseExisting(duplicate.id)}
+          className="btn btn-secondary w-full"
+        >
+          Use that wallet
+        </button>
+      </div>
+    )
   }
 
   // --- Choose screen ---
@@ -102,11 +130,22 @@ export default function MnemonicInput({ onImport }: Props) {
       <div className="h-full flex items-center justify-center p-8">
         <div className="w-full max-w-xl space-y-8">
           <div className="space-y-3">
+            {onBackToWallets && (
+              <button
+                type="button"
+                onClick={onBackToWallets}
+                className="text-text-secondary text-sm hover:text-accent transition-colors"
+              >
+                &larr; Back to my wallets
+              </button>
+            )}
             <h1 className="text-accent font-semibold text-2xl">
               Katacomb VPN
             </h1>
             <p className="text-text-secondary text-sm leading-relaxed">
-              Create a new wallet or import an existing one to connect to the decentralized VPN network.
+              {onBackToWallets
+                ? 'Add another wallet by creating a new one or importing an existing seed phrase.'
+                : 'Create a new wallet or import an existing one to connect to the decentralized VPN network.'}
             </p>
           </div>
 
@@ -176,22 +215,38 @@ export default function MnemonicInput({ onImport }: Props) {
             </label>
             <textarea
               value={mnemonic}
-              onChange={(e) => setMnemonic(e.target.value)}
+              onChange={(e) => { setMnemonic(e.target.value); if (error) setError('') }}
               placeholder="Enter your 12 or 24 word mnemonic phrase..."
               rows={4}
-              className="w-full bg-bg-tertiary border border-border p-4 font-mono text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-border-focus rounded-md resize-none"
+              className={`w-full bg-bg-tertiary border p-4 font-mono text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none rounded-md resize-none ${
+                check.status === 'invalid' ? 'border-danger' : 'border-border focus:border-border-focus'
+              }`}
               autoFocus
               spellCheck={false}
               autoComplete="off"
             />
-            {error && (
+            {error ? (
               <p className="text-danger text-sm">{error}</p>
-            )}
+            ) : check.message ? (
+              <p
+                className={`text-sm ${
+                  check.status === 'valid'
+                    ? 'text-success'
+                    : check.status === 'invalid'
+                      ? 'text-danger'
+                      : 'text-text-tertiary'
+                }`}
+              >
+                {check.status === 'valid' ? '✓ ' : ''}{check.message}
+              </p>
+            ) : null}
           </div>
+
+          {duplicatePanel()}
 
           <button
             type="submit"
-            disabled={loading || !mnemonic.trim()}
+            disabled={loading || check.status !== 'valid'}
             className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
           >
             {loading ? 'Importing...' : 'Import Wallet'}
@@ -322,6 +377,8 @@ export default function MnemonicInput({ onImport }: Props) {
             {error && (
               <p className="text-danger text-sm">{error}</p>
             )}
+
+            {duplicatePanel()}
 
             <button
               onClick={handleConfirmCreate}

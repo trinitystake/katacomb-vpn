@@ -17,14 +17,15 @@ import {
   updateWalletAddress,
 } from './settings'
 import { WALLET_PREFIX } from '../shared/chain-constants'
+import { formatHdPath } from '../shared/hd-path'
 import { withTimeout } from './async-utils'
 
 // BIP-44 path for Cosmos SDK chains (coin type 118). Varying the account
 // segment yields a different address from the same seed, the way Keplr /
-// Ledger Live expose "subaccounts".
-const COSMOS_COIN_TYPE = 118
-function cosmosHdPath(accountIndex: number) {
-  return stringToPath(`m/44'/${COSMOS_COIN_TYPE}'/${accountIndex}'/0/0`)
+// Ledger Live expose "subaccounts"; varying the address segment walks the
+// addresses inside one account.
+function cosmosHdPath(accountIndex: number, addressIndex = 0) {
+  return stringToPath(formatHdPath(accountIndex, addressIndex))
 }
 
 // Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
@@ -71,10 +72,13 @@ export async function importWallet(mnemonic: string, name?: string, accountIndex
     hdPaths: [cosmosHdPath(accountIndex)],
   })
   const [account] = await wallet.getAccounts()
-  const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic })
+  // The hdPath is not optional here: privKeyFromMnemonic defaults to account 0,
+  // which for any other account index would sign node handshakes with a key that
+  // doesn't match the address the session was bought with.
+  const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath: cosmosHdPath(accountIndex) })
 
   const walletName = name || `Wallet ${listWallets().length + 1}`
-  const entry = addWalletEntry(walletName, account.address, wallet.mnemonic, accountIndex)
+  const entry = addWalletEntry(walletName, account.address, wallet.mnemonic, { accountIndex })
   saveSettings({ activeWalletId: entry.id })
 
   state.wallet = wallet
@@ -94,14 +98,14 @@ export async function restoreWallet(): Promise<string | null> {
     const mnemonic = getWalletMnemonic(settings.activeWalletId)
     const wallets = listWallets()
     const entry = wallets.find((w) => w.id === settings.activeWalletId)
-    const accountIndex = entry?.accountIndex ?? 0
+    const hdPath = cosmosHdPath(entry?.accountIndex ?? 0, entry?.addressIndex ?? 0)
 
     const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
       prefix: WALLET_PREFIX,
-      hdPaths: [cosmosHdPath(accountIndex)],
+      hdPaths: [hdPath],
     })
     const [account] = await wallet.getAccounts()
-    const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic })
+    const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath })
 
     state.wallet = wallet
     state.address = account.address
@@ -128,13 +132,13 @@ export async function switchWallet(walletId: string): Promise<string | null> {
 
   try {
     const mnemonic = getWalletMnemonic(walletId)
-    const accountIndex = entry.accountIndex ?? 0
+    const hdPath = cosmosHdPath(entry.accountIndex ?? 0, entry.addressIndex ?? 0)
     const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
       prefix: WALLET_PREFIX,
-      hdPaths: [cosmosHdPath(accountIndex)],
+      hdPaths: [hdPath],
     })
     const [account] = await wallet.getAccounts()
-    const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic })
+    const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath })
 
     state.wallet = wallet
     state.address = account.address
@@ -148,14 +152,15 @@ export async function switchWallet(walletId: string): Promise<string | null> {
 }
 
 /**
- * Derive a new subaccount from an existing wallet's mnemonic, using a
- * different BIP-44 account index. Same seed → different address. The
+ * Derive a new subaccount from an existing wallet's mnemonic, at a different
+ * BIP-44 account and/or address index. Same seed → different address. The
  * resulting WalletEntry owns its own .enc file (mnemonic re-encrypted)
  * so the existing one-file-per-wallet model is preserved.
  */
 export async function deriveSubaccount(
   sourceWalletId: string,
   accountIndex: number,
+  addressIndex: number,
   name: string,
 ): Promise<string> {
   const wallets = listWallets()
@@ -165,19 +170,60 @@ export async function deriveSubaccount(
   const mnemonic = getWalletMnemonic(sourceWalletId)
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
     prefix: WALLET_PREFIX,
-    hdPaths: [cosmosHdPath(accountIndex)],
+    hdPaths: [cosmosHdPath(accountIndex, addressIndex)],
   })
   const [account] = await wallet.getAccounts()
 
-  // Reject if an existing wallet already holds this address (e.g. picking
-  // index 0 when the source is already at index 0).
-  if (wallets.some((w) => w.address === account.address)) {
-    throw new Error(`A wallet with address ${account.address} already exists`)
-  }
-
+  // Picking a path that's already stored yields an address we already hold;
+  // addWalletEntry rejects that (and every other collision) at the store. The
+  // renderer greys those rows out, but this is the authoritative check.
   const walletName = name.trim() || `Wallet ${listWallets().length + 1}`
-  addWalletEntry(walletName, account.address, wallet.mnemonic, accountIndex)
+  addWalletEntry(walletName, account.address, wallet.mnemonic, { accountIndex, addressIndex })
   return account.address
+}
+
+export interface DerivationPreview {
+  addressIndex: number
+  path: string
+  address: string
+  /** Name of the stored wallet already holding this address, else null. */
+  existingWalletName: string | null
+}
+
+/**
+ * The addresses a source seed would produce at `count` consecutive address
+ * indices under one account, each flagged with the stored wallet already
+ * holding it. Matching on the derived address (not on the stored indices) is
+ * what makes the flag exact: a wallet from a *different* seed at the same path
+ * is a different address and must not grey the row out.
+ *
+ * Read-only — it creates nothing and returns no key material.
+ */
+export async function previewDerivations(
+  sourceWalletId: string,
+  accountIndex: number,
+  startIndex: number,
+  count: number,
+): Promise<DerivationPreview[]> {
+  const source = listWallets().find((w) => w.id === sourceWalletId)
+  if (!source) throw new Error('Source wallet not found')
+
+  const indices = Array.from({ length: count }, (_, i) => startIndex + i)
+  const mnemonic = getWalletMnemonic(sourceWalletId)
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: WALLET_PREFIX,
+    hdPaths: indices.map((i) => cosmosHdPath(accountIndex, i)),
+  })
+  // getAccounts() returns one account per hdPath, in the order given.
+  const accounts = await wallet.getAccounts()
+
+  const byAddress = new Map(listWallets().filter((w) => w.address).map((w) => [w.address, w.name]))
+  return accounts.map((account, i) => ({
+    addressIndex: indices[i],
+    path: formatHdPath(accountIndex, indices[i]),
+    address: account.address,
+    existingWalletName: byAddress.get(account.address) ?? null,
+  }))
 }
 
 export function getAddress(): string | null {

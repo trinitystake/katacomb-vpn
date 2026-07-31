@@ -1,10 +1,18 @@
-import { useState, useEffect, useCallback } from 'react'
-import type { WalletEntry, AppSettings, PublicRpc } from '../types'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import type { WalletEntry, AppSettings, RpcCandidateInfo, DerivationPreview } from '../types'
 import Toggle from './Toggle'
 import Spinner from './Spinner'
 import { useSettings } from '../contexts/SettingsContext'
+import type { SettingsTab } from '../contexts/NavigationContext'
+import { useRpcHealth } from '../hooks/useRpcHealth'
+import { classifyRpc, rpcHealthLabel, rpcHostLabel, STALE_BLOCK_AGE_SEC } from '../../shared/rpc-health'
+import { parseWalletExists } from '../../shared/wallet-errors'
+import { formatHdPath } from '../../shared/hd-path'
+import { STATE_DOT } from './RpcStatus'
 
 interface Props {
+  /** Which tab to land on — 'network' when something sent the user here to fix the RPC. */
+  initialTab: SettingsTab
   currentAddress: string | null
   onClose: () => void
   onWalletSwitch: () => void
@@ -22,28 +30,49 @@ const DNS_OPTIONS = [
   { label: 'NextDNS (45.90.28.0)', value: '45.90.28.0' },
 ]
 
-export default function Settings({ currentAddress, onClose, onWalletSwitch, onWalletsChanged }: Props) {
+// Address indices shown per page in the derive picker, and how long a revealed
+// recovery phrase stays on screen before it re-blurs.
+const PREVIEW_PAGE = 10
+const REBLUR_MS = 60_000
+const CLIPBOARD_CLEAR_MS = 30_000
+
+export default function Settings({ initialTab, currentAddress, onClose, onWalletSwitch, onWalletsChanged }: Props) {
   const { reload: reloadGlobalSettings } = useSettings()
+  const rpcHealth = useRpcHealth()
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [wallets, setWallets] = useState<WalletEntry[]>([])
   const [rpcInput, setRpcInput] = useState('')
   const [saving, setSaving] = useState(false)
   const [editingName, setEditingName] = useState<string | null>(null)
   const [nameInput, setNameInput] = useState('')
-  const [tab, setTab] = useState<'general' | 'network' | 'wallets'>('general')
-  const [rpcChecking, setRpcChecking] = useState<string | null>(null)
-  const [rpcLatency, setRpcLatency] = useState<Record<string, number>>({})
+  const [tab, setTab] = useState<SettingsTab>(initialTab)
   const [splitTunnelInput, setSplitTunnelInput] = useState('')
-  const [knownRpcs, setKnownRpcs] = useState<PublicRpc[]>([])
+  const [knownRpcs, setKnownRpcs] = useState<RpcCandidateInfo[]>([])
   const [rpcsLoading, setRpcsLoading] = useState(true)
   const [rpcsError, setRpcsError] = useState<string | null>(null)
   // Derive-subaccount modal state. `source` is the wallet whose mnemonic we'll
-  // reuse; `index` is the BIP-44 account index to derive at.
+  // reuse; the account index is typed, the address index is picked from the
+  // preview list (which shows the real address behind each path).
   const [deriveSource, setDeriveSource] = useState<WalletEntry | null>(null)
   const [deriveName, setDeriveName] = useState('')
-  const [deriveIndex, setDeriveIndex] = useState('1')
+  const [deriveAccount, setDeriveAccount] = useState('0')
+  const [deriveAddressIndex, setDeriveAddressIndex] = useState<number | null>(null)
+  const [previewRows, setPreviewRows] = useState<DerivationPreview[]>([])
+  const [previewCount, setPreviewCount] = useState(PREVIEW_PAGE)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
   const [deriveError, setDeriveError] = useState('')
   const [deriveLoading, setDeriveLoading] = useState(false)
+  // Recovery-phrase modal. `phrase` holds the seed only while the modal is
+  // open — closing clears it (see closePhraseModal).
+  const [phraseWallet, setPhraseWallet] = useState<WalletEntry | null>(null)
+  const [phrase, setPhrase] = useState<string | null>(null)
+  const [phraseRevealed, setPhraseRevealed] = useState(false)
+  const [phraseLoading, setPhraseLoading] = useState(false)
+  const [phraseError, setPhraseError] = useState('')
+  const [phraseCopied, setPhraseCopied] = useState(false)
+  const reblurTimer = useRef<number | null>(null)
+  const copyClearTimer = useRef<number | null>(null)
 
   const load = useCallback(async () => {
     const [s, w] = await Promise.all([
@@ -60,31 +89,45 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
     load()
   }, [load])
 
-  // Fetch the live public RPC list from sentnodes.com (cached in main for 60s)
-  useEffect(() => {
-    let cancelled = false
+  // Probe the public list from sentnodes.com in main (parallel, cached 60s), so
+  // the user compares real latency and block height instead of testing one
+  // endpoint per click.
+  const loadRpcs = useCallback(() => {
     setRpcsLoading(true)
     setRpcsError(null)
-    window.api.rpcList()
-      .then((rpcs) => {
-        if (cancelled) return
-        setKnownRpcs(rpcs)
-        setRpcsLoading(false)
-      })
+    return window.api.rpcProbeAll()
+      .then(setKnownRpcs)
       .catch((err: unknown) => {
-        if (cancelled) return
         setRpcsError(err instanceof Error ? err.message : 'Failed to load RPCs')
-        setRpcsLoading(false)
       })
-    return () => { cancelled = true }
+      .finally(() => setRpcsLoading(false))
   }, [])
 
-  async function saveRpc() {
-    if (!rpcInput.trim()) return
+  useEffect(() => {
+    if (tab === 'network') void loadRpcs()
+  }, [tab, loadRpcs])
+
+  // Healthy first, then fastest — the order the user would sort them in anyway.
+  const sortedRpcs = useMemo(() => {
+    const rank = (r: RpcCandidateInfo) => {
+      if (r.aggregatorHealthy === false) return 3
+      const state = classifyRpc(r.probe)
+      return state === 'ok' ? 0 : state === 'degraded' ? 1 : 2
+    }
+    return [...knownRpcs].sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        (a.probe.latencyMs ?? Number.MAX_SAFE_INTEGER) - (b.probe.latencyMs ?? Number.MAX_SAFE_INTEGER),
+    )
+  }, [knownRpcs])
+
+  async function saveRpc(endpoint = rpcInput.trim()) {
+    if (!endpoint) return
     setSaving(true)
     try {
-      const updated = await window.api.settingsSet({ rpcEndpoint: rpcInput.trim() })
+      const updated = await window.api.settingsSet({ rpcEndpoint: endpoint })
       setSettings(updated)
+      setRpcInput(updated.rpcEndpoint)
       await reloadGlobalSettings()
     } finally {
       setSaving(false)
@@ -117,57 +160,165 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
   }
 
   function openDeriveModal(source: WalletEntry) {
-    // Suggest the smallest non-zero index not already in use, since the user
-    // is starting from an existing wallet (which is most likely at index 0).
-    const used = new Set(wallets.map((w) => w.accountIndex ?? 0))
-    let next = 1
-    while (used.has(next)) next += 1
+    // Start on the source's own account: "another address on this seed" is the
+    // common action, and the preview list greys out whatever is already stored.
     setDeriveSource(source)
     setDeriveName('')
-    setDeriveIndex(String(next))
+    setDeriveAccount(String(source.accountIndex ?? 0))
+    setDeriveAddressIndex(null)
+    setPreviewRows([])
+    setPreviewCount(PREVIEW_PAGE)
+    setPreviewError('')
     setDeriveError('')
   }
 
   function closeDeriveModal() {
     setDeriveSource(null)
     setDeriveName('')
-    setDeriveIndex('')
+    setDeriveAddressIndex(null)
+    setPreviewRows([])
+    setPreviewError('')
     setDeriveError('')
     setDeriveLoading(false)
   }
 
+  // The typed account index, or null while it's blank/invalid.
+  const accountIndex = useMemo(() => {
+    const parsed = parseInt(deriveAccount, 10)
+    return Number.isInteger(parsed) && parsed >= 0 && parsed <= 2147483647 ? parsed : null
+  }, [deriveAccount])
+
+  // Derive the visible paths in main and show what each one would produce.
+  // Debounced so holding the spinner doesn't queue a derivation per tick, and
+  // `stale` drops a late response from a previous account index.
+  useEffect(() => {
+    if (!deriveSource || accountIndex === null) {
+      setPreviewRows([])
+      return
+    }
+    let stale = false
+    setPreviewLoading(true)
+    const timer = window.setTimeout(() => {
+      window.api
+        .walletDerivePreview({
+          sourceWalletId: deriveSource.id,
+          accountIndex,
+          startIndex: 0,
+          count: previewCount,
+        })
+        .then((rows) => {
+          if (stale) return
+          setPreviewRows(rows)
+          setPreviewError('')
+        })
+        .catch((err: unknown) => {
+          if (stale) return
+          setPreviewRows([])
+          setPreviewError(err instanceof Error ? err.message : 'Failed to derive addresses')
+        })
+        .finally(() => {
+          if (!stale) setPreviewLoading(false)
+        })
+    }, 250)
+    return () => {
+      stale = true
+      window.clearTimeout(timer)
+    }
+  }, [deriveSource, accountIndex, previewCount])
+
+  // Land on the first free path, and move off one that turns out to be taken
+  // (the account index changed under the selection).
+  useEffect(() => {
+    if (previewRows.length === 0) return
+    const selected = previewRows.find((r) => r.addressIndex === deriveAddressIndex)
+    if (selected && !selected.existingWalletName) return
+    setDeriveAddressIndex(previewRows.find((r) => !r.existingWalletName)?.addressIndex ?? null)
+  }, [previewRows, deriveAddressIndex])
+
   async function submitDerive() {
-    if (!deriveSource) return
+    if (!deriveSource || accountIndex === null || deriveAddressIndex === null) return
     setDeriveError('')
     const name = deriveName.trim()
     if (!name) {
       setDeriveError('Please enter a wallet name')
       return
     }
-    const idx = parseInt(deriveIndex, 10)
-    if (!Number.isInteger(idx) || idx < 0) {
-      setDeriveError('Account index must be a non-negative integer')
-      return
-    }
     setDeriveLoading(true)
     try {
       await window.api.walletDeriveSubaccount({
         sourceWalletId: deriveSource.id,
-        accountIndex: idx,
+        accountIndex,
+        addressIndex: deriveAddressIndex,
         name,
       })
       closeDeriveModal()
       await load()
       onWalletsChanged?.()
     } catch (err) {
-      setDeriveError(err instanceof Error ? err.message : 'Failed to derive subaccount')
+      const message = err instanceof Error ? err.message : 'Failed to derive subaccount'
+      // The picker greys out taken paths, but addWalletEntry's uniqueness guard
+      // is still the authority (and covers a race). Its error carries the
+      // clashing wallet's id — show only the human half.
+      setDeriveError(parseWalletExists(message)?.message ?? message)
       setDeriveLoading(false)
     }
   }
 
-  // Show the account-index pill on each wallet row only when at least one
-  // wallet is a non-default subaccount — avoids noise for single-account users.
-  const showAccountIndex = wallets.some((w) => (w.accountIndex ?? 0) > 0)
+  function closePhraseModal() {
+    if (reblurTimer.current !== null) window.clearTimeout(reblurTimer.current)
+    reblurTimer.current = null
+    setPhraseWallet(null)
+    setPhrase(null)
+    setPhraseRevealed(false)
+    setPhraseLoading(false)
+    setPhraseError('')
+    setPhraseCopied(false)
+  }
+
+  // Don't leave timers running if the whole Settings modal is torn down while
+  // the phrase is on screen (the seed itself goes with the component state).
+  useEffect(() => () => {
+    if (reblurTimer.current !== null) window.clearTimeout(reblurTimer.current)
+    if (copyClearTimer.current !== null) window.clearTimeout(copyClearTimer.current)
+  }, [])
+
+  async function fetchPhrase() {
+    if (!phraseWallet) return
+    setPhraseLoading(true)
+    setPhraseError('')
+    try {
+      const { mnemonic } = await window.api.walletRevealMnemonic(phraseWallet.id)
+      setPhrase(mnemonic)
+    } catch (err) {
+      setPhraseError(err instanceof Error ? err.message : 'Failed to read the recovery phrase')
+    } finally {
+      setPhraseLoading(false)
+    }
+  }
+
+  function revealPhrase() {
+    setPhraseRevealed(true)
+    if (reblurTimer.current !== null) window.clearTimeout(reblurTimer.current)
+    reblurTimer.current = window.setTimeout(() => setPhraseRevealed(false), REBLUR_MS)
+  }
+
+  async function copyPhrase() {
+    if (!phrase) return
+    await navigator.clipboard.writeText(phrase)
+    setPhraseCopied(true)
+    // Same rule as the create-wallet screen: don't let the seed linger on the
+    // clipboard (finding M5). The label says so while the copy is live.
+    if (copyClearTimer.current !== null) window.clearTimeout(copyClearTimer.current)
+    copyClearTimer.current = window.setTimeout(() => {
+      navigator.clipboard.writeText('').catch(() => {})
+      copyClearTimer.current = null
+      setPhraseCopied(false)
+    }, CLIPBOARD_CLEAR_MS)
+  }
+
+  // Show the derivation-path pill on each wallet row only when at least one
+  // wallet is off the default path — avoids noise for single-account users.
+  const showHdPath = wallets.some((w) => (w.accountIndex ?? 0) > 0 || (w.addressIndex ?? 0) > 0)
 
   if (!settings) return null
 
@@ -238,6 +389,25 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
                     onChange={async (checked) => {
                       const updated = await window.api.settingsSet({ autoReconnect: checked })
                       setSettings(updated)
+                    }}
+                  />
+                </div>
+
+                {/* Provider mode — reveals the Provider tab. Once this wallet has a
+                    provider registered on chain the tab appears regardless. */}
+                <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
+                  <div>
+                    <span className="text-text-primary text-sm">Provider Mode</span>
+                    <p className="text-text-tertiary text-xs mt-0.5">
+                      Show the Provider tab, where you can register as a provider, publish plans and lease nodes
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={settings.providerMode}
+                    onChange={async (checked) => {
+                      const updated = await window.api.settingsSet({ providerMode: checked })
+                      setSettings(updated)
+                      await reloadGlobalSettings()
                     }}
                   />
                 </div>
@@ -314,6 +484,22 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
               <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">
                 RPC Endpoint
               </label>
+
+              {/* Live health of the endpoint in use — this is where the user
+                  lands when something told them the chain was unreachable. */}
+              <div className="bg-bg-tertiary border border-border rounded-md px-3 py-2 flex items-center gap-2 text-xs">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATE_DOT[rpcHealth.state]}`} aria-hidden />
+                <span className="text-text-primary font-mono truncate">{rpcHostLabel(rpcHealth.endpoint) || '—'}</span>
+                <span className="text-text-secondary">{rpcHealthLabel(rpcHealth)}</span>
+                {rpcHealth.height !== null && (
+                  <span className="text-text-tertiary ml-auto shrink-0">
+                    block {rpcHealth.height.toLocaleString('en')}
+                    {rpcHealth.blockAgeSec !== null && ` · ${rpcHealth.blockAgeSec}s ago`}
+                  </span>
+                )}
+                {rpcHealth.error && <span className="text-danger ml-auto shrink-0 truncate">{rpcHealth.error}</span>}
+              </div>
+
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -323,7 +509,7 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
                   placeholder="https://rpc.sentinel.co:443"
                 />
                 <button
-                  onClick={saveRpc}
+                  onClick={() => saveRpc()}
                   disabled={saving || rpcInput === settings.rpcEndpoint}
                   className="btn btn-primary text-sm px-4 disabled:opacity-30"
                 >
@@ -334,46 +520,62 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <span className="text-text-secondary text-xs">
-                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>:
+                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>, fastest first:
                   </span>
-                  {rpcsLoading && (
+                  {rpcsLoading ? (
                     <span className="text-text-tertiary text-xs flex items-center gap-1">
-                      <Spinner /> Loading
+                      <Spinner /> Testing
                     </span>
+                  ) : (
+                    <button onClick={() => void loadRpcs()} className="text-text-secondary hover:text-accent text-xs transition-colors">
+                      Retest
+                    </button>
                   )}
                 </div>
                 {rpcsError && (
                   <p className="text-danger text-xs">Failed to load RPC list: {rpcsError}</p>
                 )}
-                <div className="grid grid-cols-2 gap-1.5 max-h-[200px] overflow-y-auto">
-                  {knownRpcs.map((ep) => (
-                    <button
-                      key={ep.address}
-                      onClick={async () => {
-                        setRpcInput(ep.address)
-                        setRpcChecking(ep.address)
-                        try {
-                          const result = await window.api.rpcCheck(ep.address)
-                          setRpcLatency((prev) => ({ ...prev, [ep.address]: result.latencyMs }))
-                        } catch { /* silent */ }
-                        setRpcChecking(null)
-                      }}
-                      className={`text-xs px-2.5 py-2 border transition-colors text-left flex items-center justify-between gap-1 rounded-md ${
-                        rpcInput === ep.address
-                          ? 'border-accent text-accent'
-                          : 'border-border text-text-secondary hover:text-text-primary hover:border-text-secondary'
-                      }`}
-                      title={`${ep.provider}\nHeight: ${ep.height.toLocaleString('en')}\nAvailability: ${ep.availability}%`}
-                    >
-                      <span className="truncate font-mono">
-                        {settings.rpcEndpoint === ep.address && <span className="text-success mr-1">●</span>}
-                        {ep.address.replace('https://', '').replace(':443', '')}
-                      </span>
-                      <span className="shrink-0 text-text-tertiary">
-                        {rpcChecking === ep.address ? '...' : rpcLatency[ep.address] ? `${rpcLatency[ep.address]}ms` : ep.location}
-                      </span>
-                    </button>
-                  ))}
+                <div className="space-y-1 max-h-[240px] overflow-y-auto">
+                  {sortedRpcs.map((ep) => {
+                    const state = ep.aggregatorHealthy === false ? 'down' : classifyRpc(ep.probe)
+                    const inUse = settings.rpcEndpoint === ep.endpoint
+                    return (
+                      <div
+                        key={ep.endpoint}
+                        className={`text-xs px-2.5 py-1.5 border rounded-md flex items-center gap-2 ${
+                          inUse ? 'border-accent' : 'border-border'
+                        } ${state === 'down' ? 'opacity-50' : ''}`}
+                        title={[
+                          ep.provider,
+                          ep.location,
+                          ep.probe.height !== null ? `Height: ${ep.probe.height.toLocaleString('en')}` : null,
+                          ep.availability !== null ? `Availability: ${ep.availability}%` : null,
+                          ep.probe.error,
+                        ].filter(Boolean).join('\n')}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATE_DOT[state]}`} aria-hidden />
+                        <span className={`truncate font-mono ${inUse ? 'text-accent' : 'text-text-secondary'}`}>
+                          {rpcHostLabel(ep.endpoint)}
+                        </span>
+                        <span className="shrink-0 text-text-tertiary ml-auto">
+                          {state === 'down'
+                            ? 'unreachable'
+                            : `${ep.probe.latencyMs}ms${ep.probe.blockAgeSec !== null && ep.probe.blockAgeSec > STALE_BLOCK_AGE_SEC ? ` · ${ep.probe.blockAgeSec}s behind` : ''}`}
+                        </span>
+                        {inUse ? (
+                          <span className="shrink-0 text-success">in use</span>
+                        ) : (
+                          <button
+                            onClick={() => saveRpc(ep.endpoint)}
+                            disabled={saving}
+                            className="shrink-0 text-accent hover:underline disabled:opacity-30"
+                          >
+                            Use
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
@@ -399,7 +601,10 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
 
               <div className="space-y-2">
                 {wallets.map((w) => {
-                  const isActive = w.address === currentAddress
+                  // By id, not by address: matching on address lit up every entry
+                  // sharing one, which is exactly how the duplicate-wallet bug
+                  // showed itself (two rows, both badged Active).
+                  const isActive = w.id === settings.activeWalletId
                   const isEditing = editingName === w.id
 
                   return (
@@ -437,9 +642,9 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
                           ) : (
                             <>
                               <span className="text-text-primary text-sm font-semibold">{w.name}</span>
-                              {showAccountIndex && (
+                              {showHdPath && (
                                 <span className="text-text-tertiary text-xs font-mono">
-                                  Account {w.accountIndex ?? 0}
+                                  {formatHdPath(w.accountIndex ?? 0, w.addressIndex ?? 0)}
                                 </span>
                               )}
                               <button
@@ -466,9 +671,16 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
                           <button
                             onClick={() => openDeriveModal(w)}
                             className="text-text-secondary text-xs hover:text-accent transition-colors px-2"
-                            title="Derive a new wallet from this seed at a different account index"
+                            title="Derive a new wallet from this seed at a different account or address index"
                           >
                             Derive Subaccount
+                          </button>
+                          <button
+                            onClick={() => { closePhraseModal(); setPhraseWallet(w) }}
+                            className="text-text-secondary text-xs hover:text-accent transition-colors px-2"
+                            title="Show this wallet's 12/24-word recovery phrase"
+                          >
+                            Recovery Phrase
                           </button>
                           <button
                             onClick={() => handleDelete(w)}
@@ -506,7 +718,7 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
             <div>
               <h3 className="text-text-primary text-base font-semibold">Derive Subaccount</h3>
               <p className="text-text-tertiary text-xs mt-1">
-                Creates a new wallet from the seed of <span className="text-text-secondary">{deriveSource.name}</span> at a different BIP-44 account index. Same seed, different address.
+                Creates a new wallet from the seed of <span className="text-text-secondary">{deriveSource.name}</span> at a different BIP-44 path. Same seed, different address.
               </p>
             </div>
 
@@ -525,16 +737,65 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
 
             <div className="space-y-2">
               <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">Account index</label>
-              <input
-                type="number"
-                min={0}
-                value={deriveIndex}
-                onChange={(e) => setDeriveIndex(e.target.value)}
-                className="w-full bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus font-mono"
-              />
-              <p className="text-text-tertiary text-xs font-mono">
-                m/44'/118'/{deriveIndex || '?'}'/0/0
-              </p>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={0}
+                  value={deriveAccount}
+                  onChange={(e) => setDeriveAccount(e.target.value)}
+                  className="w-24 bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus font-mono"
+                />
+                <span className="text-text-tertiary text-xs font-mono">
+                  m/44'/118'/{accountIndex ?? '?'}'/0/<span className="text-text-secondary">x</span>
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-text-secondary text-xs font-medium uppercase tracking-wide block">Address</label>
+                {previewLoading && <Spinner />}
+              </div>
+
+              {previewError && <p className="text-danger text-xs">{previewError}</p>}
+
+              {accountIndex === null ? (
+                <p className="text-text-tertiary text-xs">Enter an account index to see its addresses.</p>
+              ) : (
+                <div className="space-y-1 max-h-[220px] overflow-y-auto">
+                  {previewRows.map((row) => {
+                    const taken = row.existingWalletName !== null
+                    const selected = row.addressIndex === deriveAddressIndex
+                    return (
+                      <button
+                        key={row.addressIndex}
+                        onClick={() => setDeriveAddressIndex(row.addressIndex)}
+                        disabled={taken}
+                        title={row.path}
+                        className={`w-full text-left text-xs px-2.5 py-1.5 border rounded-md flex items-center gap-2 transition-colors ${
+                          selected ? 'border-accent' : 'border-border'
+                        } ${taken ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-focus'}`}
+                      >
+                        <span className="font-mono text-text-tertiary shrink-0 w-6">{row.addressIndex}</span>
+                        <span className={`font-mono truncate ${selected ? 'text-accent' : 'text-text-secondary'}`}>
+                          {row.address}
+                        </span>
+                        {taken && (
+                          <span className="text-text-tertiary ml-auto shrink-0">In wallet · {row.existingWalletName}</span>
+                        )}
+                      </button>
+                    )
+                  })}
+                  {previewRows.length > 0 && previewCount < 20 && (
+                    <button
+                      onClick={() => setPreviewCount((c) => Math.min(c + PREVIEW_PAGE, 20))}
+                      className="text-text-secondary hover:text-accent text-xs transition-colors py-1"
+                    >
+                      Show more
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             {deriveError && (
@@ -551,12 +812,110 @@ export default function Settings({ currentAddress, onClose, onWalletSwitch, onWa
               </button>
               <button
                 onClick={submitDerive}
-                disabled={deriveLoading || !deriveName.trim()}
+                disabled={deriveLoading || !deriveName.trim() || deriveAddressIndex === null}
                 className="btn btn-primary text-sm px-3 py-1.5 disabled:opacity-50"
               >
                 {deriveLoading ? 'Deriving...' : 'Derive'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {phraseWallet && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]"
+          onClick={() => !phraseLoading && closePhraseModal()}
+        >
+          <div
+            className="bg-bg-secondary border border-border w-full max-w-md mx-4 p-5 space-y-4 rounded-lg shadow-overlay"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <h3 className="text-text-primary text-base font-semibold">Recovery Phrase</h3>
+              <p className="text-text-tertiary text-xs mt-1">
+                <span className="text-text-secondary">{phraseWallet.name}</span> · {phraseWallet.address}
+              </p>
+            </div>
+
+            {phrase === null ? (
+              <>
+                <div className="border border-danger bg-danger-subtle rounded-md p-3 space-y-2">
+                  <p className="text-danger text-xs font-medium">Anyone with these words controls this wallet's funds.</p>
+                  <ul className="text-text-secondary text-xs space-y-1 list-disc pl-4">
+                    <li>Never share them — nobody from Katacomb will ever ask for them.</li>
+                    <li>Make sure nobody can see your screen, and that you aren't recording or sharing it.</li>
+                    <li>Write them down offline; anything typed into a website is a theft attempt.</li>
+                  </ul>
+                </div>
+
+                {phraseError && <p className="text-danger text-xs">{phraseError}</p>}
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    onClick={closePhraseModal}
+                    disabled={phraseLoading}
+                    className="text-text-secondary hover:text-text-primary text-sm px-3 py-1.5 transition-colors disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={fetchPhrase}
+                    disabled={phraseLoading}
+                    className="btn btn-primary text-sm px-3 py-1.5 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {phraseLoading && <Spinner />}
+                    Show phrase
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="relative">
+                  <div
+                    className={`grid grid-cols-3 gap-1.5 transition-[filter] ${
+                      phraseRevealed ? '' : 'blur-sm select-none pointer-events-none'
+                    }`}
+                  >
+                    {phrase.split(/\s+/).map((word, i) => (
+                      <div
+                        key={i}
+                        className="bg-bg-tertiary border border-border rounded-sm px-2 py-1 flex items-baseline gap-1.5"
+                      >
+                        <span className="text-text-tertiary text-[10px] font-mono w-4 shrink-0">{i + 1}</span>
+                        <span className="text-text-primary text-xs font-mono truncate">{word}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {!phraseRevealed && (
+                    <button
+                      onClick={revealPhrase}
+                      className="absolute inset-0 flex items-center justify-center"
+                    >
+                      <span className="btn btn-primary text-xs px-3 py-1.5">Click to reveal</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={copyPhrase}
+                    className="text-text-secondary hover:text-accent text-xs transition-colors"
+                  >
+                    {phraseCopied ? 'Copied — clipboard clears itself in 30s' : 'Copy to clipboard'}
+                  </button>
+                  <span className="text-text-tertiary text-xs ml-auto">
+                    {phraseRevealed ? 'Hides automatically after 60s' : 'Hidden'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-end pt-1">
+                  <button onClick={closePhraseModal} className="btn btn-primary text-sm px-3 py-1.5">
+                    Done
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

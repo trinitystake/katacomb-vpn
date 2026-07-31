@@ -70,6 +70,15 @@ Strict Electron security isolation with three process boundaries:
 - `fs-utils.ts`: `writeFileAtomic(path, data, mode=0o600)` (temp + rename). Use it for all settings/wallet/session/cache writes — never `writeFileSync` directly for persisted state.
 - `kill-switch.ts`: iptables-based kill switch (helper `killswitch-on`/`killswitch-off`); `traffic-stats.ts`, `node-tester.ts`, `plan-service.ts`/`provider-service.ts` and their `*-cache.ts`, `nodes-cache.ts` round out the main process.
 - `async-utils.ts` (`withTimeout`), `connect-decisions.ts` (pure refund-message + reconnect/backoff decisions, `serviceTypeToNodeType` for the preflight, `isDnsProvisionError`/`stripDnsLines` for the DNS fallback), `tx-utils.ts` (`broadcastOrTimeout`): the **Electron-free, unit-tested** reliability helpers. Keep new pure decision logic here rather than inline in the Electron-coupled modules, so it stays testable under the native runner.
+- `node-normalize.ts`: the aggregator sends `null` for unknown text fields (`moniker`,
+  `country`, `city`, `version`, `api`, `asn` — ~40 nodes each) while `SentNode` types them
+  as `string`. `normalizeNodes()` runs on **every** way the feed enters the app
+  (`fetchNodes`, `bootstrapNodesCache`) so that type is true downstream — don't re-add
+  `|| ''` guards at read sites, and don't add a fourth entry point that skips it. A
+  renderer `node.country.toLowerCase()` on a raw entry white-screens the app.
+- `price-service.ts`: P2P→USD rate from CoinGecko (`ids=sentinel`), 15-min memory cache,
+  **display only** — no transaction figure is ever derived from it, and failure returns the
+  last value or null so the "≈ $x" hint just disappears.
 
 ### Privilege Escalation
 
@@ -159,7 +168,13 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 
 - Hooks in `src/renderer/hooks/`: `useWallet` (balance polling 300s), `useNodes` (node fetch + filter/sort, 60s refresh), `useConnection` (status polling 3s). Polling intervals are hardcoded per-hook — not user-tunable.
 - Node table uses `@tanstack/react-virtual` for virtualized rendering (5000+ nodes).
-- BIP-39 validation uses direct JSON wordlist import + Set lookup (not `bip39.validateMnemonic` — that function's dynamic require fails in Vite's renderer bundle).
+- BIP-39 validation lives in `src/shared/mnemonic.ts` (`checkMnemonic`, pure + unit-tested):
+  word list, word count and **checksum**, re-run on every keystroke so the Import button
+  only enables on a phrase that will actually import. It uses `@scure/bip39` — the package
+  main generates seeds with — never the `bip39` package's `validateMnemonic`, whose dynamic
+  require fails in Vite's renderer bundle. `MnemonicInput` imports `check.phrase` (NFKD,
+  lowercase, single-spaced), not the raw textarea value: that is the form the checksum was
+  verified against and the only one CosmJS's `EnglishMnemonic` accepts.
 - **Dark-only** — bg `#0f172a`, accent `#60a5fa`. There is deliberately no theme switch:
   `tokens.css` `:root` holds the only semantic tokens, and components read those (never
   primitives, never a `dark:` variant). Don't reintroduce a `.dark` selector.
@@ -337,11 +352,84 @@ same config through `stripDnsLines()`. User consent only — auto-reconnect neve
 DNS, and the renderer states that system DNS then leaves the tunnel.
 
 **Subscriptions.** `plan-service.ts` has `querySubscriptions` / `cancelSubscription` /
-`updateSubscriptionPolicy` behind `SUBSCRIPTION_*` IPC, surfaced as "Manage
-subscriptions" in the Plans tab. `RenewalPricePolicy` 0 (UNSPECIFIED) is the hub's own
-"never renew" (`Subscription.RenewalAt()` returns the zero time for it; cancel sets it
-to 0); 7 (ALWAYS) stays the default. Cancel marks the subscription inactive-pending —
-it is NOT an instant refund, so don't word it as one.
+`renewSubscription` / `updateSubscriptionPolicy` behind `SUBSCRIPTION_*` IPC, surfaced
+as "Manage subscriptions" in the Plans tab. `RenewalPricePolicy` 0 (UNSPECIFIED) is the
+hub's own "never renew" (`Subscription.RenewalAt()` returns the zero time for it; cancel
+sets it to 0); 7 (ALWAYS) stays the default. Cancel marks the subscription
+inactive-pending — it is NOT an instant refund, so don't word it as one. Renew is
+plan-only (a node subscription has no plan price to charge). `SubscriptionManager` takes
+an `onSubscriptionsChanged` callback: it must refresh `usePlans().allocations` too, or
+the allocations footer and `ConnectionModal` keep offering a cancelled subscription for
+up to the 120 s poll. `subscriptionShare` exists in the SDK and is deliberately unwired.
+
+### Provider console (acting AS a provider)
+
+The Plans tab is the consumer side; the **Provider** tab (5th, hidden unless
+`settings.providerMode` or this wallet already has a provider on chain — see
+`useProvider().visible`) is the producer side. `provider-console.ts` holds the ops,
+`provider-msgs.ts` the pure/unit-tested message builders, `lease-query.ts` +
+`protobuf-query.ts` the queries the SDK doesn't provide.
+
+**Chain facts (verified against sentinelhub v12 + live mainnet, not inferred):**
+- Provider address = the account's 20 bytes re-encoded with the `sentprov` prefix
+  (`toProviderAddress`). Every provider/plan/lease msg's `from` is that address, but
+  `GetSigners()` converts back, so `signAndBroadcast(accountAddress, …)` still signs.
+  `MsgRegisterProviderRequest` is the ONE exception — its `from` is the account address.
+- The registration deposit goes to the **community pool** (`FundCommunityPool`), so it
+  is spent, not escrowed. It is `0udvpn` on mainnet today but is a governance param —
+  read it live, never hardcode.
+- Provider and plan both land **INACTIVE**; activation is a second tx, and a plan can't
+  activate under an inactive provider.
+- **`MsgLinkNode` requires an active lease** (`HasAnyLeaseForNodeByProvider`). Adding a
+  node to a plan is always lease-then-link. `MsgStartLease` escrows
+  `hourlyPrice × maxHours` (live params: min 1 h, max 720 h), pays the node hourly, and
+  `MsgEndLease` refunds the remainder and unlinks. Set the lease's renewal policy to 7
+  so it doesn't silently expire and drop the node — that's why there's no manual renew.
+
+**SDK 2.0.4 defects worked around here — do NOT "simplify" back onto the SDK:**
+- `planCreate()` sends `{gigabytes, hours}`; the v3 msg wants `{bytes, duration}`. Both
+  fields are dropped at encode time. `buildCreatePlanMsg` builds the EncodeObject by
+  hand; `provider-msgs.test.ts` asserts the round-trip AND asserts the SDK is still
+  broken, so the guard fails loudly once upstream fixes it. (`nodeRegister`'s
+  `remoteUrl` vs `remoteAddrs` has the same bug — irrelevant, node registration is
+  signed by the node's own key on the dvpnx host, never by this wallet.)
+- **`x/lease` has no SDK module** — protobufs ship under `dist/protobuf/sentinel/lease/v1/`
+  but `SentinelRegistry` omits the type URLs. `PROVIDER_REGISTRY` spreads
+  `SentinelRegistry` and adds them; it MUST be passed to `connectWithSigner`, whose
+  `Object.assign({registry: default}, options)` *replaces* rather than merges.
+- **`provider.params()` targets `sentinel.provider.v2.QueryService`, which the chain does
+  not implement** ("Unimplemented: unknown request"). `getProviderDeposit` goes through
+  the v3 service via `withProtobufQuery`. v2 *does* still serve QueryProvider/QueryProviders,
+  which is why the SDK's other provider queries work.
+- `plansForProvide` (sic) never sends a status, so it defaults to `STATUS_UNSPECIFIED` —
+  which the hub treats as "no filter". That is exactly what "my plans" needs, since a
+  freshly created plan is inactive. Confirmed live: it returns statuses 1 and 3.
+- Deep SDK imports need the `.js` extension (no `exports` map; Node's native test runner
+  resolves them as ESM).
+
+**A missing record is THROWN, not empty.** A single-address lookup (`provider.provider`,
+`node.node`) for something that doesn't exist fails with gRPC NotFound (code 22), which
+CosmJS raises as an Error — so "I haven't registered a provider yet", the normal state
+for nearly every wallet, arrives as a crash unless translated. `isChainNotFound`
+(`tx-utils.ts`, unit-tested against the real error text) is the narrow matcher; anything
+else must keep throwing, or an unreachable RPC gets reported as "you have no provider".
+Don't assume a chain read returns undefined for a missing key — check it live against an
+address that really is absent, not just one that exists.
+
+**Per-plan counters** (`getPlanSubscriberStats`, `PROVIDER_PLAN_STATS`): the subscription
+total is the chain's own `pagination.total` (one `countTotal` request — exact and cheap),
+but the ACTIVE count has no counter and must be scanned page by page, so it stops at
+`SUBS_MAX_SCAN` and reports `truncated` — mainnet plan 36 has 800k+ subscriptions from a
+single account. The node count reuses `listNodesForPlan`, whose 10-minute cache is
+invalidated (`invalidatePlanNodes`) after our own link/unlink so the console doesn't
+re-read the pre-link answer.
+
+**Design invariant:** the console is a **stateless view over chain state**. Every action
+is one tx and the multi-step flows (register→activate, create→activate, lease→link) are
+resumable because the middle state lives on chain — a failed link leaves the node under
+"Leased, not linked" with a Link button. Don't add a local wizard that tracks progress.
+Money figures (deposit, lease total) are computed in main from on-chain values and never
+taken from the renderer, the same rule `cachedPlanCost` follows.
 
 v9.0.0 nodes expose a `service_metadata` array on `/info` (Xray Reality keys,
 Hysteria2 obfs, transport variants) that the SDK's `NodeInfo` type lacks — the xray

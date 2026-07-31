@@ -4,6 +4,8 @@ import { usePlans } from '../hooks/usePlans'
 import { useTrafficStats } from '../hooks/useTrafficStats'
 import { useReconnect } from '../hooks/useReconnect'
 import Spinner from './Spinner'
+import { displayConnectError } from '../utils/connect-errors'
+import ChainUnreachable from './ChainUnreachable'
 import type { SessionInfo } from '../types'
 
 interface Props {
@@ -150,13 +152,14 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
 
       {error && (
         <div className="mx-5 mt-3 bg-danger-subtle border border-danger p-2 rounded-md shrink-0">
-          <p className="text-danger text-sm">{error}</p>
+          <p className="text-danger text-sm">{displayConnectError(error)}</p>
         </div>
       )}
 
       {sessions.length === 0 && allocations.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center">
+        <div className="flex-1 flex flex-col items-center justify-center gap-2">
           <p className="text-text-secondary text-sm">No active sessions</p>
+          <ChainUnreachable what="this list" />
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-5 space-y-2">

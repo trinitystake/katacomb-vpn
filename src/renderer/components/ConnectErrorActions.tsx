@@ -1,4 +1,6 @@
-import { displayConnectError, isDnsProvisionFailure } from '../utils/connect-errors'
+import { displayConnectError, isDnsProvisionFailure, isInsufficientFunds, isRpcUnreachable } from '../utils/connect-errors'
+import InsufficientFunds from './InsufficientFunds'
+import { useNavigation } from '../contexts/NavigationContext'
 
 interface Props {
   error: string
@@ -31,6 +33,43 @@ export default function ConnectErrorActions({
   onRetryWithoutDns,
 }: Props) {
   const dnsFailure = isDnsProvisionFailure(error)
+  const { openSettings } = useNavigation()
+
+  // The chain was never reached, so retrying against the same endpoint mostly
+  // repeats the wait. Point at the endpoint list, and keep the plain retry for
+  // the case where it was a blip.
+  if (isRpcUnreachable(error)) {
+    return (
+      <div className="space-y-3">
+        <div className="bg-danger-subtle border border-danger p-3 rounded-md">
+          <p className="text-danger text-sm">{displayConnectError(error)}</p>
+        </div>
+        <button onClick={() => openSettings('network')} className="btn btn-primary w-full">
+          Open network settings
+        </button>
+        <button
+          type="button"
+          onClick={onStartOver}
+          className="text-text-tertiary hover:text-text-secondary text-xs w-full text-center transition-colors"
+        >
+          Try again
+        </button>
+      </div>
+    )
+  }
+
+  // Nothing was charged, so this isn't a tunnel failure to retry — it's a top-up
+  // prompt. "Try Again" below returns to the form, which re-checks the balance.
+  if (isInsufficientFunds(error)) {
+    return (
+      <div className="space-y-3">
+        <InsufficientFunds message={displayConnectError(error)} />
+        <button onClick={onStartOver} className="btn btn-primary w-full">
+          Try Again
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-3">

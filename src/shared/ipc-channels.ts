@@ -11,8 +11,12 @@ export const IPC = {
   WALLET_LIST: 'wallet:list',
   WALLET_SWITCH: 'wallet:switch',
   WALLET_DELETE: 'wallet:delete',
+  WALLET_DELETE_ALL: 'wallet:delete-all',
   WALLET_RENAME: 'wallet:rename',
+  WALLET_STORE_STATUS: 'wallet:store-status',
   WALLET_DERIVE_SUBACCOUNT: 'wallet:derive-subaccount',
+  WALLET_DERIVE_PREVIEW: 'wallet:derive-preview',
+  WALLET_REVEAL_MNEMONIC: 'wallet:reveal-mnemonic',
 
   // Settings
   SETTINGS_GET: 'settings:get',
@@ -47,9 +51,9 @@ export const IPC = {
   NODE_TEST_CANCEL: 'node-test:cancel',
   NODE_TEST_RESULTS: 'node-test:results',
 
-  // RPC health check
-  RPC_CHECK: 'rpc:check',
-  RPC_LIST: 'rpc:list',
+  // RPC health
+  RPC_HEALTH_GET: 'rpc:health-get',
+  RPC_PROBE_ALL: 'rpc:probe-all',
 
   // Binary checks
   BINARY_CHECK: 'binary:check',
@@ -63,14 +67,38 @@ export const IPC = {
   PLAN_NODES: 'plan:nodes',
   PLAN_LIST_FOR_NODE: 'plan:list-for-node',
 
-  // Subscription management (cancel / auto-renewal policy)
+  // Subscription management (cancel / renew / auto-renewal policy)
   SUBSCRIPTION_LIST: 'subscription:list',
   SUBSCRIPTION_CANCEL: 'subscription:cancel',
+  SUBSCRIPTION_RENEW: 'subscription:renew',
   SUBSCRIPTION_UPDATE_POLICY: 'subscription:update-policy',
 
   // Providers
   PROVIDER_GET: 'provider:get',
   PROVIDER_LIST: 'provider:list',
+
+  // Provider console — acting AS a provider with this wallet
+  PROVIDER_ME: 'provider:me',
+  PROVIDER_DEPOSIT: 'provider:deposit',
+  PROVIDER_REGISTER: 'provider:register',
+  PROVIDER_UPDATE_DETAILS: 'provider:update-details',
+  PROVIDER_SET_STATUS: 'provider:set-status',
+  PROVIDER_PLANS: 'provider:plans',
+  PROVIDER_PLAN_CREATE: 'provider:plan-create',
+  PROVIDER_PLAN_SET_STATUS: 'provider:plan-set-status',
+  PROVIDER_PLAN_LINK: 'provider:plan-link',
+  PROVIDER_PLAN_UNLINK: 'provider:plan-unlink',
+  PROVIDER_PLAN_STATS: 'provider:plan-stats',
+
+  // Token price in USD (display only — never used to price a transaction)
+  PRICE_TOKEN: 'price:token',
+
+  // Leases (x/lease — the prerequisite for linking a node to a plan)
+  LEASE_LIST: 'lease:list',
+  LEASE_PARAMS: 'lease:params',
+  LEASE_QUOTE: 'lease:quote',
+  LEASE_START: 'lease:start',
+  LEASE_END: 'lease:end',
 
   // Events (main → renderer)
   CONNECTION_PROGRESS: 'connection:progress',
@@ -81,4 +109,5 @@ export const IPC = {
   NODE_TEST_PROGRESS: 'node-test:progress',
   NODES_UPDATE: 'nodes:update',
   PLAN_DISCOVER_PROGRESS: 'plan:discover:progress',
+  RPC_HEALTH_UPDATE: 'rpc:health-update',
 } as const

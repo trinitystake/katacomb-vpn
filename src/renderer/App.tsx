@@ -5,6 +5,7 @@ import { useSessions } from './hooks/useSessions'
 import { useReconnect } from './hooks/useReconnect'
 import type { SessionInfo } from './types'
 import MnemonicInput from './components/MnemonicInput'
+import WalletPicker from './components/WalletPicker'
 import MapView from './components/MapView'
 import NodeTable from './components/NodeTable'
 import WalletPanel from './components/WalletPanel'
@@ -12,13 +13,16 @@ import ConnectedBar from './components/ConnectedBar'
 import IpDisplay from './components/IpDisplay'
 import DisconnectButton from './components/DisconnectButton'
 import StatusBar from './components/StatusBar'
+import RpcBanner from './components/RpcBanner'
 import ActiveSessions from './components/ActiveSessions'
 import PlanDiscovery from './components/PlanDiscovery'
+import ProviderConsole from './components/provider/ProviderConsole'
+import { useProvider } from './hooks/useProvider'
 import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { NodesProvider } from './contexts/NodesContext'
-import { NavigationProvider, useNavigation } from './contexts/NavigationContext'
+import { NavigationProvider, useNavigation, type MainTab } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
 import AppLogo from './components/AppLogo'
 
@@ -26,12 +30,33 @@ function AppInner() {
   const wallet = useWallet()
   const { status: connStatus } = useConnection()
   const isConnected = connStatus.state === 'connected' || connStatus.state === 'reconnecting'
-  const [showSettings, setShowSettings] = useState(false)
-  const { mainTab, setMainTab } = useNavigation()
+  const { mainTab, setMainTab, settingsTab, openSettings, closeSettings } = useNavigation()
   const [showBinarySetup, setShowBinarySetup] = useState(true)
+  // "Add another wallet" from the picker: show the import screen even though
+  // wallets are already stored.
+  const [addingWallet, setAddingWallet] = useState(false)
+  // Clear it once a wallet is live, so a later Lock lands on the picker rather
+  // than resuming the add-a-wallet flow the user already finished.
+  useEffect(() => {
+    if (wallet.address) setAddingWallet(false)
+  }, [wallet.address])
   const sessionsState = useSessions()
   const sessionCount = sessionsState.sessions.length
   const reconnect = useReconnect()
+  // One instance for the whole app: it decides whether the tab exists AND feeds the
+  // console, so a refresh from inside the console also updates the tab. Skipped
+  // while the tunnel is up — the chain isn't reachable through it.
+  const providerState = useProvider(wallet.address, !isConnected)
+  const providerVisible = providerState.visible
+  const mainTabs: MainTab[] = providerVisible
+    ? ['map', 'nodes', 'plans', 'sessions', 'provider']
+    : ['map', 'nodes', 'plans', 'sessions']
+
+  // Turning provider mode back off while standing on that tab would leave the
+  // main area blank — fall back to the map.
+  useEffect(() => {
+    if (mainTab === 'provider' && !providerVisible) setMainTab('map')
+  }, [mainTab, providerVisible, setMainTab])
 
   // Tray "Connect": reconnect to the most recent session (main already showed the
   // window). If there's none or it fails, the window is open for a manual connect.
@@ -59,11 +84,31 @@ function AppInner() {
     )
   }
 
+  // Three states, not two: seeds can be stored with none active (after Lock, or
+  // when the active one couldn't be restored). Showing the import screen there
+  // hid the stored wallets, and retyping a seed the app already had is what
+  // created duplicate entries for one address.
   if (!wallet.address) {
+    const stored = wallet.store?.wallets ?? []
+    if (stored.length > 0 && !addingWallet) {
+      return (
+        <WalletPicker
+          status={wallet.store!}
+          onChanged={wallet.refreshIdentity}
+          onAddAnother={() => setAddingWallet(true)}
+        />
+      )
+    }
     return (
       <MnemonicInput
         onImport={async (mnemonic, name) => {
           await wallet.importWallet(mnemonic, name)
+        }}
+        onBackToWallets={stored.length > 0 ? () => setAddingWallet(false) : undefined}
+        onUseExisting={async (walletId) => {
+          await window.api.walletSwitch(walletId)
+          setAddingWallet(false)
+          await wallet.refreshIdentity()
         }}
       />
     )
@@ -86,7 +131,7 @@ function AppInner() {
         <div className="flex items-center gap-3">
           <WalletPanel address={wallet.address} name={wallet.name} onLogout={wallet.logout} connected={isConnected} />
           <button
-            onClick={() => setShowSettings(true)}
+            onClick={() => openSettings()}
             className="text-text-secondary hover:text-accent text-sm transition-colors"
             title="Settings"
           >
@@ -94,6 +139,8 @@ function AppInner() {
           </button>
         </div>
       </header>
+
+      <RpcBanner />
 
       {connStatus.killSwitchTeardownFailed && (
         <div className="px-5 py-1.5 bg-danger-subtle border-b border-danger text-danger text-xs flex items-center gap-2">
@@ -105,9 +152,10 @@ function AppInner() {
         </div>
       )}
 
-      {/* Main tabs */}
+      {/* Main tabs. Provider is hidden until this wallet opts in (Settings → General)
+          or already has a provider registered on chain. */}
       <nav className="flex border-b border-border bg-bg-secondary px-5 shrink-0">
-        {(['map', 'nodes', 'plans', 'sessions'] as const).map((t) => (
+        {mainTabs.map((t) => (
           <button
             key={t}
             onClick={() => setMainTab(t)}
@@ -139,6 +187,7 @@ function AppInner() {
             refresh={sessionsState.refresh}
           />
         )}
+        {mainTab === 'provider' && <ProviderConsole {...providerState} />}
       </main>
 
       <StatusBar />
@@ -147,12 +196,13 @@ function AppInner() {
         <BinarySetup onDismiss={() => setShowBinarySetup(false)} />
       )}
 
-      {showSettings && (
+      {settingsTab && (
         <Settings
+          initialTab={settingsTab}
           currentAddress={wallet.address}
-          onClose={() => setShowSettings(false)}
+          onClose={closeSettings}
           onWalletSwitch={() => {
-            setShowSettings(false)
+            closeSettings()
             // Trigger re-init by refreshing wallet state
             window.location.reload()
           }}

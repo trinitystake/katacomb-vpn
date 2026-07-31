@@ -20,7 +20,7 @@ import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
 import { withTimeout } from './async-utils'
-import { broadcastOrTimeout } from './tx-utils'
+import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { buildXRayConfig } from './xray-config'
 import { buildHysteria2Config } from './hysteria-config'
@@ -42,6 +42,9 @@ const TX_TIMEOUT_HEIGHT_OFFSET = 30
 const SESSION_TX_TIMEOUT_MESSAGE =
   'The transaction timed out before confirmation. It may still be processing — check ' +
   'the Session tab shortly and cancel any unexpected session to reclaim your funds.'
+const END_SESSION_TX_TIMEOUT_MESSAGE =
+  'The cancel transaction timed out before confirmation. It may still be processing — ' +
+  'refresh the Session tab shortly to see whether the session ended.'
 
 // --- Session config persistence ---
 
@@ -234,9 +237,7 @@ export async function subscribeToNode(params: {
       SESSION_TX_TIMEOUT_MESSAGE,
     )
 
-    if (tx.code !== 0) {
-      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
-    }
+    assertTxSucceeded(tx, 'Transaction')
 
     // Step 3: Extract session ID
     sendProgress('3/5', 'Extracting session ID...')
@@ -275,11 +276,12 @@ export async function endSession(params: {
       id: Long.fromString(sessionId, true),
     })
 
-    const tx = await client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: end session')
+    const tx = await broadcastOrTimeout(
+      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: end session'),
+      END_SESSION_TX_TIMEOUT_MESSAGE,
+    )
 
-    if (tx.code !== 0) {
-      throw new Error(`End session failed with code ${tx.code}: ${tx.rawLog}`)
-    }
+    assertTxSucceeded(tx, 'End session')
 
     deleteSessionConfig(sessionId)
   } finally {

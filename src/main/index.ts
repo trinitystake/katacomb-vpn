@@ -8,8 +8,9 @@ import {
   performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
+import { startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
 import { sweepStaleSessionFiles } from './chain-service'
-import { migrateLegacyUserData } from './settings'
+import { migrateLegacyUserData, dedupeWalletEntries } from './settings'
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
 import { IPC } from '../shared/ipc-channels'
@@ -268,6 +269,9 @@ app.whenReady().then(() => {
   // the wallet store): the rename moved the directory, so this brings the user's
   // profile across from the pre-rename location.
   migrateLegacyUserData()
+  // Repair installs that predate the uniqueness guard in addWalletEntry, where
+  // re-importing a stored seed created a second entry for the same address.
+  dedupeWalletEntries()
   checkSystemDeps()
   // The root daemon (deb install) handles privileged ops password-free, so the
   // per-op polkit helper + its install prompt are only needed on the fallback
@@ -284,6 +288,9 @@ app.whenReady().then(() => {
   // nodesGetCached(), then start the 60s background refresh loop.
   bootstrapNodesCache()
   startNodeRefreshTimer()
+  // Watch the RPC endpoint every chain call depends on, so an unhealthy one is
+  // visible in the status bar instead of showing up as silently stale data.
+  startRpcMonitor()
   createWindow()
   createTrayIcon()
   // Keep the tray tooltip + menu in sync with connect/disconnect (incl. from the
@@ -314,6 +321,7 @@ app.on('before-quit', (e) => {
   e.preventDefault()
   quitHandled = true
   stopNodeRefreshTimer()
+  stopRpcMonitor()
   void (async () => {
     await Promise.race([
       (async () => {

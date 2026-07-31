@@ -13,7 +13,7 @@ import {
 import { BrowserWindow } from 'electron'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
-import { broadcastOrTimeout } from './tx-utils'
+import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
@@ -135,6 +135,11 @@ export function listCachedPlans(): { plans: EnrichedPlan[]; fetchedAt: number | 
 
 const planNodesCache = new Map<string, { addresses: string[]; fetchedAt: number }>()
 const PLAN_NODES_TTL_MS = 10 * 60 * 1000
+
+/** Drop a plan's cached node list after we ourselves link/unlink one of its nodes. */
+export function invalidatePlanNodes(planId: string): void {
+  planNodesCache.delete(planId)
+}
 
 export async function listNodesForPlan(planId: string): Promise<string[]> {
   if (!/^\d+$/.test(planId)) return []
@@ -303,9 +308,40 @@ export async function cancelSubscription(params: {
       } as Parameters<typeof client.subscriptionCancel>[0]),
       TX_TIMEOUT_MESSAGE,
     )
-    if (tx.code !== 0) {
-      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
-    }
+    assertTxSucceeded(tx, 'Transaction')
+  } finally {
+    client.disconnect()
+  }
+}
+
+/**
+ * Renew a subscription for another period at the current on-chain price, rather
+ * than buying a fresh one. Charges the plan's price again, so callers must gate
+ * it on funds the same way a first subscribe does.
+ */
+export async function renewSubscription(params: {
+  wallet: DirectSecp256k1HdWallet
+  address: string
+  subscriptionId: string
+  denom: string
+}): Promise<void> {
+  const { wallet, address, subscriptionId, denom } = params
+  const client = await withTimeout(
+    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    RPC_CONNECT_TIMEOUT_MS,
+    'RPC connect',
+  )
+  try {
+    const tx = await broadcastOrTimeout(
+      client.subscriptionRenew({
+        from: address,
+        id: Long.fromString(subscriptionId, true),
+        denom,
+        memo: 'katacomb-vpn: renew subscription',
+      } as Parameters<typeof client.subscriptionRenew>[0]),
+      TX_TIMEOUT_MESSAGE,
+    )
+    assertTxSucceeded(tx, 'Transaction')
   } finally {
     client.disconnect()
   }
@@ -334,9 +370,7 @@ export async function updateSubscriptionPolicy(params: {
       } as Parameters<typeof client.subscriptionUpdate>[0]),
       TX_TIMEOUT_MESSAGE,
     )
-    if (tx.code !== 0) {
-      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
-    }
+    assertTxSucceeded(tx, 'Transaction')
   } finally {
     client.disconnect()
   }
@@ -411,9 +445,7 @@ export async function startSessionWithExistingSubscription(params: {
       TX_TIMEOUT_MESSAGE,
     )
 
-    if (tx.code !== 0) {
-      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
-    }
+    assertTxSucceeded(tx, 'Transaction')
 
     const sessionEvent = searchEvent(SubscriptionEventCreateSession.type, tx.events)
     if (!sessionEvent) {
@@ -461,9 +493,7 @@ export async function subscribeToPlan(params: {
       TX_TIMEOUT_MESSAGE,
     )
 
-    if (tx.code !== 0) {
-      throw new Error(`Transaction failed with code ${tx.code}: ${tx.rawLog}`)
-    }
+    assertTxSucceeded(tx, 'Transaction')
 
     const sessionEvent = searchEvent(SubscriptionEventCreateSession.type, tx.events)
     if (!sessionEvent) {

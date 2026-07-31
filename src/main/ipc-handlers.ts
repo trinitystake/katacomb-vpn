@@ -3,6 +3,10 @@ import { is } from '@electron-toolkit/utils'
 import { existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { IPC } from '../shared/ipc-channels'
+import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
+import { checkFunds, insufficientFundsMessage, udvpnOf } from '../shared/funds'
+import { isRpcConnectivityError, rpcHostLabel } from '../shared/rpc-health'
+import { getRpcHealth, onRpcEndpointChanged, probeAll, reportRpcFailure } from './rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
   hasStoredWallet,
@@ -11,6 +15,7 @@ import {
   restoreWallet,
   switchWallet,
   deriveSubaccount,
+  previewDerivations,
   getAddress,
   getBalance,
   getActiveSessions,
@@ -21,11 +26,32 @@ import {
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, updateSubscriptionPolicy } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
+import {
+  getMyProvider,
+  getProviderDeposit,
+  getNodeHourlyPrice,
+  getPlanSubscriberStats,
+  listMyPlans,
+  registerProvider,
+  updateProviderDetails,
+  setProviderStatus,
+  createPlan,
+  setPlanStatus,
+  linkNode,
+  unlinkNode,
+  startLease,
+  endLease,
+} from './provider-console'
+import { listLeasesForProvider, getLeaseParams } from './lease-query'
+import { getTokenPrice } from './price-service'
+import { assertValidLeaseHours, leaseDepositNumber, leaseDepositUdvpn, toProviderAddress } from './provider-msgs'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
-import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, type AppSettings } from './settings'
+import { getCachedPlans } from './plan-cache'
+import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, canUnlockWallet, getWalletMnemonic, type AppSettings } from './settings'
 import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
+import { normalizeNodes } from './node-normalize'
 import {
   connectV2Ray,
   connectWireGuard,
@@ -105,8 +131,11 @@ let killSwitchFailed = false
 // can warn even in the idle state (finding M6).
 let killSwitchTeardownFailed = false
 
-// Cached values returned when VPN is active and RPC is unreachable
-let lastKnownBalance: { denom: string; amount: string }[] = []
+// Cached values returned when VPN is active and RPC is unreachable. Balance stays
+// null until a fetch actually succeeds: the renderer's affordability check must be
+// able to tell "wallet is empty" from "we couldn't read the balance" — reading an
+// unreachable RPC as 0 would grey out the pay buttons of a funded wallet.
+let lastKnownBalance: { denom: string; amount: string }[] | null = null
 let lastKnownSessions: unknown[] = []
 let cachedNodes: { address: string; moniker: string; country: string }[] = []
 
@@ -126,7 +155,9 @@ let nodeRefreshTimer: ReturnType<typeof setInterval> | null = null
 interface PublicRpcEntry {
   provider: string
   address: string
-  status: number
+  // The aggregator's own up/down verdict — a boolean in the feed, despite the
+  // number this was originally typed as.
+  status: boolean
   height: number
   location: string
   isLoadbalance: number
@@ -328,6 +359,63 @@ async function preflightConnect(nodeType: number, apiField: string): Promise<voi
       `${protocol}. Refresh the node list and pick another node.`
     )
   }
+}
+
+/**
+ * Refuse to broadcast when the wallet can't cover `costUdvpn` plus gas. Pass 0 for
+ * a gas-only tx. The renderer runs the same check to disable its pay buttons, but
+ * its balance is polled and can be minutes stale — this one reads it fresh.
+ *
+ * Fails OPEN: if the balance can't be read (RPC down, or a tunnel is up and RPC is
+ * unreachable through it) we let the tx proceed and let the chain decide. Blocking
+ * someone from ending a session because we couldn't reach an RPC is worse than the
+ * on-chain failure, which `assertTxSucceeded` now reports readably anyway.
+ */
+async function assertSufficientFunds(costUdvpn: number): Promise<void> {
+  let balances: { denom: string; amount: string }[]
+  try {
+    balances = await getBalance()
+  } catch {
+    reportRpcFailure()
+    return
+  }
+  const check = checkFunds(udvpnOf(balances), costUdvpn)
+  if (!check.ok) throw new Error(`${INSUFFICIENT_FUNDS}: ${insufficientFundsMessage(check)}`)
+}
+
+/**
+ * Report a failed chain call to the health monitor and rethrow it. When the
+ * message says we never reached the endpoint, tag it so the renderer can offer
+ * the network settings instead of showing a raw `RPC connect timed out`.
+ *
+ * Wraps chain-only calls, never node calls — a node's own `ECONNREFUSED` would
+ * otherwise be blamed on the RPC. The message deliberately makes no claim about
+ * whether a transaction landed: `broadcastOrTimeout`'s own timeout text (which
+ * this never matches) is what covers that case, carefully.
+ */
+function noteChainError(err: unknown): never {
+  const message = err instanceof Error ? err.message : String(err)
+  if (isRpcConnectivityError(message)) {
+    reportRpcFailure()
+    throw new Error(
+      `${RPC_UNREACHABLE}: Couldn't reach the blockchain at ${rpcHostLabel(getRpcHealth().endpoint || 'the RPC endpoint')}. ` +
+      `Check your internet connection, or switch to another RPC endpoint in Settings → Network. (${message})`,
+    )
+  }
+  throw err
+}
+
+/**
+ * What a plan costs, in udvpn, from main's own plan cache — so the pre-check never
+ * has to trust a renderer-supplied price. Returns 0 (i.e. "check gas only") when
+ * the plan isn't cached or doesn't quote this denom; the chain is the backstop.
+ */
+function cachedPlanCost(planId: string, denom: string): number {
+  const plan = getCachedPlans().plans.find((p) => p.id === planId)
+  const price = plan?.prices.find((p) => p.denom === denom)
+  if (!price) return 0
+  const parsed = parseInt(price.quoteValue, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
 }
 
 /**
@@ -695,17 +783,18 @@ async function fetchNodes(): Promise<unknown[]> {
   if (!json.success || !Array.isArray(json.data)) {
     throw new Error('Invalid response from node API')
   }
+  const nodes = normalizeNodes(json.data)
   // Cache node metadata for session enrichment
-  cachedNodes = (json.data as { address?: string; moniker?: string; country?: string }[])
+  cachedNodes = (nodes as { address?: string; moniker?: string; country?: string }[])
     .filter((n) => n.address)
     .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '' }))
   // Update shared cache: in-memory, disk, and broadcast to all renderer windows
-  nodesMemoryCache = { nodes: json.data, fetchedAt: Date.now() }
-  saveNodesCache(json.data)
+  nodesMemoryCache = { nodes, fetchedAt: Date.now() }
+  saveNodesCache(nodes)
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(IPC.NODES_UPDATE, json.data)
+    win.webContents.send(IPC.NODES_UPDATE, nodes)
   }
-  return json.data
+  return nodes
 }
 
 /**
@@ -716,6 +805,9 @@ async function fetchNodes(): Promise<unknown[]> {
 export function bootstrapNodesCache(): void {
   const disk = loadNodesCache()
   if (!disk) return
+  // Normalized again on the way in: a cache file written before this existed
+  // still has the nulls.
+  disk.nodes = normalizeNodes(disk.nodes)
   nodesMemoryCache = disk
   cachedNodes = (disk.nodes as { address?: string; moniker?: string; country?: string }[])
     .filter((n) => n.address)
@@ -861,6 +953,7 @@ export function registerIpcHandlers(): void {
       lastKnownBalance = balance
       return balance
     } catch {
+      reportRpcFailure()
       return lastKnownBalance
     }
   })
@@ -899,6 +992,7 @@ export function registerIpcHandlers(): void {
       lastKnownSessions = enriched
       return enriched
     } catch {
+      reportRpcFailure()
       return lastKnownSessions
     }
   })
@@ -916,7 +1010,10 @@ export function registerIpcHandlers(): void {
     if (isVpnActive()) {
       throw new Error('Disconnect the VPN before ending a session — the chain is unreachable through the tunnel.')
     }
-    await endSession({ wallet, address, sessionId })
+    // Gas only — but a wallet drained to zero can't afford even that, and this is
+    // the action that reclaims the deposit. Say so plainly rather than failing on chain.
+    await assertSufficientFunds(0)
+    await endSession({ wallet, address, sessionId }).catch(noteChainError)
   })
 
   handle(IPC.WALLET_LIST, async () => {
@@ -934,6 +1031,27 @@ export function registerIpcHandlers(): void {
     deleteWalletEntry(walletId)
   })
 
+  handle(IPC.WALLET_DELETE_ALL, async () => {
+    // "Start fresh" from the wallet picker. One round-trip rather than N invokes
+    // from the renderer, so a destructive op can't be left half-done by a mid-loop
+    // failure in the caller. App settings are deliberately untouched.
+    for (const wallet of listWallets()) {
+      deleteWalletEntry(wallet.id)
+    }
+    logout()
+  })
+
+  // What's on disk, regardless of whether a wallet is currently active — the
+  // wallet picker's source of truth. `unlockable` is false for a seed encrypted
+  // under the app's previous name (safeStorage keys its entry by app name), so
+  // the picker can say so instead of offering a switch that will fail.
+  handle(IPC.WALLET_STORE_STATUS, async () => {
+    return {
+      wallets: listWallets().map((w) => ({ ...w, unlockable: canUnlockWallet(w.id) })),
+      activeWalletId: loadSettings().activeWalletId,
+    }
+  })
+
   handle(IPC.WALLET_RENAME, async (_event, walletId: string, newName: string) => {
     assertString(walletId, 'walletId')
     assertString(newName, 'newName')
@@ -944,14 +1062,45 @@ export function registerIpcHandlers(): void {
   handle(IPC.WALLET_DERIVE_SUBACCOUNT, async (_event, params: {
     sourceWalletId: string
     accountIndex: number
+    addressIndex: number
     name: string
   }) => {
     assertString(params.sourceWalletId, 'sourceWalletId')
     assertIntRange(params.accountIndex, 'accountIndex', 0, 2147483647)
+    assertIntRange(params.addressIndex, 'addressIndex', 0, 2147483647)
     assertString(params.name, 'name')
     if (params.name.length > 100) throw new Error('Wallet name too long')
-    const address = await deriveSubaccount(params.sourceWalletId, params.accountIndex, params.name)
+    const address = await deriveSubaccount(
+      params.sourceWalletId,
+      params.accountIndex,
+      params.addressIndex,
+      params.name,
+    )
     return { address }
+  })
+
+  // Read-only: what the seed WOULD derive at a run of address indices, so the
+  // derive modal can grey out the paths already stored. `count` is bounded
+  // because each entry is a full key derivation.
+  handle(IPC.WALLET_DERIVE_PREVIEW, async (_event, params: {
+    sourceWalletId: string
+    accountIndex: number
+    startIndex: number
+    count: number
+  }) => {
+    assertString(params.sourceWalletId, 'sourceWalletId')
+    assertIntRange(params.accountIndex, 'accountIndex', 0, 2147483647)
+    assertIntRange(params.startIndex, 'startIndex', 0, 2147483647)
+    assertIntRange(params.count, 'count', 1, 20)
+    return previewDerivations(params.sourceWalletId, params.accountIndex, params.startIndex, params.count)
+  })
+
+  // Hands the seed phrase to the renderer for the user to write down. Safe only
+  // because the renderer is contextIsolated + sandboxed and handle() rejects any
+  // frame that isn't ours. Never log the result, and never cache it here.
+  handle(IPC.WALLET_REVEAL_MNEMONIC, async (_event, walletId: string) => {
+    assertString(walletId, 'walletId')
+    return { mnemonic: getWalletMnemonic(walletId) }
   })
 
   // Settings
@@ -964,7 +1113,7 @@ export function registerIpcHandlers(): void {
     // Only allow known setting keys
     const allowed = new Set([
       'rpcEndpoint', 'activeWalletId', 'killSwitch', 'dnsResolver', 'autoReconnect',
-      'bookmarkedNodes', 'splitTunnelRoutes',
+      'bookmarkedNodes', 'splitTunnelRoutes', 'providerMode',
     ])
     const filtered: Record<string, unknown> = {}
     for (const key of Object.keys(settings)) {
@@ -990,6 +1139,9 @@ export function registerIpcHandlers(): void {
     if (filtered.autoReconnect !== undefined && typeof filtered.autoReconnect !== 'boolean') {
       throw new Error('Invalid autoReconnect: expected boolean')
     }
+    if (filtered.providerMode !== undefined && typeof filtered.providerMode !== 'boolean') {
+      throw new Error('Invalid providerMode: expected boolean')
+    }
     if (filtered.bookmarkedNodes !== undefined) {
       if (!Array.isArray(filtered.bookmarkedNodes)) throw new Error('Invalid bookmarkedNodes: expected array')
     }
@@ -1004,7 +1156,12 @@ export function registerIpcHandlers(): void {
         }
       }
     }
-    return saveSettings(filtered as Parameters<typeof saveSettings>[0])
+    const saved = saveSettings(filtered as Parameters<typeof saveSettings>[0])
+    // Every chain call reads the endpoint fresh, so the switch is already live —
+    // re-probe now so the indicator reflects the new endpoint immediately
+    // instead of up to 30s later.
+    if (filtered.rpcEndpoint !== undefined) onRpcEndpointChanged()
+    return saved
   })
 
   // Nodes
@@ -1014,10 +1171,6 @@ export function registerIpcHandlers(): void {
 
   handle(IPC.NODES_GET_CACHED, async () => {
     return nodesMemoryCache
-  })
-
-  handle(IPC.RPC_LIST, async () => {
-    return fetchPublicRpcs()
   })
 
   // Connection: Subscribe
@@ -1053,18 +1206,11 @@ export function registerIpcHandlers(): void {
     // Verify the node + our runtime BEFORE spending anything (see preflightConnect).
     await preflightConnect(params.nodeType, params.apiField)
 
-    // Pre-check balance (only for udvpn denom)
-    if (params.denom === 'udvpn') {
-      const balances = await getBalance()
-      const udvpn = balances.find((b) => b.denom === 'udvpn')
-      const available = udvpn ? parseInt(udvpn.amount, 10) : 0
-      const cost = parseInt(params.quoteValue, 10) * params.amount
-      if (available < cost + 50000) {
-        const needed = ((cost + 50000) / 1e6).toFixed(2)
-        const have = (available / 1e6).toFixed(2)
-        throw new Error(`Insufficient balance. Need ~${needed} DVPN (cost + gas), have ${have} DVPN.`)
-      }
-    }
+    // The deposit is only priced in udvpn for the udvpn denom; for any other the
+    // cost is unknown here, so check the gas reserve alone and let the chain judge.
+    await assertSufficientFunds(
+      params.denom === 'udvpn' ? parseInt(params.quoteValue, 10) * params.amount : 0,
+    )
 
     // Subscribe on-chain
     const sessionId = await subscribeToNode({
@@ -1074,7 +1220,7 @@ export function registerIpcHandlers(): void {
       type: params.type,
       amount: params.amount,
       denom: params.denom,
-    })
+    }).catch(noteChainError)
 
     // Resolve the node endpoint + handshake. On ANY failure the just-created
     // session is auto-cancelled (refund) instead of orphaning the deposit (H1).
@@ -1442,17 +1588,29 @@ export function registerIpcHandlers(): void {
     return settings.bookmarkedNodes || []
   })
 
-  // RPC health check
-  handle(IPC.RPC_CHECK, async (_event, endpoint: string) => {
-    assertString(endpoint, 'endpoint')
-    try { new URL(endpoint) } catch { throw new Error('Invalid RPC endpoint URL') }
-    const start = Date.now()
-    const response = await net.fetch(`${endpoint}/status`, { signal: AbortSignal.timeout(10000) })
-    const latencyMs = Date.now() - start
-    if (!response.ok) throw new Error(`RPC returned ${response.status}`)
-    const json = await response.json() as { result?: { node_info?: { network?: string } } }
-    const chainId = json?.result?.node_info?.network || 'unknown'
-    return { latencyMs, chainId }
+  // Live health of the endpoint currently in use (pushed on change via RPC_HEALTH_UPDATE)
+  handle(IPC.RPC_HEALTH_GET, async () => {
+    return getRpcHealth()
+  })
+
+  // Probe the public endpoint list in parallel — feeds the failover banner and
+  // the Settings list, so neither has to test one endpoint per click.
+  handle(IPC.RPC_PROBE_ALL, async () => {
+    const list = await fetchPublicRpcs()
+    const probed = await probeAll(list.map((r) => r.address))
+    const byAddress = new Map(list.map((r) => [r.address, r]))
+    return probed.map((c) => {
+      const meta = byAddress.get(c.endpoint)
+      return {
+        ...c,
+        // The aggregator's own verdict, so a known-bad endpoint is skipped even
+        // if it happened to answer our single probe.
+        aggregatorHealthy: meta ? meta.status === true && meta.errorReason === null : undefined,
+        provider: meta?.provider ?? '',
+        location: meta?.location ?? '',
+        availability: meta?.availability ?? null,
+      }
+    })
   })
 
   // Binary check — checks bundled binaries first, then system PATH
@@ -1556,6 +1714,7 @@ export function registerIpcHandlers(): void {
     try {
       return await queryPlanAllocations(address)
     } catch {
+      reportRpcFailure()
       return []
     }
   })
@@ -1586,6 +1745,7 @@ export function registerIpcHandlers(): void {
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
 
     await preflightConnect(params.nodeType, params.apiField)
+    await assertSufficientFunds(cachedPlanCost(params.planId, params.denom))
 
     const { sessionId, subscriptionId } = await subscribeToPlan({
       wallet,
@@ -1594,7 +1754,7 @@ export function registerIpcHandlers(): void {
       denom: params.denom,
       nodeAddress: params.nodeAddress,
       renewalPricePolicy: params.renewalPolicy,
-    })
+    }).catch(noteChainError)
 
     const result = await establishSessionOrRefund({
       sessionId,
@@ -1641,13 +1801,15 @@ export function registerIpcHandlers(): void {
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
 
     await preflightConnect(params.nodeType, params.apiField)
+    // Reusing a prepaid allocation — gas only, no new subscription is bought.
+    await assertSufficientFunds(0)
 
     const { sessionId, subscriptionId } = await startSessionWithExistingSubscription({
       wallet,
       address,
       subscriptionId: params.subscriptionId,
       nodeAddress: params.nodeAddress,
-    })
+    }).catch(noteChainError)
 
     const result = await establishSessionOrRefund({
       sessionId,
@@ -1679,6 +1841,7 @@ export function registerIpcHandlers(): void {
     try {
       return await listNodesForPlan(params.planId)
     } catch {
+      reportRpcFailure()
       return []
     }
   })
@@ -1689,6 +1852,7 @@ export function registerIpcHandlers(): void {
     try {
       return await listPlansForNode(params.nodeAddress)
     } catch {
+      reportRpcFailure()
       return []
     }
   })
@@ -1699,7 +1863,7 @@ export function registerIpcHandlers(): void {
     // RPC is unreachable through the tunnel; there's no cache for this list, so
     // the UI hides the section while connected rather than showing stale rows.
     if (isVpnActive()) return []
-    return await querySubscriptions(address)
+    return await querySubscriptions(address).catch(noteChainError)
   })
 
   handle(IPC.SUBSCRIPTION_CANCEL, async (_event, params: { subscriptionId: string }) => {
@@ -1708,7 +1872,29 @@ export function registerIpcHandlers(): void {
     const wallet = getWallet()
     const address = getAddress()
     if (!wallet || !address) throw new Error('Wallet not loaded')
-    await cancelSubscription({ wallet, address, subscriptionId: params.subscriptionId })
+    await assertSufficientFunds(0)
+    await cancelSubscription({ wallet, address, subscriptionId: params.subscriptionId }).catch(noteChainError)
+  })
+
+  /**
+   * Renew a PLAN subscription for another period. Charges the plan's price again,
+   * so it is gated on funds exactly like a first subscribe — and like that path,
+   * the price comes from main's own plan cache, never from the renderer.
+   * Node (per-GB/hour) subscriptions aren't renewable here; they have no plan price.
+   */
+  handle(IPC.SUBSCRIPTION_RENEW, async (_event, params: { subscriptionId: string; planId: string; denom: string }) => {
+    assertString(params?.subscriptionId, 'subscriptionId')
+    if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    assertString(params?.planId, 'planId')
+    if (!/^\d+$/.test(params.planId) || params.planId === '0') throw new Error('Invalid planId')
+    assertString(params?.denom, 'denom')
+    const wallet = getWallet()
+    const address = getAddress()
+    if (!wallet || !address) throw new Error('Wallet not loaded')
+    await assertSufficientFunds(cachedPlanCost(params.planId, params.denom))
+    await renewSubscription({
+      wallet, address, subscriptionId: params.subscriptionId, denom: params.denom,
+    }).catch(noteChainError)
   })
 
   handle(IPC.SUBSCRIPTION_UPDATE_POLICY, async (_event, params: { subscriptionId: string; policy: number }) => {
@@ -1720,7 +1906,10 @@ export function registerIpcHandlers(): void {
     const wallet = getWallet()
     const address = getAddress()
     if (!wallet || !address) throw new Error('Wallet not loaded')
-    await updateSubscriptionPolicy({ wallet, address, subscriptionId: params.subscriptionId, policy: params.policy })
+    await assertSufficientFunds(0)
+    await updateSubscriptionPolicy({
+      wallet, address, subscriptionId: params.subscriptionId, policy: params.policy,
+    }).catch(noteChainError)
   })
 
   handle(IPC.PROVIDER_GET, async (_event, params: { address: string }) => {
@@ -1729,6 +1918,7 @@ export function registerIpcHandlers(): void {
     try {
       return await getProvider(params.address)
     } catch {
+      reportRpcFailure()
       const cached = getCachedProviders().providers
       return cached.find((p) => p.address === params.address) ?? null
     }
@@ -1738,8 +1928,247 @@ export function registerIpcHandlers(): void {
     try {
       return await listProviders()
     } catch {
+      reportRpcFailure()
       return getCachedProviders().providers
     }
+  })
+
+  // --- Provider console ---
+  //
+  // Every one of these talks to the chain live: there is no cache to fall back on
+  // and a stale answer would be worse than none (a provider registered seconds ago
+  // must show as registered). So reads AND writes refuse while the tunnel is up,
+  // rather than lying. Writes additionally go through assertSufficientFunds with a
+  // cost computed HERE from on-chain data — never from a renderer-supplied figure.
+
+  /** Reads that need the wallet's account address, and the chain to be reachable. */
+  function requireProviderContext(): { wallet: NonNullable<ReturnType<typeof getWallet>>; address: string } {
+    const wallet = getWallet()
+    const address = getAddress()
+    if (!wallet || !address) throw new Error('Wallet not loaded')
+    if (isVpnActive()) {
+      throw new Error('Provider actions need the blockchain, which is unreachable through the VPN tunnel. Disconnect first.')
+    }
+    return { wallet, address }
+  }
+
+  handle(IPC.PROVIDER_ME, async () => {
+    const address = getAddress()
+    if (!address) throw new Error('Wallet not loaded')
+    if (isVpnActive()) return null
+    return await getMyProvider(address).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_DEPOSIT, async () => {
+    if (isVpnActive()) return null
+    return await getProviderDeposit().catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_REGISTER, async (_event, params: { name: string; identity: string; website: string; description: string }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.name, 'name')
+    const details = {
+      name: params.name,
+      identity: params.identity ?? '',
+      website: params.website ?? '',
+      description: params.description ?? '',
+    }
+    // The deposit is spent to the community pool, not escrowed — check for it
+    // explicitly rather than letting the tx fail after the gas simulation.
+    const deposit = await getProviderDeposit().catch(noteChainError)
+    await assertSufficientFunds(parseInt(deposit.amount, 10) || 0)
+    await registerProvider({ wallet, accountAddress: address, details }).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_UPDATE_DETAILS, async (_event, params: { name: string; identity: string; website: string; description: string }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.name, 'name')
+    await assertSufficientFunds(0)
+    await updateProviderDetails({
+      wallet,
+      accountAddress: address,
+      details: {
+        name: params.name,
+        identity: params.identity ?? '',
+        website: params.website ?? '',
+        description: params.description ?? '',
+      },
+    }).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_SET_STATUS, async (_event, params: { active: boolean }) => {
+    const { wallet, address } = requireProviderContext()
+    if (typeof params?.active !== 'boolean') throw new Error('Invalid active: expected boolean')
+    await assertSufficientFunds(0)
+    await setProviderStatus({ wallet, accountAddress: address, active: params.active }).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_PLANS, async () => {
+    const address = getAddress()
+    if (!address) throw new Error('Wallet not loaded')
+    if (isVpnActive()) return []
+    return await listMyPlans(address).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_PLAN_CREATE, async (_event, params: { gigabytes: number; days: number; priceUdvpn: number; private: boolean }) => {
+    const { wallet, address } = requireProviderContext()
+    // Outer sanity bounds only — the semantic rules (whole numbers, non-zero
+    // bytes/duration) are enforced by buildCreatePlanMsg, which mirrors the hub's
+    // own ValidateBasic.
+    assertIntRange(params?.gigabytes, 'gigabytes', 1, 1_000_000)
+    assertIntRange(params?.days, 'days', 1, 3650)
+    assertIntRange(params?.priceUdvpn, 'priceUdvpn', 0, 1_000_000_000_000)
+    if (typeof params?.private !== 'boolean') throw new Error('Invalid private: expected boolean')
+    await assertSufficientFunds(0)
+    await createPlan({
+      wallet,
+      accountAddress: address,
+      input: {
+        gigabytes: params.gigabytes,
+        days: params.days,
+        priceUdvpn: params.priceUdvpn,
+        private: params.private,
+      },
+    }).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_PLAN_SET_STATUS, async (_event, params: { planId: string; active: boolean }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.planId, 'planId')
+    if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
+    if (typeof params?.active !== 'boolean') throw new Error('Invalid active: expected boolean')
+    await assertSufficientFunds(0)
+    await setPlanStatus({ wallet, accountAddress: address, planId: params.planId, active: params.active }).catch(noteChainError)
+  })
+
+  handle(IPC.PROVIDER_PLAN_LINK, async (_event, params: { planId: string; nodeAddress: string }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.planId, 'planId')
+    if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
+    assertSentAddress(params?.nodeAddress, 'nodeAddress')
+    await assertSufficientFunds(0)
+    await linkNode({ wallet, accountAddress: address, planId: params.planId, nodeAddress: params.nodeAddress }).catch(noteChainError)
+    // The plan→nodes list is cached for 10 minutes for browsing; after our own
+    // link the console re-reads it immediately and must not get the old answer.
+    invalidatePlanNodes(params.planId)
+  })
+
+  handle(IPC.PROVIDER_PLAN_UNLINK, async (_event, params: { planId: string; nodeAddress: string }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.planId, 'planId')
+    if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
+    assertSentAddress(params?.nodeAddress, 'nodeAddress')
+    await assertSufficientFunds(0)
+    await unlinkNode({ wallet, accountAddress: address, planId: params.planId, nodeAddress: params.nodeAddress }).catch(noteChainError)
+    invalidatePlanNodes(params.planId)
+  })
+
+  /**
+   * Per-plan counters for the provider's own plan list: linked nodes, and how
+   * many subscriptions the plan has sold. Batched over the wallet's plans (there
+   * are a handful) so the console makes one call rather than three per plan.
+   * Best-effort per plan — one unreadable plan must not blank the whole list.
+   */
+  handle(IPC.PROVIDER_PLAN_STATS, async (_event, params: { planIds: string[] }) => {
+    if (!Array.isArray(params?.planIds)) throw new Error('Invalid planIds')
+    if (params.planIds.length > 50) throw new Error('Too many planIds')
+    for (const id of params.planIds) {
+      assertString(id, 'planId')
+      if (!/^\d+$/.test(id)) throw new Error('Invalid planId')
+    }
+    if (isVpnActive()) return {}
+
+    const out: Record<string, { nodes: number; subscriptions: number; active: number; truncated: boolean }> = {}
+    for (const planId of params.planIds) {
+      try {
+        const [nodes, subs] = await Promise.all([
+          listNodesForPlan(planId),
+          getPlanSubscriberStats(planId),
+        ])
+        out[planId] = { nodes: nodes.length, ...subs }
+      } catch {
+        reportRpcFailure()
+      }
+    }
+    return out
+  })
+
+  /** Display-only USD rate. Null when it can't be reached — the UI just omits it. */
+  handle(IPC.PRICE_TOKEN, async () => {
+    return await getTokenPrice()
+  })
+
+  // --- Leases ---
+
+  handle(IPC.LEASE_LIST, async () => {
+    const address = getAddress()
+    if (!address) throw new Error('Wallet not loaded')
+    if (isVpnActive()) return []
+    return await listLeasesForProvider(toProviderAddress(address)).catch(noteChainError)
+  })
+
+  handle(IPC.LEASE_PARAMS, async () => {
+    if (isVpnActive()) return null
+    return await getLeaseParams().catch(noteChainError)
+  })
+
+  /**
+   * What a lease on this node would cost. Priced in main from the node's own
+   * on-chain hourly price so the renderer never supplies a figure that a funds
+   * check or a MaxPrice guard would then be based on.
+   */
+  handle(IPC.LEASE_QUOTE, async (_event, params: { nodeAddress: string; hours: number }) => {
+    requireProviderContext()
+    assertSentAddress(params?.nodeAddress, 'nodeAddress')
+    assertIntRange(params?.hours, 'hours', 1, 720)
+    const [price, leaseParams] = await Promise.all([
+      getNodeHourlyPrice(params.nodeAddress).catch(noteChainError),
+      getLeaseParams().catch(noteChainError),
+    ])
+    if (!price.hourlyPrice) {
+      throw new Error('That node does not publish an hourly price in P2P, so it cannot be leased.')
+    }
+    return {
+      hourlyPrice: price.hourlyPrice,
+      totalUdvpn: leaseDepositUdvpn(price.hourlyPrice, params.hours),
+      nodeStatus: price.status,
+      minHours: leaseParams.minHours,
+      maxHours: leaseParams.maxHours,
+    }
+  })
+
+  handle(IPC.LEASE_START, async (_event, params: { nodeAddress: string; hours: number; renewalPolicy: number }) => {
+    const { wallet, address } = requireProviderContext()
+    assertSentAddress(params?.nodeAddress, 'nodeAddress')
+    assertIntRange(params?.hours, 'hours', 1, 720)
+    assertNumber(params.renewalPolicy, 'renewalPolicy', 0, 7)
+
+    const [price, leaseParams] = await Promise.all([
+      getNodeHourlyPrice(params.nodeAddress).catch(noteChainError),
+      getLeaseParams().catch(noteChainError),
+    ])
+    if (!price.hourlyPrice) {
+      throw new Error('That node does not publish an hourly price in P2P, so it cannot be leased.')
+    }
+    assertValidLeaseHours(params.hours, leaseParams.minHours, leaseParams.maxHours)
+    await assertSufficientFunds(leaseDepositNumber(price.hourlyPrice, params.hours))
+
+    await startLease({
+      wallet,
+      accountAddress: address,
+      nodeAddress: params.nodeAddress,
+      hours: params.hours,
+      hourlyQuoteValue: price.hourlyPrice,
+      renewalPricePolicy: params.renewalPolicy,
+    }).catch(noteChainError)
+  })
+
+  handle(IPC.LEASE_END, async (_event, params: { leaseId: string }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.leaseId, 'leaseId')
+    if (!/^\d+$/.test(params.leaseId)) throw new Error('Invalid leaseId')
+    await assertSufficientFunds(0)
+    await endLease({ wallet, accountAddress: address, leaseId: params.leaseId }).catch(noteChainError)
   })
 
   // Register V2Ray unexpected exit handler for auto-reconnect

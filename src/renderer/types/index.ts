@@ -1,5 +1,6 @@
 import type { V2RayCategory } from '../utils/v2ray-connection'
 import type { ProtocolType } from '../utils/protocols'
+import type { RpcCandidate, RpcHealth } from '../../shared/rpc-health'
 
 export interface SentNode {
   address: string
@@ -160,6 +161,29 @@ export interface WalletEntry {
   name: string
   address: string
   accountIndex?: number
+  addressIndex?: number
+}
+
+/** One candidate derivation path in the Derive Subaccount picker. */
+export interface DerivationPreview {
+  addressIndex: number
+  path: string
+  address: string
+  /** Name of the stored wallet already holding this address, else null. */
+  existingWalletName: string | null
+}
+
+/** What the wallet store holds on disk, whether or not one is currently active. */
+export interface WalletStoreStatus {
+  wallets: (WalletEntry & {
+    /**
+     * False when the seed can't be decrypted — e.g. saved under the app's
+     * previous name, since safeStorage keys its keyring entry by app name.
+     * Such a wallet must be re-imported from its phrase, not just selected.
+     */
+    unlockable: boolean
+  })[]
+  activeWalletId: string | null
 }
 
 export interface AppSettings {
@@ -170,6 +194,8 @@ export interface AppSettings {
   autoReconnect: boolean
   bookmarkedNodes: string[]
   splitTunnelRoutes: string[]
+  /** Reveals the Provider tab before this wallet has a provider registered on chain. */
+  providerMode: boolean
 }
 
 export interface PlanInfo {
@@ -208,6 +234,67 @@ export interface DiscoverProgress {
   phase: 'connecting' | 'fetching' | 'done'
 }
 
+// --- Provider console ---
+
+export interface ProviderDetailsInput {
+  name: string
+  identity: string
+  website: string
+  description: string
+}
+
+/** This wallet's own provider record. `address` is always set — it is derived locally. */
+export interface MyProvider extends ProviderDetailsInput {
+  address: string
+  registered: boolean
+  /** sentinel.types.v1.Status: 1 active, 3 inactive, 0 when not registered. */
+  status: number
+}
+
+export interface MyPlan {
+  id: string
+  bytes: string
+  durationSeconds: number | null
+  prices: { denom: string; baseValue: string; quoteValue: string }[]
+  private: boolean
+  status: number
+}
+
+/** What a plan is currently worth to its provider: nodes serving it, subscriptions sold. */
+export interface PlanStats {
+  nodes: number
+  subscriptions: number
+  active: number
+  /** The active count is a floor — the plan has more subscriptions than were scanned. */
+  truncated: boolean
+}
+
+export interface TokenPrice {
+  /** USD for one P2P. */
+  usd: number
+  fetchedAt: number
+}
+
+/** A lease bought from a node operator — the prerequisite for linking that node to a plan. */
+export interface LeaseSummary {
+  id: string
+  provAddress: string
+  nodeAddress: string
+  hourlyPrice: string
+  hours: number
+  maxHours: number
+  renewalPricePolicy: number
+  startAt: string | null
+}
+
+export interface LeaseQuote {
+  hourlyPrice: string
+  totalUdvpn: string
+  nodeStatus: number
+  minHours: number
+  maxHours: number
+}
+
 export interface TrafficStats {
   rxBytes: number
   txBytes: number
@@ -223,15 +310,11 @@ export interface IpInfo {
   org: string
 }
 
-export interface PublicRpc {
+/** One endpoint probed by `rpcProbeAll`, with the aggregator's metadata folded in. */
+export interface RpcCandidateInfo extends RpcCandidate {
   provider: string
-  address: string
-  status: number
-  height: number
   location: string
-  isLoadbalance: number
-  availability: number
-  errorReason: string | null
+  availability: number | null
 }
 
 export interface BinaryStatus {
@@ -266,15 +349,21 @@ export interface ElectronAPI {
   walletGenerate: (wordCount: 12 | 24) => Promise<string>
   walletImport: (mnemonic: string, name?: string) => Promise<{ address: string }>
   walletGetAddress: () => Promise<string | null>
-  walletGetBalance: () => Promise<{ denom: string; amount: string }[]>
+  /** null when the balance is unknown (RPC unreachable and nothing cached yet). */
+  walletGetBalance: () => Promise<{ denom: string; amount: string }[] | null>
   walletLogout: () => Promise<void>
   walletSessions: () => Promise<SessionInfo[]>
   walletEndSession: (sessionId: string) => Promise<void>
   walletList: () => Promise<WalletEntry[]>
   walletSwitch: (walletId: string) => Promise<{ address: string | null }>
   walletDelete: (walletId: string) => Promise<void>
+  walletDeleteAll: () => Promise<void>
+  walletStoreStatus: () => Promise<WalletStoreStatus>
   walletRename: (walletId: string, newName: string) => Promise<void>
-  walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; name: string }) => Promise<{ address: string }>
+  walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; addressIndex: number; name: string }) => Promise<{ address: string }>
+  walletDerivePreview: (params: { sourceWalletId: string; accountIndex: number; startIndex: number; count: number }) => Promise<DerivationPreview[]>
+  /** The wallet's seed phrase, for the user to write down. Handle as secret. */
+  walletRevealMnemonic: (walletId: string) => Promise<{ mnemonic: string }>
 
   settingsGet: () => Promise<AppSettings>
   settingsSet: (settings: Partial<AppSettings>) => Promise<AppSettings>
@@ -309,19 +398,53 @@ export interface ElectronAPI {
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
   subscriptionList: () => Promise<SubscriptionSummary[]>
   subscriptionCancel: (subscriptionId: string) => Promise<void>
+  subscriptionRenew: (subscriptionId: string, planId: string, denom: string) => Promise<void>
   subscriptionUpdatePolicy: (subscriptionId: string, policy: number) => Promise<void>
   onPlanDiscoverProgress: (callback: (progress: DiscoverProgress) => void) => () => void
 
   providerGet: (address: string) => Promise<ProviderInfo | null>
   providerList: () => Promise<ProviderInfo[]>
 
+  /**
+   * Provider console. Every one of these needs the chain live: main returns null/[]
+   * rather than stale data while the VPN tunnel is up, and the writes throw.
+   */
+  providerMe: () => Promise<MyProvider | null>
+  providerDeposit: () => Promise<{ denom: string; amount: string } | null>
+  providerRegister: (params: ProviderDetailsInput) => Promise<void>
+  providerUpdateDetails: (params: ProviderDetailsInput) => Promise<void>
+  providerSetStatus: (active: boolean) => Promise<void>
+  providerPlans: () => Promise<MyPlan[]>
+  providerPlanCreate: (params: {
+    gigabytes: number
+    days: number
+    priceUdvpn: number
+    private: boolean
+  }) => Promise<void>
+  providerPlanSetStatus: (planId: string, active: boolean) => Promise<void>
+  providerPlanLink: (planId: string, nodeAddress: string) => Promise<void>
+  providerPlanUnlink: (planId: string, nodeAddress: string) => Promise<void>
+  /** Keyed by plan id; a plan the chain couldn't answer for is simply absent. */
+  providerPlanStats: (planIds: string[]) => Promise<Record<string, PlanStats>>
+
+  /** USD per P2P, for display next to prices. Null when unavailable. */
+  priceToken: () => Promise<TokenPrice | null>
+
+  leaseList: () => Promise<LeaseSummary[]>
+  leaseParams: () => Promise<{ minHours: number; maxHours: number } | null>
+  leaseQuote: (nodeAddress: string, hours: number) => Promise<LeaseQuote>
+  leaseStart: (params: { nodeAddress: string; hours: number; renewalPolicy: number }) => Promise<void>
+  leaseEnd: (leaseId: string) => Promise<void>
+
   trafficStats: () => Promise<TrafficStats>
 
   bookmarkToggle: (nodeAddress: string) => Promise<string[]>
   bookmarkList: () => Promise<string[]>
 
-  rpcCheck: (endpoint: string) => Promise<{ latencyMs: number; chainId: string }>
-  rpcList: () => Promise<PublicRpc[]>
+  /** Live health of the endpoint in use — also pushed via onRpcHealthUpdate. */
+  rpcHealthGet: () => Promise<RpcHealth>
+  rpcProbeAll: () => Promise<RpcCandidateInfo[]>
+  onRpcHealthUpdate: (callback: (health: RpcHealth) => void) => () => void
 
   binaryCheck: () => Promise<BinaryStatus>
 

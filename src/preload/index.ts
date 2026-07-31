@@ -13,9 +13,14 @@ contextBridge.exposeInMainWorld('api', {
   walletList: () => ipcRenderer.invoke(IPC.WALLET_LIST),
   walletSwitch: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_SWITCH, walletId),
   walletDelete: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_DELETE, walletId),
+  walletDeleteAll: () => ipcRenderer.invoke(IPC.WALLET_DELETE_ALL),
+  walletStoreStatus: () => ipcRenderer.invoke(IPC.WALLET_STORE_STATUS),
   walletRename: (walletId: string, newName: string) => ipcRenderer.invoke(IPC.WALLET_RENAME, walletId, newName),
-  walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; name: string }) =>
+  walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; addressIndex: number; name: string }) =>
     ipcRenderer.invoke(IPC.WALLET_DERIVE_SUBACCOUNT, params),
+  walletDerivePreview: (params: { sourceWalletId: string; accountIndex: number; startIndex: number; count: number }) =>
+    ipcRenderer.invoke(IPC.WALLET_DERIVE_PREVIEW, params),
+  walletRevealMnemonic: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_REVEAL_MNEMONIC, walletId),
 
   settingsGet: () => ipcRenderer.invoke(IPC.SETTINGS_GET),
   settingsSet: (settings: Record<string, unknown>) => ipcRenderer.invoke(IPC.SETTINGS_SET, settings),
@@ -38,8 +43,17 @@ contextBridge.exposeInMainWorld('api', {
   bookmarkToggle: (nodeAddress: string) => ipcRenderer.invoke(IPC.BOOKMARK_TOGGLE, nodeAddress),
   bookmarkList: () => ipcRenderer.invoke(IPC.BOOKMARK_LIST),
 
-  rpcCheck: (endpoint: string) => ipcRenderer.invoke(IPC.RPC_CHECK, endpoint),
-  rpcList: () => ipcRenderer.invoke(IPC.RPC_LIST),
+  rpcHealthGet: () => ipcRenderer.invoke(IPC.RPC_HEALTH_GET),
+  rpcProbeAll: () => ipcRenderer.invoke(IPC.RPC_PROBE_ALL),
+  onRpcHealthUpdate: (callback: (health: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, health: unknown) => {
+      callback(health)
+    }
+    ipcRenderer.on(IPC.RPC_HEALTH_UPDATE, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.RPC_HEALTH_UPDATE, handler)
+    }
+  },
 
   binaryCheck: () => ipcRenderer.invoke(IPC.BINARY_CHECK),
 
@@ -117,11 +131,37 @@ contextBridge.exposeInMainWorld('api', {
   planListForNode: (nodeAddress: string) => ipcRenderer.invoke(IPC.PLAN_LIST_FOR_NODE, { nodeAddress }),
   subscriptionList: () => ipcRenderer.invoke(IPC.SUBSCRIPTION_LIST),
   subscriptionCancel: (subscriptionId: string) => ipcRenderer.invoke(IPC.SUBSCRIPTION_CANCEL, { subscriptionId }),
+  subscriptionRenew: (subscriptionId: string, planId: string, denom: string) =>
+    ipcRenderer.invoke(IPC.SUBSCRIPTION_RENEW, { subscriptionId, planId, denom }),
   subscriptionUpdatePolicy: (subscriptionId: string, policy: number) =>
     ipcRenderer.invoke(IPC.SUBSCRIPTION_UPDATE_POLICY, { subscriptionId, policy }),
 
   providerGet: (address: string) => ipcRenderer.invoke(IPC.PROVIDER_GET, { address }),
   providerList: () => ipcRenderer.invoke(IPC.PROVIDER_LIST),
+
+  // Provider console
+  providerMe: () => ipcRenderer.invoke(IPC.PROVIDER_ME),
+  providerDeposit: () => ipcRenderer.invoke(IPC.PROVIDER_DEPOSIT),
+  providerRegister: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_REGISTER, params),
+  providerUpdateDetails: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_UPDATE_DETAILS, params),
+  providerSetStatus: (active: boolean) => ipcRenderer.invoke(IPC.PROVIDER_SET_STATUS, { active }),
+  providerPlans: () => ipcRenderer.invoke(IPC.PROVIDER_PLANS),
+  providerPlanCreate: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_PLAN_CREATE, params),
+  providerPlanSetStatus: (planId: string, active: boolean) =>
+    ipcRenderer.invoke(IPC.PROVIDER_PLAN_SET_STATUS, { planId, active }),
+  providerPlanLink: (planId: string, nodeAddress: string) =>
+    ipcRenderer.invoke(IPC.PROVIDER_PLAN_LINK, { planId, nodeAddress }),
+  providerPlanUnlink: (planId: string, nodeAddress: string) =>
+    ipcRenderer.invoke(IPC.PROVIDER_PLAN_UNLINK, { planId, nodeAddress }),
+  providerPlanStats: (planIds: string[]) => ipcRenderer.invoke(IPC.PROVIDER_PLAN_STATS, { planIds }),
+
+  priceToken: () => ipcRenderer.invoke(IPC.PRICE_TOKEN),
+
+  leaseList: () => ipcRenderer.invoke(IPC.LEASE_LIST),
+  leaseParams: () => ipcRenderer.invoke(IPC.LEASE_PARAMS),
+  leaseQuote: (nodeAddress: string, hours: number) => ipcRenderer.invoke(IPC.LEASE_QUOTE, { nodeAddress, hours }),
+  leaseStart: (params: unknown) => ipcRenderer.invoke(IPC.LEASE_START, params),
+  leaseEnd: (leaseId: string) => ipcRenderer.invoke(IPC.LEASE_END, { leaseId }),
 
   onPlanDiscoverProgress: (callback: (progress: { done: number; total: number; phase: string }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: { done: number; total: number; phase: string }) => {

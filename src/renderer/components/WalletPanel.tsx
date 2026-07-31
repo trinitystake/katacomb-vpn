@@ -1,15 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 import Spinner from './Spinner'
+import { useBalance } from '../hooks/useBalance'
 
 interface Props {
   address: string | null
   name: string | null
+  /** Locks the wallet: clears it from memory, leaves the encrypted seed on disk. */
   onLogout: () => void
   connected: boolean
 }
 
 export default function WalletPanel({ address, name, onLogout, connected }: Props) {
-  const [balance, setBalance] = useState<string | null>(null)
+  const { display: balance, refresh: refreshBalance } = useBalance()
   const [sessions, setSessions] = useState<{ id: string; nodeAddress: string; status: string }[]>([])
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -18,14 +20,8 @@ export default function WalletPanel({ address, name, onLogout, connected }: Prop
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    if (address) {
-      fetchBalance()
-      fetchSessions()
-    }
-    intervalRef.current = setInterval(() => {
-      fetchBalance()
-      fetchSessions()
-    }, 30_000)
+    if (address) fetchSessions()
+    intervalRef.current = setInterval(fetchSessions, 30_000)
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
@@ -45,19 +41,9 @@ export default function WalletPanel({ address, name, onLogout, connected }: Prop
   async function refresh() {
     setRefreshing(true)
     try {
-      await Promise.all([fetchBalance(), fetchSessions()])
+      await Promise.all([refreshBalance(), fetchSessions()])
     } finally {
       setRefreshing(false)
-    }
-  }
-
-  async function fetchBalance() {
-    try {
-      const balances = await window.api.walletGetBalance()
-      const udvpn = balances.find((b: { denom: string }) => b.denom === 'udvpn')
-      setBalance(udvpn ? (parseInt(udvpn.amount, 10) / 1e6).toFixed(2) : '0.00')
-    } catch {
-      // silent
     }
   }
 
@@ -176,12 +162,15 @@ export default function WalletPanel({ address, name, onLogout, connected }: Prop
             </div>
           )}
 
+          {/* "Lock", not "Logout": the seeds stay encrypted on this device and
+              come back from the wallet picker. Deleting is a separate, explicit
+              action in Settings → Wallets. */}
           <button
             onClick={onLogout}
             className="text-text-secondary hover:text-danger text-sm transition-colors w-full text-center"
-            title="Logout"
+            title="Lock — your wallets stay stored on this device"
           >
-            Logout
+            Lock
           </button>
         </div>
       )}

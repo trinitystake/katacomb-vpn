@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell, Tray, Menu, nativeImage, dialog } from 'elec
 import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
 import { is } from '@electron-toolkit/utils'
 import {
   registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer,
@@ -152,10 +153,22 @@ function createWindow(): void {
   const rendererOrigin = is.dev && process.env['ELECTRON_RENDERER_URL']
     ? new URL(process.env['ELECTRON_RENDERER_URL']).origin
     : null
+  // In the packaged app the renderer is loaded via loadFile(), a file:// URL whose
+  // .origin is the literal string "null" — never equal to rendererOrigin. That made
+  // location.reload() (used e.g. after deleting the active wallet) get silently
+  // swallowed below instead of reloading. Compare file:// navigations by filesystem
+  // path against our own index.html instead of by origin.
+  const indexPath = join(__dirname, '../renderer/index.html')
   mainWindow.webContents.on('will-navigate', (event, url) => {
     let isSameOrigin = false
-    try { isSameOrigin = rendererOrigin !== null && new URL(url).origin === rendererOrigin } catch { /* ignore */ }
-    if (isSameOrigin) return // allow dev-server reload/HMR
+    try {
+      const target = new URL(url)
+      isSameOrigin = rendererOrigin !== null && target.origin === rendererOrigin
+      if (!isSameOrigin && target.protocol === 'file:') {
+        isSameOrigin = fileURLToPath(target) === indexPath
+      }
+    } catch { /* ignore */ }
+    if (isSameOrigin) return // allow dev-server reload/HMR, or reload of our own packaged index.html
     event.preventDefault()
     try {
       const { protocol } = new URL(url)
@@ -166,7 +179,7 @@ function createWindow(): void {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(indexPath)
   }
 }
 

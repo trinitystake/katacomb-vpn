@@ -301,6 +301,14 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   commits the upstream node pins (no prebuilt amneziawg-go exists anywhere), SHA-pinned incl.
   the root-run awg-quick bash script. **No system-PATH fallback — root-run binaries
   fail closed** (both `vpn-manager.resolveAmneziaWgBinDir` and the daemon's).
+  **Never build these natively** — they are the only shipped binaries we compile,
+  so they are the only ones that can inherit the maintainer's glibc. A native
+  build on Ubuntu 24.04 rewrites `strtoul`/`strtoll` into `__isoc23_*`, pinning
+  `awg` to GLIBC_2.38 and making it fail to load on Debian 12 (2.36) and Ubuntu
+  22.04 (2.35) — with no fallback, per the fail-closed rule above. The script
+  therefore builds `amneziawg-go` with `CGO_ENABLED=0` (fully static) and `awg`
+  inside `debian:bullseye` (glibc 2.31), then asserts the resulting floor so a
+  toolchain bump can't regress it silently.
 - Helper verbs `awg-up <config> <bindir>` / `awg-down`; daemon ops `amneziawg_up` /
   `amneziawg_down` (additive — no protocol-version bump); `validate_awg_config` is
   the bash mirror of `assertSafeAmneziaWgConfig` (allow-list = WG keys + jc/jmin/

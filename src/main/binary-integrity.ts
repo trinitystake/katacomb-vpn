@@ -20,8 +20,15 @@ export const BUNDLED_HASHES: Record<string, string> = {
   // commits Sentinel pins in its own node/CLI Dockerfiles: amneziawg-go 1cc9427
   // (v0.0.20250522), amneziawg-tools 61e7417 (v1.0.20260618-2). awg-quick is a
   // root-run bash script and is pinned like the binaries.
-  'amneziawg-go': '90a599aec36acdad1cd080abf17be68f7e266ed714dd0b13e2c09a1dea7eac5a',
-  awg: '4ced7aae2ce943d7f75e6ea5c42e58c7f77cceea306d1d54aa7bf7a41283a791',
+  // These two are the ONLY shipped binaries compiled here rather than vendored
+  // from an upstream release, so they are also the only ones that can inherit the
+  // build host's glibc. They must not: amneziawg-go is CGO_ENABLED=0 (static) and
+  // awg is built in debian:bullseye, both enforced by the script's glibc-floor
+  // assertion. Rebuilding natively silently reintroduces a floor that fails to
+  // load on Debian 12 / Ubuntu 22.04 — with no fallback, since the resolver
+  // refuses unpinned system binaries.
+  'amneziawg-go': '0462bc5fb229e90096ed4c5f46cff2c829e1b12d93b282c82fcd4aa955e44d7f',
+  awg: 'b069282e01b1cbaa3814be16e763af65cdb61fc4b613470216a59e8a26fa8188',
   'awg-quick': 'f4bb0f5d63665ade87f0cb9f2185c43515cff09868637eb311f98f65a318722c',
 }
 

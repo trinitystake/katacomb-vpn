@@ -42,6 +42,10 @@ linux:
     - deb
   category: Network
   icon: build/icons
+  # First line of the deb control Description (the synopsis). Without it the
+  # field is emitted with an empty first line, which reads as a blank package
+  # summary in apt/Discover listings.
+  synopsis: Decentralized VPN client for the Sentinel network
   desktop:
     entry:
       Name: Katacomb VPN
@@ -49,13 +53,57 @@ linux:
       Categories: Network;VPN;Security;
 deb:
   depends:
+    # --- Electron's own runtime libraries -----------------------------------
+    # These nine ARE electron-builder's getDefaultDepends("deb") and must be
+    # repeated verbatim: setting `depends` REPLACES that default list instead of
+    # extending it, so listing only our extras shipped a package that declared
+    # none of Chromium's shared libraries. It installs fine on a full GNOME/KDE
+    # desktop (they're already present) and then fails at the dynamic linker on
+    # a minimal, XFCE or netinst system. libgtk-3-0 and libatspi2.0-0 are
+    # virtual on Ubuntu 24.04+, satisfied by their t64 successors, so the
+    # unsuffixed names are correct on both old and new releases.
+    # Re-check this list against FpmTarget.getDefaultDepends on upgrade.
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    # Also load-bearing for us specifically: Electron dlopens libsecret-1.so.0
+    # for safeStorage, and without a real keyring backend
+    # isSecureStorageAvailable() is false and NO wallet can be persisted
+    # (settings.ts throws INSECURE_STORAGE_MESSAGE) — unusable, not degraded.
+    - libsecret-1-0
+    # --- Katacomb VPN specifics ---------------------------------------------
     - wireguard-tools
-    - policykit-1
+    # MUST stay an alternation. `policykit-1` alone made the package
+    # uninstallable on Debian 13 (trixie): it was already a transitional package
+    # in bookworm and is absent from trixie, where pkexec ships as its own
+    # package. Ubuntu 22.04 is the mirror image — policykit-1 exists, a `pkexec`
+    # package does not — so only the alternation installs on both.
+    - pkexec | policykit-1
+    # kill-switch.ts shells out to iptables. Debian 12+ defaults to the nftables
+    # backend and does not guarantee the iptables package is installed.
+    - iptables
     # OpenVPN (node type 3) runs the distro client rather than a bundled build:
     # it's a TLS client, so distro OpenSSL security updates are a better supply
     # chain than a binary we'd have to re-cut on every CVE. Same model as
     # wireguard-tools above. AppImage/dev users install it themselves.
     - openvpn
+  recommends:
+    # NOTE: setting this key REPLACES electron-builder's default recommends
+    # rather than adding to it (FpmTarget: options.recommends ? asArray(it) :
+    # getDefaultRecommends()), so the default must be repeated here or the tray
+    # icon silently loses its library. Same replace-don't-merge trap as
+    # afterInstall — see the header of resources/linux/postinstall.sh.
+    - libappindicator3-1
+    # libsecret is only a client — it needs a Secret Service daemon to talk to.
+    # GNOME and KDE ship different ones and a bare XFCE/LXQt install has neither.
+    # An alternation (not a plain Depends) so KDE boxes are satisfied by the
+    # kwallet they already have instead of pulling in gnome-keyring.
+    - gnome-keyring | kwalletmanager
   afterInstall: resources/linux/postinstall.sh
   afterRemove: resources/linux/postrm.sh
 appImage:

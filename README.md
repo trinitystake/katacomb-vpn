@@ -94,10 +94,23 @@ Both artifacts land in `dist/` after a packaging build.
 sudo apt install ./dist/katacomb-vpn_0.1.0_amd64.deb
 ```
 
-Pulls in `wireguard-tools`, `policykit-1` and `openvpn`. The postinstall also installs
-and enables a small root daemon (systemd unit `katacomb-vpn-daemon`), so **connect and
-disconnect never prompt for a password**. The GUI talks to it over a Unix socket at
+Pulls in Electron's GUI libraries (GTK, NSS, libsecret and friends) plus
+`wireguard-tools`, `openvpn`, `iptables` and polkit (`pkexec`, or `policykit-1` on older
+releases). The postinstall also installs and enables
+a small root daemon (systemd unit `katacomb-vpn-daemon`), so **connect and disconnect
+never prompt for a password**. The GUI talks to it over a Unix socket at
 `/run/katacomb-vpn/daemon.sock`.
+
+Access to that socket is granted by the `katacomb-vpn` group, which the postinstall adds
+you to — **log out and back in once** for it to take effect. Until then connecting still
+works, just with a password prompt each time. If you installed through a graphical app
+store rather than `sudo apt`, the postinstall may not be able to tell which account is
+yours; run `sudo usermod -aG katacomb-vpn $USER` if prompts persist.
+
+**Compatibility.** x86_64, Debian 11+ / Ubuntu 20.04+ and derivatives (Mint, Pop!_OS,
+Zorin). Wallet storage needs an OS keyring — GNOME and KDE ship one by default; on a bare
+XFCE/LXQt install, `apt install gnome-keyring`. Saving a wallet is refused outright rather
+than falling back to weak encryption, so a missing keyring is visible, not silent.
 
 ### AppImage
 

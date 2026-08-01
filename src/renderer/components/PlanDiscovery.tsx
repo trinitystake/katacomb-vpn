@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePlans } from '../hooks/usePlans'
 import { useConnection } from '../hooks/useConnection'
 import { useNavigation } from '../contexts/NavigationContext'
+import { useNodesContext } from '../contexts/NodesContext'
 import type { PlanInfo, PlanAllocation, ProviderInfo, SentNode, SubscriptionSummary, TunnelProtocol } from '../types'
 import ConnectErrorActions from './ConnectErrorActions'
 import CountryFlag from './CountryFlag'
@@ -236,7 +237,6 @@ export default function PlanDiscovery() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [providers, setProviders] = useState<Record<string, ProviderState>>({})
   const [planNodes, setPlanNodes] = useState<Record<string, NodeListState>>({})
-  const [nodeIndex, setNodeIndex] = useState<Map<string, SentNode> | null>(null)
   const fetchedProviderAddrs = useRef<Set<string>>(new Set())
 
   // Filter state
@@ -345,18 +345,19 @@ export default function PlanDiscovery() {
     run()
   }, [plans, refreshCached])
 
-  // Load node directory once when plans are available
-  useEffect(() => {
-    if (plans.length === 0 || nodeIndex) return
-    window.api
-      .nodesFetch()
-      .then((nodes) => {
-        const map = new Map<string, SentNode>()
-        for (const n of nodes) map.set(n.address, n)
-        setNodeIndex(map)
-      })
-      .catch(() => setNodeIndex(new Map()))
-  }, [plans, nodeIndex])
+  // Node directory, for resolving a plan's node addresses to monikers/countries.
+  // Read from the shared context rather than calling nodesFetch(): that forces a
+  // full network refresh of the whole feed (~10 paginated requests) which this
+  // tab has no reason to pay for, and it fired once per `plans` identity change
+  // while the first one was still in flight. null = nothing loaded yet, which
+  // the callers below render as "directory unavailable".
+  const { allNodes } = useNodesContext()
+  const nodeIndex = useMemo(() => {
+    if (allNodes.length === 0) return null
+    const map = new Map<string, SentNode>()
+    for (const n of allNodes) map.set(n.address, n)
+    return map
+  }, [allNodes])
 
   // Fetch compatible nodes for the selected plan
   useEffect(() => {

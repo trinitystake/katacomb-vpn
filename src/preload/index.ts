@@ -12,8 +12,8 @@ contextBridge.exposeInMainWorld('api', {
   walletEndSession: (sessionId: string) => ipcRenderer.invoke(IPC.WALLET_END_SESSION, sessionId),
   walletList: () => ipcRenderer.invoke(IPC.WALLET_LIST),
   walletSwitch: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_SWITCH, walletId),
-  walletDelete: (walletId: string) => ipcRenderer.invoke(IPC.WALLET_DELETE, walletId),
-  walletDeleteAll: () => ipcRenderer.invoke(IPC.WALLET_DELETE_ALL),
+  walletDelete: (walletId: string, keepSeed?: boolean) => ipcRenderer.invoke(IPC.WALLET_DELETE, walletId, keepSeed),
+  walletDeleteAll: (keepSeed?: boolean) => ipcRenderer.invoke(IPC.WALLET_DELETE_ALL, keepSeed),
   walletStoreStatus: () => ipcRenderer.invoke(IPC.WALLET_STORE_STATUS),
   walletRename: (walletId: string, newName: string) => ipcRenderer.invoke(IPC.WALLET_RENAME, walletId, newName),
   walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; addressIndex: number; name: string }) =>
@@ -141,6 +141,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Provider console
   providerMe: () => ipcRenderer.invoke(IPC.PROVIDER_ME),
+  providerModeSet: (enabled: boolean) => ipcRenderer.invoke(IPC.PROVIDER_MODE_SET, enabled),
   providerDeposit: () => ipcRenderer.invoke(IPC.PROVIDER_DEPOSIT),
   providerRegister: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_REGISTER, params),
   providerUpdateDetails: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_UPDATE_DETAILS, params),

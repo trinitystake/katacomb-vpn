@@ -79,6 +79,7 @@ export const IPC = {
 
   // Provider console — acting AS a provider with this wallet
   PROVIDER_ME: 'provider:me',
+  PROVIDER_MODE_SET: 'provider:mode-set',
   PROVIDER_DEPOSIT: 'provider:deposit',
   PROVIDER_REGISTER: 'provider:register',
   PROVIDER_UPDATE_DETAILS: 'provider:update-details',

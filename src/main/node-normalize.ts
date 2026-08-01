@@ -20,3 +20,39 @@ export function normalizeNodes(raw: unknown[]): unknown[] {
     return node
   })
 }
+
+/** One page of the node feed: its entries, and how many pages there are in total. */
+export interface NodesPage {
+  /** Raw entries — still needs normalizeNodes(). */
+  nodes: unknown[]
+  /** Total page count for this query; 1 when the feed isn't paginated. */
+  lastPage: number
+}
+
+/**
+ * Reads the `/v2/nodes` envelope. On 2026-08-01 the aggregator changed `data`
+ * from a flat array of every node into `{nodes: [...200], pagination: {...}}`,
+ * which the old reader rejected outright — the app then ran on its disk cache
+ * with no way to refresh. Both shapes are accepted so a revert upstream doesn't
+ * break it a second time.
+ *
+ * Throws on anything else: a partial list silently replacing the full one is
+ * worse than keeping the last good cache.
+ */
+export function parseNodesPage(json: unknown): NodesPage {
+  const body = json as { success?: boolean; data?: unknown } | null
+  if (typeof body !== 'object' || body === null || body.success !== true) {
+    throw new Error('Invalid response from node API')
+  }
+  if (Array.isArray(body.data)) return { nodes: body.data, lastPage: 1 }
+
+  const data = body.data as { nodes?: unknown; pagination?: { lastPage?: unknown } } | null
+  if (typeof data !== 'object' || data === null || !Array.isArray(data.nodes)) {
+    throw new Error('Invalid response from node API')
+  }
+  const lastPage = data.pagination?.lastPage
+  return {
+    nodes: data.nodes,
+    lastPage: typeof lastPage === 'number' && Number.isInteger(lastPage) && lastPage > 0 ? lastPage : 1,
+  }
+}

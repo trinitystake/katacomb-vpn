@@ -46,7 +46,10 @@ function AppInner() {
   // One instance for the whole app: it decides whether the tab exists AND feeds the
   // console, so a refresh from inside the console also updates the tab. Skipped
   // while the tunnel is up — the chain isn't reachable through it.
-  const providerState = useProvider(wallet.address, !isConnected)
+  // Provider mode is per-wallet, so it comes off the active entry rather than app
+  // settings — a newly imported seed must not inherit the previous wallet's tab.
+  const activeWallet = wallet.store?.wallets.find((w) => w.id === wallet.store?.activeWalletId)
+  const providerState = useProvider(wallet.address, !isConnected, Boolean(activeWallet?.providerMode))
   const providerVisible = providerState.visible
   const mainTabs: MainTab[] = providerVisible
     ? ['map', 'nodes', 'plans', 'sessions', 'provider']
@@ -90,7 +93,10 @@ function AppInner() {
   // created duplicate entries for one address.
   if (!wallet.address) {
     const stored = wallet.store?.wallets ?? []
-    if (stored.length > 0 && !addingWallet) {
+    // A retained seed has no wallets but still belongs in the picker — it's the
+    // only screen that can derive from it.
+    const hasRetainedSeed = Boolean(wallet.store?.retainedSeedId)
+    if ((stored.length > 0 || hasRetainedSeed) && !addingWallet) {
       return (
         <WalletPicker
           status={wallet.store!}
@@ -129,7 +135,13 @@ function AppInner() {
           <DisconnectButton />
         </div>
         <div className="flex items-center gap-3">
-          <WalletPanel address={wallet.address} name={wallet.name} onLogout={wallet.logout} connected={isConnected} />
+          <WalletPanel
+            address={wallet.address}
+            name={wallet.name}
+            onLogout={wallet.logout}
+            connected={isConnected}
+            walletCount={wallet.store?.wallets.length ?? 0}
+          />
           <button
             onClick={() => openSettings()}
             className="text-text-secondary hover:text-accent text-sm transition-colors"
@@ -199,7 +211,6 @@ function AppInner() {
       {settingsTab && (
         <Settings
           initialTab={settingsTab}
-          currentAddress={wallet.address}
           onClose={closeSettings}
           onWalletSwitch={() => {
             closeSettings()

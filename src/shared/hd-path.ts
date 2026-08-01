@@ -7,6 +7,14 @@
 export const COSMOS_COIN_TYPE = 118
 
 /**
+ * Ceiling on how many consecutive addresses the derive-subaccount preview
+ * will derive/show in one request. Each entry is a synchronous, local BIP-32
+ * derivation with no I/O, so this is a generous safety bound on main-process
+ * work per call, not a real usage expectation.
+ */
+export const DERIVE_PREVIEW_MAX_COUNT = 500
+
+/**
  * `m/44'/118'/<account>'/0/<address>`. Varying `account` is what Keplr and
  * Ledger Live call a subaccount; varying `address` walks the addresses inside
  * one account. The change level stays 0 — Cosmos has no change addresses.

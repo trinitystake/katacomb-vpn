@@ -62,6 +62,7 @@ export default function NodeTable() {
     toggleSort,
     loading,
     lastFetched,
+    error,
     countries,
     cities,
     refresh,
@@ -108,13 +109,29 @@ export default function NodeTable() {
         onCancelBatch={cancelBatch}
       />
 
+      {/* With a list in hand a failed refresh only makes it stale — the filter
+          bar's timestamp already says so, and blanking the table would be worse.
+          Only the no-list-at-all case gets the full-pane treatment. */}
       {!lastFetched ? (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-text-secondary text-sm flex items-center gap-2">
-            <Spinner />
-            Loading nodes...
+        error ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="max-w-sm text-center flex flex-col items-center gap-3">
+              <div className="text-text-primary text-sm">Couldn't load the node directory</div>
+              <div className="text-text-secondary text-xs break-words">{error}</div>
+              <button onClick={refresh} disabled={loading} className="btn btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5">
+                {loading && <Spinner />}
+                Retry
+              </button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-text-secondary text-sm flex items-center gap-2">
+              <Spinner />
+              Loading nodes...
+            </div>
+          </div>
+        )
       ) : (
       /* Virtualized rows */
       <div ref={parentRef} className="flex-1 overflow-auto">

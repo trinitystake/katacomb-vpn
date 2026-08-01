@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LeaseSummary, MyPlan, MyProvider } from '../types'
-import { useSettings } from '../contexts/SettingsContext'
 
 /** What the fetch produced, tagged with the wallet it belongs to. */
 interface ProviderData {
@@ -29,7 +28,9 @@ export interface ProviderState {
  *
  * `visible` drives whether the Provider tab exists at all: on once this wallet has
  * a provider registered on chain, so someone who already registered never has to
- * find the setting again.
+ * find the setting again. `providerMode` is the pre-registration opt-in, and comes
+ * from the wallet entry rather than app settings — as a global setting it followed
+ * the user onto every seed imported after they first switched it on.
  *
  * Everything is tagged with the address it was read for, so a wallet switch shows
  * nothing rather than the previous wallet's provider, and a slow response that
@@ -39,8 +40,7 @@ export interface ProviderState {
  * and the main-process reads answer `null`/`[]` by design. Skipping the read (and
  * keeping the last answer) is what stops the tab from vanishing mid-session.
  */
-export function useProvider(address: string | null, enabled: boolean): ProviderState {
-  const { settings } = useSettings()
+export function useProvider(address: string | null, enabled: boolean, providerMode: boolean): ProviderState {
   const [data, setData] = useState<ProviderData | null>(null)
   const [failure, setFailure] = useState<{ address: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
@@ -91,6 +91,6 @@ export function useProvider(address: string | null, enabled: boolean): ProviderS
     loading: loading || pending,
     error,
     refresh,
-    visible: Boolean(settings?.providerMode) || Boolean(provider?.registered),
+    visible: providerMode || Boolean(provider?.registered),
   }
 }

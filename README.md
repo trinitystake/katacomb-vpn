@@ -49,6 +49,20 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 - Seeds are encrypted at rest with Electron `safeStorage` (the OS keyring — libsecret on
   Linux). If the keyring is unavailable, secrets are **not** written in plaintext instead.
 
+**Selling bandwidth** — the other side of the network
+
+- **Provider** — a fifth tab, hidden by default. Turn on *Provider mode* in Settings (the
+  switch is per wallet, not global), or it appears on its own if the active wallet already
+  has a provider registered on chain.
+- Register a provider, create plans and activate them, lease nodes from their operators
+  and link them into a plan, and read per-plan subscriber counts off the chain.
+- An economics strip across the top: daily burn from running leases, funds escrowed (yours
+  again when you end a lease) and revenue net of the hub's cut — you pay nodes **by the
+  hour** whether anyone connects or not, but sell plans **by the gigabyte**.
+- Every step is one transaction and the intermediate state lives on chain, so a flow
+  interrupted half-way — registered but not activated, leased but not linked — is
+  resumable from the console rather than lost.
+
 ## Protocol support
 
 `type` is the numeric protocol tag from the node-list feed. Each node runs exactly one.
@@ -164,6 +178,11 @@ checks first). Failures on the client side are refunded automatically; a session
 actually used is not. Cancelling a subscription marks it inactive-pending — it is not an
 instant refund.
 
+The provider side spends too, and differently: the registration deposit goes to the
+community pool, so it is gone rather than escrowed (a governance parameter — the app reads
+it live instead of hardcoding it). A lease escrows `hourly price × max hours` up front and
+pays the node hourly from it; ending the lease refunds the remainder and unlinks the node.
+
 ## Architecture
 
 Three process boundaries, with everything sensitive in the main process:
@@ -188,6 +207,7 @@ Notable modules:
 | [privileged.ts](src/main/privileged.ts) | Routes privileged ops to the daemon, else `pkexec` |
 | [ipc-handlers.ts](src/main/ipc-handlers.ts) | Every IPC channel; connect orchestration, refunds, reconnect |
 | [kill-switch.ts](src/main/kill-switch.ts) | iptables kill switch |
+| [provider-console.ts](src/main/provider-console.ts) | Provider side: registration, plans, leases, node links |
 
 Per-protocol config builders are pure, Electron-free and unit-tested:
 [openvpn-config.ts](src/main/openvpn-config.ts),

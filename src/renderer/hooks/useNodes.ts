@@ -77,7 +77,7 @@ const EMPTY_LATENCY_MAP: Map<string, number | null> = new Map()
 export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_MAP) {
   // Raw node state is owned by the NodesProvider so Map + Nodes tabs share
   // a single fetch + a single in-memory cache (seeded from disk on startup).
-  const { allNodes, lastFetched, loading, refresh, bookmarks, toggleBookmark } = useNodesContext()
+  const { allNodes, lastFetched, loading, error, refresh, bookmarks, toggleBookmark } = useNodesContext()
 
   // Per-consumer filter/sort state — Map and Nodes can hold independent filters.
   const [filter, setFilter] = useState<NodeFilter>(DEFAULT_FILTER)
@@ -149,6 +149,7 @@ export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_
     toggleSort,
     loading,
     lastFetched,
+    error,
     countries,
     cities,
     refresh,

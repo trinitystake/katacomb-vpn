@@ -57,11 +57,14 @@ export interface AppSettings {
   bookmarkedNodes: string[]
   splitTunnelRoutes: string[]
   /**
-   * Reveals the Provider tab. Not a preference so much as a mode: the tab is also
-   * shown automatically once this wallet has a provider registered on chain, so
-   * this only matters before the first registration.
+   * A seed kept on disk after its last derived wallet was deleted, so the user can
+   * derive new wallets without retyping the phrase. Holds the id of the wallet it
+   * outlived — that entry is gone from the index but its `wallets/<id>.enc` is
+   * deliberately NOT unlinked, which is the only way a seed can exist with no
+   * wallets (every entry stores its own copy of the mnemonic). Only ever set while
+   * zero wallets are stored; deriving from it or removing it clears it.
    */
-  providerMode: boolean
+  retainedSeedId: string | null
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -72,7 +75,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoReconnect: false,
   bookmarkedNodes: [],
   splitTunnelRoutes: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
-  providerMode: false,
+  retainedSeedId: null,
 }
 
 function settingsPath(): string {
@@ -138,6 +141,14 @@ export interface WalletEntry {
   // entries — treat either as 0.
   accountIndex?: number
   addressIndex?: number
+  /**
+   * Reveals the Provider tab for THIS wallet. Not a preference so much as a mode:
+   * the tab also appears on its own once the wallet has a provider registered on
+   * chain, so this only matters before a first registration. Per-wallet on
+   * purpose — as one global setting it followed the user onto every seed they
+   * imported afterwards, offering a provider console to wallets that have none.
+   */
+  providerMode?: boolean
 }
 
 function walletsDir(): string {
@@ -211,6 +222,46 @@ export function updateWalletAddress(id: string, address: string): void {
   }
 }
 
+export function setWalletProviderMode(id: string, enabled: boolean): void {
+  const wallets = listWallets()
+  const wallet = wallets.find((w) => w.id === id)
+  if (!wallet) throw new Error('Wallet not found')
+  wallet.providerMode = enabled
+  saveWalletIndex(wallets)
+}
+
+/**
+ * One-time move of `providerMode` from app settings onto the wallet entry.
+ *
+ * It was a single global boolean, so once it was switched on for the wallet that
+ * really had a provider, every seed imported afterwards inherited the Provider
+ * tab. Carry the old value onto the active wallet — the one the user last had it
+ * on for — and drop the key, so every other wallet starts from off.
+ *
+ * Must run after dedupeWalletEntries, which can itself rewrite activeWalletId.
+ */
+export function migrateProviderModeToWallet(): void {
+  const path = settingsPath()
+  if (!existsSync(path)) return
+  let raw: Record<string, unknown>
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf-8'))
+  } catch {
+    return
+  }
+  if (!('providerMode' in raw)) return
+
+  const enabled = raw['providerMode'] === true
+  delete raw['providerMode']
+  writeFileAtomic(path, JSON.stringify(raw, null, 2))
+  if (!enabled) return
+
+  const activeId = typeof raw['activeWalletId'] === 'string' ? raw['activeWalletId'] : null
+  if (activeId && listWallets().some((w) => w.id === activeId)) {
+    setWalletProviderMode(activeId, true)
+  }
+}
+
 export function renameWallet(id: string, newName: string): void {
   const wallets = listWallets()
   const wallet = wallets.find((w) => w.id === id)
@@ -219,19 +270,43 @@ export function renameWallet(id: string, newName: string): void {
   saveWalletIndex(wallets)
 }
 
-export function deleteWalletEntry(id: string): void {
+export function deleteWalletEntry(id: string, { keepSeed = false }: { keepSeed?: boolean } = {}): void {
   const wallets = listWallets()
   const filtered = wallets.filter((w) => w.id !== id)
   saveWalletIndex(filtered)
 
-  const encPath = join(walletsDir(), `${id}.enc`)
-  if (existsSync(encPath)) unlinkSync(encPath)
+  // Keeping the seed means leaving this entry's `.enc` behind and pointing
+  // retainedSeedId at it. Only meaningful for the last wallet — while others
+  // remain they still hold their own copies, so the file is just redundant.
+  if (keepSeed && filtered.length === 0) {
+    saveSettings({ retainedSeedId: id })
+  } else {
+    const encPath = join(walletsDir(), `${id}.enc`)
+    if (existsSync(encPath)) unlinkSync(encPath)
+  }
 
   // If deleted wallet was active, switch to another or clear
   const settings = loadSettings()
   if (settings.activeWalletId === id) {
     saveSettings({ activeWalletId: filtered.length > 0 ? filtered[0].id : null })
   }
+}
+
+/** Drop the retained seed and its encrypted file. No-op when none is retained. */
+export function clearRetainedSeed(): void {
+  const { retainedSeedId } = loadSettings()
+  if (!retainedSeedId) return
+  const encPath = join(walletsDir(), `${retainedSeedId}.enc`)
+  if (existsSync(encPath)) unlinkSync(encPath)
+  saveSettings({ retainedSeedId: null })
+}
+
+/**
+ * Ids that can act as a derivation source: any stored wallet, plus the retained
+ * seed — which has no index entry but still has its `.enc` on disk.
+ */
+export function isSeedSource(id: string): boolean {
+  return listWallets().some((w) => w.id === id) || loadSettings().retainedSeedId === id
 }
 
 export function getWalletMnemonic(id: string): string {

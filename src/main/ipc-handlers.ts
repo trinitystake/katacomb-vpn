@@ -6,6 +6,7 @@ import { IPC } from '../shared/ipc-channels'
 import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
 import { checkFunds, insufficientFundsMessage, udvpnOf } from '../shared/funds'
 import { isRpcConnectivityError, rpcHostLabel } from '../shared/rpc-health'
+import { DERIVE_PREVIEW_MAX_COUNT } from '../shared/hd-path'
 import { getRpcHealth, onRpcEndpointChanged, probeAll, reportRpcFailure } from './rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
@@ -50,9 +51,9 @@ import { assertValidLeaseHours, leaseDepositNumber, leaseDepositUdvpn, toProvide
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { getCachedPlans } from './plan-cache'
-import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, canUnlockWallet, getWalletMnemonic, type AppSettings } from './settings'
+import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, canUnlockWallet, getWalletMnemonic, clearRetainedSeed, setWalletProviderMode, type AppSettings } from './settings'
 import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
-import { normalizeNodes } from './node-normalize'
+import { normalizeNodes, parseNodesPage, type NodesPage } from './node-normalize'
 import {
   connectV2Ray,
   connectWireGuard,
@@ -86,6 +87,10 @@ import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'
+// Ceiling on the paginated node feed: 200 entries/page, ~10 pages for today's
+// ~1,830 nodes. Bounds the fan-out if the aggregator ever reports a silly
+// lastPage, at 5x room to grow.
+const MAX_NODE_PAGES = 50
 const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
 const PUBLIC_RPC_TTL_MS = 60_000
 const RECONNECT_MAX_ATTEMPTS = 5
@@ -777,14 +782,23 @@ async function attemptReconnect(): Promise<void> {
   }, decision.delayMs)
 }
 
-async function fetchNodes(): Promise<unknown[]> {
-  const response = await net.fetch(NODES_API, { signal: AbortSignal.timeout(15000) })
+async function fetchNodesPage(page: number): Promise<NodesPage> {
+  const url = page === 1 ? NODES_API : `${NODES_API}?page=${page}`
+  const response = await net.fetch(url, { signal: AbortSignal.timeout(15000) })
   if (!response.ok) throw new Error(`Node API returned ${response.status}`)
-  const json = await response.json() as { success: boolean; data: unknown[] }
-  if (!json.success || !Array.isArray(json.data)) {
-    throw new Error('Invalid response from node API')
-  }
-  const nodes = normalizeNodes(json.data)
+  return parseNodesPage(await response.json())
+}
+
+async function fetchNodes(): Promise<unknown[]> {
+  // The feed is paginated at a fixed 200/page (no perPage/limit override is
+  // honoured), so the whole list is ~10 requests. Page 1 tells us how many
+  // there are; the rest go out together, because sequentially they'd take
+  // longer than the 60s refresh interval they run on.
+  const first = await fetchNodesPage(1)
+  const rest = await Promise.all(
+    Array.from({ length: Math.min(first.lastPage, MAX_NODE_PAGES) - 1 }, (_, i) => fetchNodesPage(i + 2)),
+  )
+  const nodes = normalizeNodes([first, ...rest].flatMap((p) => p.nodes))
   // Cache node metadata for session enrichment
   cachedNodes = (nodes as { address?: string; moniker?: string; country?: string }[])
     .filter((n) => n.address)
@@ -1027,18 +1041,32 @@ export function registerIpcHandlers(): void {
     return { address }
   })
 
-  handle(IPC.WALLET_DELETE, async (_event, walletId: string) => {
+  // `keepSeed` only applies to the last wallet: it leaves the encrypted seed on
+  // disk so new wallets can be derived from it without retyping the phrase.
+  handle(IPC.WALLET_DELETE, async (_event, walletId: string, keepSeed?: boolean) => {
     assertString(walletId, 'walletId')
-    deleteWalletEntry(walletId)
+    deleteWalletEntry(walletId, { keepSeed: keepSeed === true })
   })
 
-  handle(IPC.WALLET_DELETE_ALL, async () => {
-    // "Start fresh" from the wallet picker. One round-trip rather than N invokes
-    // from the renderer, so a destructive op can't be left half-done by a mid-loop
-    // failure in the caller. App settings are deliberately untouched.
-    for (const wallet of listWallets()) {
-      deleteWalletEntry(wallet.id)
+  handle(IPC.WALLET_DELETE_ALL, async (_event, keepSeed?: boolean) => {
+    // "Start fresh" from the wallet picker, and "Remove seed" from Settings. One
+    // round-trip rather than N invokes from the renderer, so a destructive op
+    // can't be left half-done by a mid-loop failure in the caller. App settings
+    // are deliberately untouched.
+    const wallets = listWallets()
+    // `keepSeed` keeps the phrase behind the ACTIVE wallet — the one the user is
+    // looking at. deleteWalletEntry only retains when it's deleting the final
+    // entry, so that one has to go last.
+    const activeId = loadSettings().activeWalletId
+    const retainId = keepSeed === true
+      ? (wallets.find((w) => w.id === activeId)?.id ?? wallets[0]?.id ?? null)
+      : null
+
+    for (const wallet of wallets) {
+      if (wallet.id !== retainId) deleteWalletEntry(wallet.id)
     }
+    if (retainId) deleteWalletEntry(retainId, { keepSeed: true })
+    if (keepSeed !== true) clearRetainedSeed()
     logout()
   })
 
@@ -1050,6 +1078,7 @@ export function registerIpcHandlers(): void {
     return {
       wallets: listWallets().map((w) => ({ ...w, unlockable: canUnlockWallet(w.id) })),
       activeWalletId: loadSettings().activeWalletId,
+      retainedSeedId: loadSettings().retainedSeedId,
     }
   })
 
@@ -1092,7 +1121,7 @@ export function registerIpcHandlers(): void {
     assertString(params.sourceWalletId, 'sourceWalletId')
     assertIntRange(params.accountIndex, 'accountIndex', 0, 2147483647)
     assertIntRange(params.startIndex, 'startIndex', 0, 2147483647)
-    assertIntRange(params.count, 'count', 1, 20)
+    assertIntRange(params.count, 'count', 1, DERIVE_PREVIEW_MAX_COUNT)
     return previewDerivations(params.sourceWalletId, params.accountIndex, params.startIndex, params.count)
   })
 
@@ -1114,7 +1143,7 @@ export function registerIpcHandlers(): void {
     // Only allow known setting keys
     const allowed = new Set([
       'rpcEndpoint', 'activeWalletId', 'killSwitch', 'dnsResolver', 'autoReconnect',
-      'bookmarkedNodes', 'splitTunnelRoutes', 'providerMode',
+      'bookmarkedNodes', 'splitTunnelRoutes',
     ])
     const filtered: Record<string, unknown> = {}
     for (const key of Object.keys(settings)) {
@@ -1139,9 +1168,6 @@ export function registerIpcHandlers(): void {
     }
     if (filtered.autoReconnect !== undefined && typeof filtered.autoReconnect !== 'boolean') {
       throw new Error('Invalid autoReconnect: expected boolean')
-    }
-    if (filtered.providerMode !== undefined && typeof filtered.providerMode !== 'boolean') {
-      throw new Error('Invalid providerMode: expected boolean')
     }
     if (filtered.bookmarkedNodes !== undefined) {
       if (!Array.isArray(filtered.bookmarkedNodes)) throw new Error('Invalid bookmarkedNodes: expected array')
@@ -1958,6 +1984,15 @@ export function registerIpcHandlers(): void {
     if (!address) throw new Error('Wallet not loaded')
     if (isVpnActive()) return null
     return await getMyProvider(address).catch(noteChainError)
+  })
+
+  // Reveals the Provider tab for the ACTIVE wallet only. Read back off the wallet
+  // entry (walletList / walletStoreStatus), so there's no getter here.
+  handle(IPC.PROVIDER_MODE_SET, async (_event, enabled: boolean) => {
+    if (typeof enabled !== 'boolean') throw new Error('Invalid providerMode: expected boolean')
+    const activeWalletId = loadSettings().activeWalletId
+    if (!activeWalletId) throw new Error('No active wallet')
+    setWalletProviderMode(activeWalletId, enabled)
   })
 
   handle(IPC.PROVIDER_DEPOSIT, async () => {

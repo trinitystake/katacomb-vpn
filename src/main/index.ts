@@ -11,7 +11,7 @@ import {
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
 import { startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
 import { sweepStaleSessionFiles } from './chain-service'
-import { migrateLegacyUserData, dedupeWalletEntries } from './settings'
+import { migrateLegacyUserData, dedupeWalletEntries, migrateProviderModeToWallet } from './settings'
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
 import { IPC } from '../shared/ipc-channels'
@@ -285,6 +285,9 @@ app.whenReady().then(() => {
   // Repair installs that predate the uniqueness guard in addWalletEntry, where
   // re-importing a stored seed created a second entry for the same address.
   dedupeWalletEntries()
+  // Provider mode used to be global, so it leaked onto every seed imported after
+  // it was turned on. Runs after the dedupe, which can rewrite activeWalletId.
+  migrateProviderModeToWallet()
   checkSystemDeps()
   // The root daemon (deb install) handles privileged ops password-free, so the
   // per-op polkit helper + its install prompt are only needed on the fallback

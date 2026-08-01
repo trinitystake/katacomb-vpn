@@ -76,6 +76,16 @@ Strict Electron security isolation with three process boundaries:
   (`fetchNodes`, `bootstrapNodesCache`) so that type is true downstream — don't re-add
   `|| ''` guards at read sites, and don't add a fourth entry point that skips it. A
   renderer `node.country.toLowerCase()` on a raw entry white-screens the app.
+  It also owns `parseNodesPage()`, the **envelope** reader: on 2026-08-01 the feed's
+  `data` went from a flat array of every node to `{nodes, pagination}`, **200 per page,
+  ~10 pages** — and no `limit`/`perPage`/`pageSize` override is honoured, so the full
+  list is inherently N requests. `fetchNodes` reads page 1, then fans the rest out in
+  parallel (sequential would outrun the 60s refresh interval); a failed page fails the
+  whole refresh, deliberately — a partial list replacing the full one is worse than the
+  last good cache. Both shapes parse, so an upstream revert doesn't break it again.
+  **Nothing in the renderer should call `nodesFetch()` just to read the list** — that's
+  the whole paginated refresh; take `useNodesContext().allNodes`, which is already
+  populated from cache + `NODES_UPDATE` pushes. Only a user-driven Refresh should fetch.
 - `price-service.ts`: P2P→USD rate from CoinGecko (`ids=sentinel`), 15-min memory cache,
   **display only** — no transaction figure is ever derived from it, and failure returns the
   last value or null so the "≈ $x" hint just disappears.
@@ -168,6 +178,16 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 
 - Hooks in `src/renderer/hooks/`: `useWallet` (balance polling 300s), `useNodes` (node fetch + filter/sort, 60s refresh), `useConnection` (status polling 3s). Polling intervals are hardcoded per-hook — not user-tunable.
 - Node table uses `@tanstack/react-virtual` for virtualized rendering (5000+ nodes).
+- **The node list is NOT chain data** — it comes from `api.sentnodes.com` over plain
+  HTTPS, so a bad `rpcEndpoint` never explains an empty node table (and picking a
+  faster RPC never fixes one). `NodesContext` must stay *active*, not passive: it
+  subscribes to `NODES_UPDATE` before its first read and fetches for itself when
+  `nodesGetCached()` comes back empty. It used to do one cached read and then wait
+  for a push, so a broadcast that landed before the listener existed — main's first
+  fetch fires at startup, racing window creation — stranded the "Loading nodes…"
+  spinner until the app was restarted. Its `error` surfaces as a Retry pane, but
+  only when there is no list at all; a failed refresh over a cached list just makes
+  it stale, and blanking the table would be worse.
 - BIP-39 validation lives in `src/shared/mnemonic.ts` (`checkMnemonic`, pure + unit-tested):
   word list, word count and **checksum**, re-run on every keystroke so the Import button
   only enables on a phrase that will actually import. It uses `@scure/bip39` — the package
@@ -376,11 +396,20 @@ up to the 120 s poll. `subscriptionShare` exists in the SDK and is deliberately 
 
 ### Provider console (acting AS a provider)
 
-The Plans tab is the consumer side; the **Provider** tab (5th, hidden unless
-`settings.providerMode` or this wallet already has a provider on chain — see
-`useProvider().visible`) is the producer side. `provider-console.ts` holds the ops,
-`provider-msgs.ts` the pure/unit-tested message builders, `lease-query.ts` +
-`protobuf-query.ts` the queries the SDK doesn't provide.
+The Plans tab is the consumer side; the **Provider** tab (5th, hidden unless the
+ACTIVE wallet's `providerMode` is set or that wallet already has a provider on
+chain — see `useProvider().visible`) is the producer side. `provider-console.ts`
+holds the ops, `provider-msgs.ts` the pure/unit-tested message builders,
+`lease-query.ts` + `protobuf-query.ts` the queries the SDK doesn't provide.
+
+**`providerMode` is per-wallet, on the `WalletEntry` in `wallets-index.json` — NOT
+an app setting.** As one global boolean it followed the user onto every seed they
+imported after first switching it on, offering a provider console to wallets that
+have none. Written only via `PROVIDER_MODE_SET` (which targets the active wallet)
+and read back off the wallet entry, so there is no getter; `migrateProviderModeToWallet()`
+in `settings.ts` carries the old global value onto the active wallet once and
+deletes the key. Don't re-add it to `AppSettings` — the chain half of `visible`
+was always per-wallet and correct, and the global flag was the only leak.
 
 **Chain facts (verified against sentinelhub v12 + live mainnet, not inferred):**
 - Provider address = the account's 20 bytes re-encoded with the `sentprov` prefix

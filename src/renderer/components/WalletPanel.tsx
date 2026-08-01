@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Spinner from './Spinner'
 import { useBalance } from '../hooks/useBalance'
+import { useNavigation } from '../contexts/NavigationContext'
 
 interface Props {
   address: string | null
@@ -8,10 +9,12 @@ interface Props {
   /** Locks the wallet: clears it from memory, leaves the encrypted seed on disk. */
   onLogout: () => void
   connected: boolean
+  walletCount: number
 }
 
-export default function WalletPanel({ address, name, onLogout, connected }: Props) {
+export default function WalletPanel({ address, name, onLogout, connected, walletCount }: Props) {
   const { display: balance, refresh: refreshBalance } = useBalance()
+  const { openSettings } = useNavigation()
   const [sessions, setSessions] = useState<{ id: string; nodeAddress: string; status: string }[]>([])
   const [copied, setCopied] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -160,6 +163,16 @@ export default function WalletPanel({ address, name, onLogout, connected }: Prop
                 ))}
               </div>
             </div>
+          )}
+
+          {walletCount > 1 && (
+            <button
+              onClick={() => { setExpanded(false); openSettings('wallets') }}
+              className="text-text-secondary hover:text-accent text-sm transition-colors w-full text-center"
+              title="Switch to a different stored wallet"
+            >
+              Switch Wallet
+            </button>
           )}
 
           {/* "Lock", not "Logout": the seeds stay encrypted on this device and

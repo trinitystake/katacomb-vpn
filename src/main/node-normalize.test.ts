@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeNodes } from './node-normalize.ts'
+import { normalizeNodes, parseNodesPage } from './node-normalize.ts'
 
 // A real entry from api.sentnodes.com — one of the ~10 leasable nodes whose
 // moniker and country are null. Searching the provider console's node picker
@@ -53,4 +53,59 @@ test('a missing field is filled in too, not just an explicit null', () => {
   const [node] = normalizeNodes([{ address: 'sentnode1abc' }]) as Record<string, unknown>[]
   assert.equal(node.moniker, '')
   assert.equal(node.country, '')
+})
+
+// --- parseNodesPage: the /v2/nodes envelope ------------------------------
+// Verbatim shapes captured from api.sentnodes.com on 2026-08-01, the day the
+// endpoint started paginating.
+
+test('reads the paginated envelope and asks for more pages', () => {
+  const page = parseNodesPage({
+    success: true,
+    data: {
+      nodes: [{ address: 'sentnode1abc' }],
+      pagination: { total: 1833, perPage: 200, currentPage: 1, lastPage: 10, hasMorePages: true },
+    },
+    errors: null,
+  })
+  assert.deepEqual(page.nodes, [{ address: 'sentnode1abc' }])
+  assert.equal(page.lastPage, 10)
+})
+
+test('the last page reports no further pages', () => {
+  const page = parseNodesPage({
+    success: true,
+    data: {
+      nodes: [],
+      pagination: { total: 1833, perPage: 200, currentPage: 10, lastPage: 10, hasMorePages: false },
+    },
+  })
+  assert.equal(page.lastPage, 10)
+})
+
+test('the pre-pagination flat array still parses, as a single page', () => {
+  const page = parseNodesPage({ success: true, data: [{ address: 'sentnode1abc' }] })
+  assert.deepEqual(page.nodes, [{ address: 'sentnode1abc' }])
+  assert.equal(page.lastPage, 1)
+})
+
+test('a page count that is missing or nonsense means "just this page"', () => {
+  for (const pagination of [undefined, {}, { lastPage: 0 }, { lastPage: -3 }, { lastPage: 'ten' }]) {
+    const page = parseNodesPage({ success: true, data: { nodes: [], pagination } })
+    assert.equal(page.lastPage, 1, `pagination ${JSON.stringify(pagination)}`)
+  }
+})
+
+test('a failed or unrecognised body throws', () => {
+  for (const body of [
+    { success: false, data: null, errors: { code: 404, message: 'No route found with those values' } },
+    { success: true, data: null },
+    { success: true, data: { pagination: { lastPage: 1 } } },
+    { success: true },
+    {},
+    null,
+    'not json',
+  ]) {
+    assert.throws(() => parseNodesPage(body), /Invalid response from node API/, `body ${JSON.stringify(body)}`)
+  }
 })

@@ -162,6 +162,8 @@ export interface WalletEntry {
   address: string
   accountIndex?: number
   addressIndex?: number
+  /** Reveals the Provider tab for this wallet, before it has one on chain. */
+  providerMode?: boolean
 }
 
 /** One candidate derivation path in the Derive Subaccount picker. */
@@ -184,6 +186,12 @@ export interface WalletStoreStatus {
     unlockable: boolean
   })[]
   activeWalletId: string | null
+  /**
+   * Set when a seed outlived its last wallet (deleted with "keep seed"). New
+   * wallets can be derived from it without retyping the phrase. Non-null only
+   * while `wallets` is empty.
+   */
+  retainedSeedId: string | null
 }
 
 export interface AppSettings {
@@ -194,8 +202,6 @@ export interface AppSettings {
   autoReconnect: boolean
   bookmarkedNodes: string[]
   splitTunnelRoutes: string[]
-  /** Reveals the Provider tab before this wallet has a provider registered on chain. */
-  providerMode: boolean
 }
 
 export interface PlanInfo {
@@ -378,8 +384,10 @@ export interface ElectronAPI {
   walletEndSession: (sessionId: string) => Promise<void>
   walletList: () => Promise<WalletEntry[]>
   walletSwitch: (walletId: string) => Promise<{ address: string | null }>
-  walletDelete: (walletId: string) => Promise<void>
-  walletDeleteAll: () => Promise<void>
+  /** `keepSeed` applies only to the last wallet — see WalletStoreStatus.retainedSeedId. */
+  walletDelete: (walletId: string, keepSeed?: boolean) => Promise<void>
+  /** `keepSeed` retains the active wallet's encrypted seed — see WalletStoreStatus.retainedSeedId. */
+  walletDeleteAll: (keepSeed?: boolean) => Promise<void>
   walletStoreStatus: () => Promise<WalletStoreStatus>
   walletRename: (walletId: string, newName: string) => Promise<void>
   walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; addressIndex: number; name: string }) => Promise<{ address: string }>
@@ -432,6 +440,8 @@ export interface ElectronAPI {
    * rather than stale data while the VPN tunnel is up, and the writes throw.
    */
   providerMe: () => Promise<MyProvider | null>
+  /** Sets provider mode on the ACTIVE wallet; read it back off the wallet entry. */
+  providerModeSet: (enabled: boolean) => Promise<void>
   providerDeposit: () => Promise<{ denom: string; amount: string } | null>
   providerRegister: (params: ProviderDetailsInput) => Promise<void>
   providerUpdateDetails: (params: ProviderDetailsInput) => Promise<void>

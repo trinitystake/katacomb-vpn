@@ -15,6 +15,8 @@ import {
   migrateOldWallet,
   saveSettings,
   updateWalletAddress,
+  isSeedSource,
+  clearRetainedSeed,
 } from './settings'
 import { WALLET_PREFIX } from '../shared/chain-constants'
 import { formatHdPath } from '../shared/hd-path'
@@ -163,9 +165,7 @@ export async function deriveSubaccount(
   addressIndex: number,
   name: string,
 ): Promise<string> {
-  const wallets = listWallets()
-  const source = wallets.find((w) => w.id === sourceWalletId)
-  if (!source) throw new Error('Source wallet not found')
+  if (!isSeedSource(sourceWalletId)) throw new Error('Source wallet not found')
 
   const mnemonic = getWalletMnemonic(sourceWalletId)
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
@@ -179,6 +179,11 @@ export async function deriveSubaccount(
   // renderer greys those rows out, but this is the authoritative check.
   const walletName = name.trim() || `Wallet ${listWallets().length + 1}`
   addWalletEntry(walletName, account.address, wallet.mnemonic, { accountIndex, addressIndex })
+
+  // The new entry now holds its own encrypted copy of this seed, so the retained
+  // one is redundant — drop it and we're back to the ordinary "the seed lives in
+  // the wallets" model. Only fires when we derived from the retained seed itself.
+  if (loadSettings().retainedSeedId === sourceWalletId) clearRetainedSeed()
   return account.address
 }
 
@@ -205,8 +210,7 @@ export async function previewDerivations(
   startIndex: number,
   count: number,
 ): Promise<DerivationPreview[]> {
-  const source = listWallets().find((w) => w.id === sourceWalletId)
-  if (!source) throw new Error('Source wallet not found')
+  if (!isSeedSource(sourceWalletId)) throw new Error('Source wallet not found')
 
   const indices = Array.from({ length: count }, (_, i) => startIndex + i)
   const mnemonic = getWalletMnemonic(sourceWalletId)

@@ -277,4 +277,10 @@ the chain's, not the product's.
 
 ## License
 
-No license declared yet.
+GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+The packages also ship six third-party executables (v2ray, tun2socks, xray, hysteria,
+amneziawg-go, awg/awg-quick), each a separate program under its own license, with the
+full text alongside it in `resources/linux/v2ray/`. Pinned versions, licenses and the
+GPL-2.0 source offer for `awg` are in
+[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

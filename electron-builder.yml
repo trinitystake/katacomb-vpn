@@ -28,6 +28,12 @@ extraResources:
   # Standalone root-daemon bundle → /opt/Katacomb VPN/resources/daemon/index.js
   - from: out/daemon/index.js
     to: daemon/index.js
+  # The app is GPL-3.0-or-later and ships GPL-2.0 binaries (awg/awg-quick), so the
+  # licence text and the source offer must accompany the binaries, not just the repo.
+  - from: LICENSE
+    to: ../LICENSE
+  - from: THIRD-PARTY-LICENSES.md
+    to: ../THIRD-PARTY-LICENSES.md
   # App icons → resources/icons/ so the tray (getIconPath in main) can load them
   # at runtime. `linux.icon` below only sets the launcher/desktop icon; it is NOT
   # a path readable via nativeImage.createFromPath, so without this copy the tray

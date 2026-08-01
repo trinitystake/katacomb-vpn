@@ -4,6 +4,7 @@
   "description": "Katacomb VPN Desktop Client",
   "author": "Katacomb <noreply@katacomb.vpn>",
   "homepage": "https://katacomb.vpn",
+  "license": "GPL-3.0-or-later",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

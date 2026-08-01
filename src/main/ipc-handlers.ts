@@ -32,6 +32,7 @@ import {
   getProviderDeposit,
   getNodeHourlyPrice,
   getPlanSubscriberStats,
+  getProviderEconomics,
   listMyPlans,
   registerProvider,
   updateProviderDetails,
@@ -2091,6 +2092,21 @@ export function registerIpcHandlers(): void {
       }
     }
     return out
+  })
+
+  /**
+   * Lease burn, escrow and estimated plan income in one read, for the console's
+   * economics strip and the break-even line on the plan form.
+   *
+   * Not best-effort like PROVIDER_PLAN_STATS: money figures either add up or they
+   * don't, so a partial read throws and the strip renders "unavailable" rather than
+   * a total silently missing a plan's income or a node's burn.
+   */
+  handle(IPC.PROVIDER_ECONOMICS, async () => {
+    const address = getAddress()
+    if (!address) throw new Error('Wallet not loaded')
+    if (isVpnActive()) return null
+    return await getProviderEconomics(address).catch(noteChainError)
   })
 
   /** Display-only USD rate. Null when it can't be reached — the UI just omits it. */

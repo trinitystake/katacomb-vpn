@@ -154,6 +154,7 @@ contextBridge.exposeInMainWorld('api', {
   providerPlanUnlink: (planId: string, nodeAddress: string) =>
     ipcRenderer.invoke(IPC.PROVIDER_PLAN_UNLINK, { planId, nodeAddress }),
   providerPlanStats: (planIds: string[]) => ipcRenderer.invoke(IPC.PROVIDER_PLAN_STATS, { planIds }),
+  providerEconomics: () => ipcRenderer.invoke(IPC.PROVIDER_ECONOMICS),
 
   priceToken: () => ipcRenderer.invoke(IPC.PRICE_TOKEN),
 

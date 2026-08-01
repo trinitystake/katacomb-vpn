@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { LeaseSummary, MyPlan, PlanStats, TokenPrice } from '../../types'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { LeaseSummary, MyPlan, PlanStats, ProviderEconomics, TokenPrice } from '../../types'
+import { computeBreakEven, netOfStakingShare, parseDecShare } from '../../../shared/provider-economics'
 import { displayConnectError } from '../../utils/connect-errors'
 import PlanNodesManager from './PlanNodesManager'
-import { STATUS_ACTIVE, formatUdvpn, formatUsd } from './ProviderConsole'
+import { STATUS_ACTIVE, formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
 
 function formatSize(bytes: string): string {
   const gb = Number(bytes) / 1e9
@@ -44,10 +45,12 @@ interface Props {
   plans: MyPlan[]
   leases: LeaseSummary[]
   providerActive: boolean
+  /** Null while unread — the pricing hints simply don't render rather than guess. */
+  economics: ProviderEconomics | null
   onChanged: () => void
 }
 
-export default function ProviderPlans({ plans, leases, providerActive, onChanged }: Props) {
+export default function ProviderPlans({ plans, leases, providerActive, economics, onChanged }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const selected = plans.find((p) => p.id === selectedId) ?? null
@@ -102,6 +105,7 @@ export default function ProviderPlans({ plans, leases, providerActive, onChanged
         {creating && (
           <CreatePlanForm
             price={price}
+            economics={economics}
             onCreated={() => {
               setCreating(false)
               handleChanged()
@@ -132,7 +136,13 @@ export default function ProviderPlans({ plans, leases, providerActive, onChanged
 
       <div className="flex-1 min-w-0">
         {selected ? (
-          <PlanNodesManager plan={selected} leases={leases} price={price} onChanged={handleChanged} />
+          <PlanNodesManager
+            plan={selected}
+            leases={leases}
+            price={price}
+            economics={economics}
+            onChanged={handleChanged}
+          />
         ) : (
           <div className="h-full flex items-center justify-center px-8">
             <p className="text-text-tertiary text-sm text-center max-w-sm">
@@ -246,7 +256,11 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
  * Create a plan. It lands INACTIVE on chain — activation is a separate tx, offered
  * on the row once it appears — so nothing here needs to track a half-created plan.
  */
-function CreatePlanForm({ price: tokenPrice, onCreated }: { price: TokenPrice | null; onCreated: () => void }) {
+function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
+  price: TokenPrice | null
+  economics: ProviderEconomics | null
+  onCreated: () => void
+}) {
   const [gigabytes, setGigabytes] = useState('100')
   const [days, setDays] = useState('30')
   const [price, setPrice] = useState('10')
@@ -261,6 +275,23 @@ function CreatePlanForm({ price: tokenPrice, onCreated }: { price: TokenPrice | 
     Number.isInteger(gb) && gb > 0 &&
     Number.isInteger(dayCount) && dayCount > 0 &&
     priceUdvpn !== null
+
+  // How many subscribers this price would need to cover the running lease burn.
+  // Advisory only — it never gates the button, because pricing below cost to win
+  // subscribers is a legitimate strategy, not a mistake to be blocked.
+  const breakEven = useMemo(() => {
+    if (!economics || priceUdvpn === null || !Number.isInteger(dayCount) || dayCount <= 0) return null
+    const net = netOfStakingShare(String(priceUdvpn), parseDecShare(economics.subscriptionStakingShare))
+    return {
+      net,
+      burnDailyUdvpn: economics.burnDailyUdvpn,
+      result: computeBreakEven({
+        dailyBurnUdvpn: economics.burnDailyUdvpn,
+        netPricePerSubUdvpn: net,
+        durationDays: dayCount,
+      }),
+    }
+  }, [economics, priceUdvpn, dayCount])
 
   async function handleCreate() {
     if (!valid || priceUdvpn === null) return
@@ -297,6 +328,7 @@ function CreatePlanForm({ price: tokenPrice, onCreated }: { price: TokenPrice | 
             (tokenPrice ? ` ≈ ${formatUsd(priceUdvpn, tokenPrice.usd)}` : '')
           : 'Size and days must be whole numbers; price accepts up to 6 decimals.'}
       </p>
+      {valid && breakEven && <BreakEvenHint {...breakEven} />}
       {error && <p className="text-danger text-xs">{displayConnectError(error)}</p>}
       <button
         type="button"
@@ -307,6 +339,49 @@ function CreatePlanForm({ price: tokenPrice, onCreated }: { price: TokenPrice | 
         {busy ? 'Creating…' : 'Create plan'}
       </button>
     </div>
+  )
+}
+
+/**
+ * Translates the plan price into the number of subscribers that would cover the
+ * lease burn — the one figure connecting the two halves of the business, since
+ * nodes bill by time and plans sell by allocation.
+ *
+ * Advisory: nothing here disables the Create button. A provider may knowingly price
+ * below cost to win subscribers, and the app has no business overruling that.
+ */
+function BreakEvenHint({ net, burnDailyUdvpn, result }: {
+  net: string
+  burnDailyUdvpn: string
+  result: ReturnType<typeof computeBreakEven>
+}) {
+  if (result.kind === 'no-burn') {
+    return (
+      <p className="text-text-tertiary text-xs">
+        You have no nodes leased yet, so there is nothing to cover. Lease one before activating this
+        plan — a plan with no nodes has nothing to serve its subscribers.
+      </p>
+    )
+  }
+
+  if (result.kind === 'never') {
+    return (
+      <p className="text-warning text-xs">
+        At this price you keep nothing per subscription, so this plan can never cover the{' '}
+        {formatUdvpnAmount(burnDailyUdvpn)}/day your nodes cost. That is allowed — just make sure it&apos;s deliberate.
+      </p>
+    )
+  }
+
+  return (
+    <p className="text-text-tertiary text-xs">
+      Your nodes cost <span className="text-text-secondary">{formatUdvpnAmount(burnDailyUdvpn)}/day</span>. You keep{' '}
+      <span className="text-text-secondary">{formatUdvpnAmount(net)}</span> per subscription after the chain&apos;s cut,
+      so this plan breaks even at{' '}
+      <span className="text-text-primary">
+        ~{result.count.toLocaleString('en-US')} active subscriber{result.count === 1 ? '' : 's'}
+      </span>.
+    </p>
   )
 }
 

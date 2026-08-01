@@ -89,6 +89,7 @@ export const IPC = {
   PROVIDER_PLAN_LINK: 'provider:plan-link',
   PROVIDER_PLAN_UNLINK: 'provider:plan-unlink',
   PROVIDER_PLAN_STATS: 'provider:plan-stats',
+  PROVIDER_ECONOMICS: 'provider:economics',
 
   // Token price in USD (display only — never used to price a transaction)
   PRICE_TOKEN: 'price:token',

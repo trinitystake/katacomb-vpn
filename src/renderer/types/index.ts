@@ -269,6 +269,28 @@ export interface PlanStats {
   truncated: boolean
 }
 
+/**
+ * The provider's money picture, all figures udvpn integer strings computed in main.
+ *
+ * There is deliberately no profit line: the chain deletes leases once they end, so
+ * lifetime spend can't be known, and pairing complete revenue with partial costs
+ * would overstate how well the business is doing.
+ */
+export interface ProviderEconomics {
+  burnHourlyUdvpn: string
+  burnDailyUdvpn: string
+  activeLeases: number
+  /** Escrowed but unspent — refunded if every lease ended now. */
+  committedUdvpn: string
+  /** Cumulative, net of the staking share, and a floor: renewals aren't counted. */
+  estimatedRevenueUdvpn: string
+  subscriptions: number
+  /** LegacyDec (10^18-scaled) cut the hub keeps from plan sales. Drives break-even. */
+  subscriptionStakingShare: string
+  /** LegacyDec (10^18-scaled) community-pool cut of lease payments. '' if absent. */
+  leaseStakingShare: string
+}
+
 export interface TokenPrice {
   /** USD for one P2P. */
   usd: number
@@ -426,6 +448,8 @@ export interface ElectronAPI {
   providerPlanUnlink: (planId: string, nodeAddress: string) => Promise<void>
   /** Keyed by plan id; a plan the chain couldn't answer for is simply absent. */
   providerPlanStats: (planIds: string[]) => Promise<Record<string, PlanStats>>
+  /** Null while the VPN is up — chain reads don't survive the tunnel. */
+  providerEconomics: () => Promise<ProviderEconomics | null>
 
   /** USD per P2P, for display next to prices. Null when unavailable. */
   priceToken: () => Promise<TokenPrice | null>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ProviderState } from '../../hooks/useProvider'
+import { useProviderEconomics, type ProviderEconomicsState } from '../../hooks/useProviderEconomics'
 import { useConnection } from '../../hooks/useConnection'
 import { useRpcHealth } from '../../hooks/useRpcHealth'
 import { isChainUnreachable } from '../../../shared/rpc-health'
@@ -16,6 +17,18 @@ export function formatUdvpn(udvpn: string | number): string {
   const n = typeof udvpn === 'number' ? udvpn : Number(udvpn)
   if (!isFinite(n)) return '—'
   if (n === 0) return 'free'
+  return `${(n / 1e6).toLocaleString('en-US', { maximumFractionDigits: 6 })} P2P`
+}
+
+/**
+ * formatUdvpn for balances rather than prices.
+ *
+ * The "free" that formatUdvpn returns for zero is right for a plan price and wrong
+ * for an amount: "Revenue: free" and "burn: free → 360 P2P" both read as nonsense.
+ */
+export function formatUdvpnAmount(udvpn: string | number): string {
+  const n = typeof udvpn === 'number' ? udvpn : Number(udvpn)
+  if (!isFinite(n)) return '—'
   return `${(n / 1e6).toLocaleString('en-US', { maximumFractionDigits: 6 })} P2P`
 }
 
@@ -46,6 +59,14 @@ export default function ProviderConsole({ provider, plans, leases, loading, erro
   const { status: connStatus } = useConnection()
   const { state: rpcState } = useRpcHealth()
   const tunnelUp = connStatus.state === 'connected' || connStatus.state === 'reconnecting'
+
+  const economics = useProviderEconomics(provider?.registered ? provider.address : null, !tunnelUp)
+  const { refresh: refreshEconomics } = economics
+  // Leasing, ending a lease and selling a subscription all move these figures
+  // without changing the provider record, so every action re-reads both.
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refresh(), refreshEconomics()])
+  }, [refresh, refreshEconomics])
 
   if (tunnelUp) {
     return (
@@ -85,13 +106,100 @@ export default function ProviderConsole({ provider, plans, leases, loading, erro
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      <ProviderHeader provider={provider} onChanged={refresh} />
+      <ProviderHeader provider={provider} onChanged={refreshAll} />
+      <EconomicsStrip state={economics} />
       <ProviderPlans
         plans={plans}
         leases={leases}
         providerActive={provider.status === STATUS_ACTIVE}
-        onChanged={refresh}
+        economics={economics.economics}
+        onChanged={refreshAll}
       />
+    </div>
+  )
+}
+
+/**
+ * The money strip: what the leased nodes cost to keep, and what the plans have
+ * brought in.
+ *
+ * There is deliberately no profit line. The chain deletes a lease once it ends, so
+ * lifetime spend can't be reconstructed — subtracting the costs we *can* still see
+ * from complete revenue would report a business as healthier than it is. Burn and
+ * revenue are shown side by side and the break-even line on the plan form does the
+ * comparison that is actually sound.
+ */
+function EconomicsStrip({ state }: { state: ProviderEconomicsState }) {
+  const { economics, loading, unavailable } = state
+
+  if (loading && !economics) {
+    return (
+      <StripShell>
+        <span className="text-text-tertiary text-xs flex items-center gap-2">
+          <Spinner /> Reading your economics…
+        </span>
+      </StripShell>
+    )
+  }
+
+  if (unavailable || !economics) {
+    return (
+      <StripShell>
+        <span className="text-text-tertiary text-xs">
+          Economics unavailable — the chain couldn&apos;t be read just now.
+        </span>
+      </StripShell>
+    )
+  }
+
+  const idle = economics.activeLeases === 0
+  return (
+    <StripShell>
+      <div className="flex items-start gap-8 flex-wrap">
+        <Stat
+          label="Burn"
+          value={idle ? 'None' : `${formatUdvpnAmount(economics.burnDailyUdvpn)} / day`}
+          note={idle ? 'no nodes leased yet' : `${economics.activeLeases} lease${economics.activeLeases === 1 ? '' : 's'} running`}
+        />
+        <Stat
+          label="Committed"
+          value={idle ? 'None' : formatUdvpnAmount(economics.committedUdvpn)}
+          note={idle ? 'nothing escrowed yet' : 'refunded if you end the leases'}
+        />
+        <Stat
+          label="Revenue"
+          value={economics.estimatedRevenueUdvpn === '0' ? 'None' : `≈ ${formatUdvpnAmount(economics.estimatedRevenueUdvpn)}`}
+          note={`${economics.subscriptions} sold · estimate, net of the chain's cut`}
+          title={
+            'Subscriptions sold, times the plan price, less the share the hub keeps. ' +
+            'A floor: renewals may charge again without creating a new subscription.'
+          }
+        />
+      </div>
+      <p className="text-text-tertiary text-[11px] mt-2">
+        You pay nodes <span className="text-text-secondary">by the hour</span> whether or not anyone connects,
+        but sell plans <span className="text-text-secondary">by the gigabyte</span>. Extra subscribers on nodes
+        you already lease cost you nothing more — until those nodes run out of bandwidth.
+      </p>
+    </StripShell>
+  )
+}
+
+function StripShell({ children }: { children: React.ReactNode }) {
+  return <div className="px-5 py-3 border-b border-border bg-bg-secondary shrink-0">{children}</div>
+}
+
+function Stat({ label, value, note, title }: {
+  label: string
+  value: string
+  note: string
+  title?: string
+}) {
+  return (
+    <div title={title}>
+      <div className="text-text-tertiary text-[10px] uppercase tracking-wide">{label}</div>
+      <div className="text-text-primary text-sm mt-0.5">{value}</div>
+      <div className="text-text-tertiary text-[11px]">{note}</div>
     </div>
   )
 }

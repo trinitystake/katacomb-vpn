@@ -21,9 +21,21 @@ import {
   QueryServiceClientImpl as ProviderQueryServiceClientImpl,
   QueryParamsRequest as ProviderQueryParamsRequest,
 } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/provider/v3/querier.js'
+import {
+  QueryServiceClientImpl as SubscriptionQueryServiceClientImpl,
+  QueryParamsRequest as SubscriptionQueryParamsRequest,
+} from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/subscription/v3/querier.js'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
 import { withProtobufQuery } from './protobuf-query'
+import { listLeasesForProvider, getLeaseParams } from './lease-query'
+import {
+  computeBurn,
+  computeCommitted,
+  computeEstimatedRevenue,
+  netOfStakingShare,
+  parseDecShare,
+} from '../shared/provider-economics'
 import { assertTxSucceeded, broadcastOrTimeout, isChainNotFound } from './tx-utils'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
 import {
@@ -169,6 +181,32 @@ export async function getProviderDeposit(): Promise<{ denom: string; amount: str
 }
 
 /**
+ * The share of every plan payment the hub keeps rather than passing to the provider
+ * (LegacyDec, 10^18-scaled integer string — mainnet returns 20%).
+ *
+ * It lives on the provider side because the only thing that reads it is provider
+ * economics: without it, plan revenue would be reported at the sticker price and
+ * overstated by a fifth.
+ *
+ * Deliberately has NO fallback. Defaulting a missing share to zero would silently
+ * inflate every earnings figure, so an absent value fails the whole economics read
+ * and the UI shows "unavailable" instead of a flattering lie.
+ */
+export async function getSubscriptionStakingShare(): Promise<string> {
+  return withProtobufQuery(async (rpc) => {
+    const query = new SubscriptionQueryServiceClientImpl(rpc)
+    const resp = await withTimeout(
+      query.QueryParams(SubscriptionQueryParamsRequest.fromPartial({})),
+      QUERY_TIMEOUT_MS,
+      'subscription.params',
+    )
+    const share = resp.params?.stakingShare
+    if (!share) throw new Error('The chain did not report the subscription staking share')
+    return share
+  })
+}
+
+/**
  * Every plan this provider owns, at any status. The SDK's `plansForProvide`
  * (sic — misspelled, and it never sends a status) leaves the request's status at
  * STATUS_UNSPECIFIED, which the hub treats as "no filter" — which is what we
@@ -262,6 +300,101 @@ export async function getPlanSubscriberStats(planId: string): Promise<PlanSubscr
 
     return { subscriptions: total, active, truncated: scanned < total }
   })
+}
+
+/**
+ * Just the lifetime subscription count for a plan — one request, `countTotal` on a
+ * single-row page, so the chain does the counting.
+ *
+ * Deliberately not getPlanSubscriberStats: revenue only needs the total, and that
+ * helper additionally pages up to SUBS_MAX_SCAN records to classify statuses. Doing
+ * that for every plan on the summary strip would cost minutes on a busy plan.
+ */
+async function countPlanSubscriptions(planId: string): Promise<number> {
+  const id = Long.fromString(planId, true)
+  return withReadClient(async (client) => {
+    const resp = await withTimeout(
+      Promise.resolve(
+        client.sentinelQuery?.subscription.subscriptionsForPlan(id, {
+          key: new Uint8Array(),
+          offset: Long.fromNumber(0, true),
+          limit: Long.fromNumber(1, true),
+          countTotal: true,
+          reverse: false,
+        }),
+      ),
+      QUERY_TIMEOUT_MS,
+      'subscription.subscriptionsForPlan',
+    )
+    return Number(resp?.pagination?.total ?? 0) || 0
+  })
+}
+
+export interface ProviderEconomics {
+  /** udvpn billed per hour across every still-billing lease. */
+  burnHourlyUdvpn: string
+  /** The same run rate over 24h — what the UI headlines. */
+  burnDailyUdvpn: string
+  activeLeases: number
+  /** Escrowed but unspent: what ending every lease right now would refund. */
+  committedUdvpn: string
+  /**
+   * Cumulative plan income, net of the staking share.
+   *
+   * A FLOOR, and deliberately so: subscription renewals may charge again without
+   * creating a new record, so this can only understate. There is intentionally no
+   * profit figure to pair it with — the chain deletes leases once they end, so
+   * historical spend is unknowable and any "net" would flatter by omission.
+   */
+  estimatedRevenueUdvpn: string
+  /** Subscriptions across all of this provider's plans. */
+  subscriptions: number
+  /** LegacyDec (10^18-scaled): the hub's cut of plan sales. Drives break-even in the UI. */
+  subscriptionStakingShare: string
+  /** LegacyDec (10^18-scaled): the community-pool cut of lease payments. '' if absent. */
+  leaseStakingShare: string
+}
+
+/**
+ * One read of everything the provider console needs to talk about money.
+ *
+ * Every figure is computed here from chain values and crosses IPC finished, the same
+ * rule cachedPlanCost follows. If any part fails the whole call rejects — the strip
+ * shows "unavailable" rather than a partial total that reads as fact.
+ */
+export async function getProviderEconomics(accountAddress: string): Promise<ProviderEconomics> {
+  const provAddress = toProviderAddress(accountAddress)
+  const [leases, leaseParams, share, plans] = await Promise.all([
+    listLeasesForProvider(provAddress),
+    getLeaseParams(),
+    getSubscriptionStakingShare(),
+    listMyPlans(accountAddress),
+  ])
+
+  const parsedShare = parseDecShare(share)
+  const burn = computeBurn(leases)
+
+  let revenue = 0n
+  let subscriptions = 0
+  for (const plan of plans) {
+    const count = await countPlanSubscriptions(plan.id)
+    subscriptions += count
+    const price = plan.prices.find((p) => p.denom === 'udvpn')?.quoteValue
+    // A plan priced in some other denom earns nothing we can express in udvpn.
+    if (!price) continue
+    revenue += BigInt(computeEstimatedRevenue(count, netOfStakingShare(price, parsedShare)))
+  }
+
+  return {
+    burnHourlyUdvpn: burn.hourlyUdvpn,
+    burnDailyUdvpn: burn.dailyUdvpn,
+    activeLeases: burn.activeLeases,
+    committedUdvpn: computeCommitted(leases),
+    estimatedRevenueUdvpn: revenue.toString(),
+    subscriptions,
+    subscriptionStakingShare: share,
+    leaseStakingShare: leaseParams.stakingShare,
+  }
 }
 
 /**

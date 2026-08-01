@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNodesContext } from '../../contexts/NodesContext'
-import type { LeaseSummary, MyPlan, SentNode, TokenPrice } from '../../types'
+import type { LeaseSummary, MyPlan, ProviderEconomics, SentNode, TokenPrice } from '../../types'
 import { displayConnectError } from '../../utils/connect-errors'
 import { protocolMeta } from '../../utils/protocols'
 import CountryFlag from '../CountryFlag'
 import Spinner from '../Spinner'
-import { formatUdvpn, formatUsd } from './ProviderConsole'
+import { formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
 
 /**
  * Nodes serving one plan.
@@ -17,10 +17,11 @@ import { formatUdvpn, formatUsd } from './ProviderConsole'
  * that is leased but not linked gets its own group with a Link button, which is
  * also what the user comes back to if the app is closed between the two.
  */
-export default function PlanNodesManager({ plan, leases, price, onChanged }: {
+export default function PlanNodesManager({ plan, leases, price, economics, onChanged }: {
   plan: MyPlan
   leases: LeaseSummary[]
   price: TokenPrice | null
+  economics: ProviderEconomics | null
   onChanged: () => void
 }) {
   const { allNodes } = useNodesContext()
@@ -146,6 +147,7 @@ export default function PlanNodesManager({ plan, leases, price, onChanged }: {
           node={leasingNode}
           planId={plan.id}
           price={price}
+          economics={economics}
           onClose={() => setLeasingNode(null)}
           onDone={() => {
             setLeasingNode(null)
@@ -301,10 +303,11 @@ const RENEWAL_OPTIONS = [
  * is the only step that moves funds — `leaseQuote` computes the total in the main
  * process from the node's own on-chain hourly price, never from anything typed here.
  */
-function LeaseModal({ node, planId, price, onClose, onDone }: {
+function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
   node: SentNode
   planId: string
   price: TokenPrice | null
+  economics: ProviderEconomics | null
   onClose: () => void
   onDone: () => void
 }) {
@@ -333,6 +336,20 @@ function LeaseModal({ node, planId, price, onClose, onDone }: {
   }, [node.address, hourCount, hoursValid])
 
   const withinBounds = quote ? hourCount >= quote.minHours && hourCount <= quote.maxHours : hoursValid
+
+  // LegacyDec is 10^18-scaled, so /1e16 turns the raw share straight into a percent.
+  const poolPercent =
+    economics?.leaseStakingShare && /^\d+$/.test(economics.leaseStakingShare)
+      ? Math.round(Number(economics.leaseStakingShare) / 1e16)
+      : null
+
+  // What this lease does to the running cost. The total above is a one-off outlay;
+  // this is the rate it commits to, which is the figure the plan price has to cover.
+  const nextDailyBurn = useMemo(() => {
+    if (!quote || !economics) return null
+    if (!/^\d+$/.test(quote.hourlyPrice) || !/^\d+$/.test(economics.burnDailyUdvpn)) return null
+    return (BigInt(economics.burnDailyUdvpn) + BigInt(quote.hourlyPrice) * 24n).toString()
+  }, [quote, economics])
 
   async function handleConfirm() {
     if (!quote || !withinBounds) return
@@ -410,6 +427,16 @@ function LeaseModal({ node, planId, price, onClose, onDone }: {
                 {price && <span className="text-text-tertiary font-normal"> ≈ {formatUsd(quote.totalUdvpn, price.usd)}</span>}
               </dd>
             </div>
+            {nextDailyBurn && economics && (
+              <div className="flex justify-between px-3 py-2">
+                <dt className="text-text-secondary">Daily burn after this</dt>
+                <dd className="text-text-primary">
+                  <span className="text-text-tertiary">{formatUdvpnAmount(economics.burnDailyUdvpn)}</span>
+                  {' → '}
+                  {formatUdvpnAmount(nextDailyBurn)}
+                </dd>
+              </div>
+            )}
             <div className="flex justify-between px-3 py-2">
               <dt className="text-text-secondary">Allowed length</dt>
               <dd className="text-text-tertiary">{quote.minHours}–{quote.maxHours} hours</dd>
@@ -419,7 +446,12 @@ function LeaseModal({ node, planId, price, onClose, onDone }: {
 
         <p className="text-text-tertiary text-xs">
           A lease is how you pay a node operator to carry your plan&apos;s traffic. The chain refuses to link
-          a node to a plan without one. Unused hours are refunded if you end it early.
+          a node to a plan without one. You are billed every hour whether or not anyone connects, so this is
+          a running cost your plan price has to cover. Unused hours are refunded if you end it early.
+          {poolPercent !== null && (
+            <> Of each hourly payment the chain sends {poolPercent}% to the community pool and the rest to
+            the node operator — you pay the full rate either way.</>
+          )}
         </p>
 
         {quoteError && <p className="text-danger text-xs">{displayConnectError(quoteError)}</p>}

@@ -38,6 +38,15 @@ export interface LeaseInfo {
 export interface LeaseParams {
   minHours: number
   maxHours: number
+  /**
+   * LegacyDec share (10^18-scaled integer string) of each hourly lease payment the
+   * hub keeps for the community pool; the node gets the rest. Mainnet: 20%.
+   *
+   * Informational only — the provider is charged the full hourly price either way,
+   * so no cost figure depends on it. Empty string when the chain omits it, which
+   * only drops the explanatory line in the lease modal.
+   */
+  stakingShare: string
 }
 
 type RawLease = {
@@ -116,6 +125,7 @@ export async function getLeaseParams(): Promise<LeaseParams> {
     return {
       minHours: resp.params?.minHours?.toNumber() ?? 1,
       maxHours: resp.params?.maxHours?.toNumber() ?? 720,
+      stakingShare: resp.params?.stakingShare ?? '',
     }
   })
 }

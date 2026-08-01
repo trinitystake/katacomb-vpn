@@ -367,8 +367,20 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      {/*
+        Fixed height rather than shrink-to-fit. Measured natural heights at the
+        default 1280x800 window (85vh ceiling = 658px): General 771px, Network
+        472px, Wallets 380px at two wallets and 608px at five. So the box swung
+        ~280px between tabs and grew with the wallet count — resizing under the
+        cursor and moving the tab strip you just clicked.
+
+        600px is a compactness choice, not a fitting one: General overflows any
+        height available here, so it scrolls regardless. The content pane is
+        already `overflow-y-auto`, so the longer tabs scroll instead of
+        stretching the frame, and max-h keeps it inside short windows.
+      */}
       <div
-        className="bg-bg-secondary border border-border w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col rounded-lg shadow-overlay"
+        className="bg-bg-secondary border border-border w-full max-w-2xl mx-4 h-[600px] max-h-[85vh] flex flex-col rounded-lg shadow-overlay"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

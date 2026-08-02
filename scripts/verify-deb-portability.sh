@@ -78,15 +78,31 @@ as_user() {
 # editor tab titled "katacomb-vpn").
 app_windows() { as_user wmctrl -lx 2>/dev/null | grep -i ' katacomb-vpn\.katacomb-vpn '; }
 
-# Launch $1 as the user and wait for the real window. Dismisses the first-run
-# "VPN Helper Setup" dialog with Escape (= its cancelId, so nothing is installed
-# and no pkexec runs). Returns 0 if the main window appeared.
+# The AppImage has no install step, so on a machine where the deb is not
+# installed its first run puts up a MODAL "VPN Helper Setup" dialog
+# (dialog.showMessageBoxSync). Until that is answered the main window never
+# appears, so the launch check must dismiss it.
+#
+# It must be closed with WM_DELETE_WINDOW (xdotool windowclose) — verified by
+# experiment: 'xdotool key --window ... Escape' uses XSendEvent, which GTK
+# ignores, and even a real XTEST Escape after windowactivate does not dismiss
+# it. WM_DELETE maps to the dialog's cancelId, i.e. "Skip": no pkexec runs and
+# no helper is installed (asserted after the cycle).
+dismiss_helper_dialog() {
+  local winid
+  winid="$(as_user xdotool search --name '^VPN Helper Setup$' 2>/dev/null | head -1)"
+  [ -n "$winid" ] || return 0
+  as_user xdotool windowclose "$winid" 2>/dev/null
+  return 0
+}
+
+# Launch $1 as the user and wait for the real window.
+# Returns 0 if the main window appeared.
 launch_and_wait() {
-  local cmd="$1" logf="$2" secs="${3:-40}" i winid
+  local cmd="$1" logf="$2" secs="${3:-40}" i
   as_user bash -c "$cmd" >"$logf" 2>&1 &
   for i in $(seq 1 $((secs * 2))); do
-    winid="$(as_user xdotool search --name '^VPN Helper Setup$' 2>/dev/null | head -1)"
-    [ -n "$winid" ] && as_user xdotool key --window "$winid" Escape 2>/dev/null
+    dismiss_helper_dialog
     app_windows | grep -qi 'Katacomb VPN$' && return 0
     sleep 0.5
   done
@@ -420,6 +436,11 @@ fullcycle() {
   head_ "8. Restore"
   sysctl -w "$SYSCTL=0" >/dev/null
   check "[ \"$(sysctl -n $SYSCTL)\" = 0 ]" "sysctl back to Mint default"
+  # Proves the helper dialog was cancelled, not accepted: if WM_DELETE had hit
+  # "Install" instead of its cancelId, pkexec would have deployed these.
+  check "[ ! -e /usr/local/bin/katacomb-vpn-helper ]" "AppImage dialog was cancelled — no helper installed"
+  check "[ ! -e /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]" "no polkit policy left behind"
+  info "logs kept in $log"
 
   summary "fullcycle"
   cat <<EOM

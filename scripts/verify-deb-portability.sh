@@ -17,6 +17,8 @@
 #   phase2  after you have launched the GUI: confirm the profile is what allowed it
 #   phase3  upgrade path (reinstall over itself)
 #   phase4  removal — tunnel, kill switch, files, and INTERNET STILL WORKS
+#   appimage  does the AppImage launch under stock-Ubuntu AppArmor? (independent of
+#             the deb phases; run it with the deb UNINSTALLED, self-reverting)
 #   revert  put kernel.apparmor_restrict_unprivileged_userns back to 0 (Mint default)
 #
 # Nothing here spends money or touches the chain. Only phase4 removes the package.
@@ -28,9 +30,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEB="$(ls -t "$REPO_ROOT"/dist/katacomb-vpn_*_amd64.deb 2>/dev/null | head -1)"
+APPIMAGE="$(ls -t "$REPO_ROOT"/dist/katacomb-vpn-*.AppImage 2>/dev/null | head -1)"
 SYSCTL=kernel.apparmor_restrict_unprivileged_userns
 
-if [ -z "$DEB" ]; then
+# Only the deb phases need the deb; the appimage phase checks its own artifact.
+if [ -z "$DEB" ] && [ "${1:-}" != "appimage" ]; then
   echo "No dist/katacomb-vpn_*_amd64.deb found — run 'npm run dist' first." >&2
   exit 1
 fi
@@ -165,6 +169,53 @@ phase4() {
   echo "NEXT:  sudo ./scripts/verify-deb-portability.sh revert   (restores the Mint sysctl)"
 }
 
+appimage() {
+  need_root
+  [ -n "$APPIMAGE" ] || { echo "No dist/katacomb-vpn-*.AppImage found — run 'npm run dist' first." >&2; exit 1; }
+
+  head_ "AppImage under stock-Ubuntu AppArmor"
+  cat <<EOM
+  The AppImage has NO install step, so unlike the deb there is no postinst to
+  install /etc/apparmor.d/katacomb-vpn and no chance to make chrome-sandbox SUID
+  (the squashfs is mounted nosuid — SUID can never work from inside an AppImage).
+  So it has neither of the two things Chromium accepts. This phase asks whether
+  it still launches when unprivileged user namespaces are restricted.
+
+  Testing: $APPIMAGE
+EOM
+  sysctl -w "$SYSCTL=1"
+  check "[ ! -e /etc/apparmor.d/katacomb-vpn ]" "no katacomb AppArmor profile present (deb must be uninstalled for a clean read)"
+
+  cat <<'EOM'
+
+  Now launch the AppImage as your normal user:
+
+      ./dist/katacomb-vpn-*.AppImage
+
+  Then check HOW it started — the window opening is not the interesting part:
+
+      ps -eo args | grep -F .mount_kataco | grep -v grep
+
+  KNOWN RESULT (2026-08-02): it launches, but the cmdline reads
+  "katacomb-vpn --no-sandbox". electron-builder's AppRun probes
+  'unshare -Ur true', fails under this sysctl, and disables Chromium's sandbox
+  rather than crashing. At sysctl=0 the flag is absent and the sandbox is on.
+  This is documented in the README (prefer the .deb on Ubuntu 24.04+); it is
+  upstream behaviour, not ours. Re-run this phase after an electron-builder
+  upgrade to see whether the wrapper still behaves this way.
+
+  REGRESSION = no window at all, or a "SUID sandbox helper binary ... is not
+  configured correctly" abort. That would mean the AppImage stopped launching
+  on stock Ubuntu entirely.
+
+  Press Enter when done — the sysctl is restored to Mint's default either way.
+EOM
+  read -r _
+  sysctl -w "$SYSCTL=0"
+  info "sysctl restored to $(sysctl -n $SYSCTL) (Mint default)"
+  summary "appimage"
+}
+
 revert() {
   need_root
   sysctl -w "$SYSCTL=0"
@@ -173,6 +224,6 @@ revert() {
 }
 
 case "${1:-}" in
-  phase1|phase2|phase3|phase4|revert) "$1" ;;
+  phase1|phase2|phase3|phase4|appimage|revert) "$1" ;;
   *) sed -n '2,20p' "$0"; exit 1 ;;
 esac

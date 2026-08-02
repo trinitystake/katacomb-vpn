@@ -551,9 +551,20 @@ the chrome-sandbox SUID logic — `resources/linux/postinstall.sh` now begins wi
 generated block verbatim, then appends ours). Each site says so inline; if you add a
 custom key, re-add whatever the default supplied.
 
+**The AppImage runs UNSANDBOXED on Ubuntu 24.04+ — this is known, documented, and not
+to be "fixed" in code.** With `kernel.apparmor_restrict_unprivileged_userns=1`,
+electron-builder's `AppRun` probes `unshare -Ur true`, fails, and appends
+`--no-sandbox` rather than crashing (verified live, both sysctl states: flag present at
+1, absent at 0). An AppImage can't install an AppArmor profile and can't use a SUID
+`chrome-sandbox` (squashfs is `nosuid`), so it has neither mechanism Chromium accepts.
+The `.deb` is unaffected — its profile makes the probe succeed. The README steers
+Ubuntu users to the deb; don't patch `AppRun` (diverges from upstream) and don't add
+`--no-sandbox` anywhere yourself.
+
 **Verify packaging by installing, not by reading config** —
 `scripts/verify-deb-portability.sh` (interactive, needs root, pauses for GUI steps)
-does the full install/launch/connect/upgrade/remove cycle; re-run it after touching
+does the full install/launch/connect/upgrade/remove cycle, plus an `appimage` phase for
+the sandbox check above; re-run it after touching
 `electron-builder.yml`, either maintainer script, or the systemd unit. The AppArmor defect was
 invisible in development because Linux Mint ships
 `/etc/sysctl.d/20-apparmor-mint.conf` setting `kernel.apparmor_restrict_unprivileged_userns=0`,

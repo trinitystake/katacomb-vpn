@@ -120,8 +120,22 @@ chmod +x dist/katacomb-vpn-0.1.0.AppImage
 ```
 
 No daemon here, so each privileged operation goes through `pkexec` (one prompt, cached
-for a while). Install `wireguard-tools` and `openvpn` yourself if you want those
-protocols.
+for a while). On first run the app offers to install the polkit helper for you. Install
+`wireguard-tools` and `openvpn` yourself if you want those protocols.
+
+> **On Ubuntu 24.04+ (and any distro with
+> `kernel.apparmor_restrict_unprivileged_userns=1`) the AppImage runs with Chromium's
+> sandbox disabled — prefer the `.deb` there.**
+>
+> An AppImage has no install step, so it can neither ship an AppArmor profile granting
+> `userns` nor make `chrome-sandbox` SUID (its squashfs is mounted `nosuid`). With
+> unprivileged user namespaces restricted, Chromium has neither mechanism available, and
+> electron-builder's `AppRun` wrapper responds by appending `--no-sandbox` rather than
+> failing to start — silently, with nothing shown in the UI. Since this renderer displays
+> data supplied by untrusted node operators, that sandbox is a layer worth keeping. The
+> `.deb` is unaffected: its postinstall installs the AppArmor profile that makes the
+> namespace probe succeed. Verify either build with
+> `sudo ./scripts/verify-deb-portability.sh appimage`.
 
 ## Build from source
 

@@ -551,7 +551,10 @@ the chrome-sandbox SUID logic — `resources/linux/postinstall.sh` now begins wi
 generated block verbatim, then appends ours). Each site says so inline; if you add a
 custom key, re-add whatever the default supplied.
 
-**Verify packaging by installing, not by reading config.** The AppArmor defect was
+**Verify packaging by installing, not by reading config** —
+`scripts/verify-deb-portability.sh` (interactive, needs root, pauses for GUI steps)
+does the full install/launch/connect/upgrade/remove cycle; re-run it after touching
+`electron-builder.yml`, either maintainer script, or the systemd unit. The AppArmor defect was
 invisible in development because Linux Mint ships
 `/etc/sysctl.d/20-apparmor-mint.conf` setting `kernel.apparmor_restrict_unprivileged_userns=0`,
 while stock Ubuntu 24.04+ leaves it at 1. With it at 1 and no profile installed, the

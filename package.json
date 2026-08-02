@@ -16,7 +16,8 @@
     "postinstall": "electron-builder install-app-deps",
     "dist": "npm run build && electron-builder --linux",
     "dist:deb": "npm run build && electron-builder --linux deb",
-    "dist:appimage": "npm run build && electron-builder --linux AppImage"
+    "dist:appimage": "npm run build && electron-builder --linux AppImage",
+    "checksums": "cd dist && sha256sum katacomb-vpn_*_amd64.deb katacomb-vpn-*.AppImage > SHA256SUMS && sha256sum -c SHA256SUMS"
   },
   "dependencies": {
     "@cosmjs/proto-signing": "^0.38.1",

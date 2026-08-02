@@ -88,6 +88,27 @@ built from source at the commits upstream pins (no prebuilt `amneziawg-go` exist
 
 Both artifacts land in `dist/` after a packaging build.
 
+### Verifying a download
+
+Releases ship a `SHA256SUMS` file covering **both** artifacts. Put it next to the
+download and run:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+A checksum on its own only proves the file arrived intact — anyone who can replace the
+download can replace `SHA256SUMS` with it. It is meaningful only when the checksums come
+from somewhere the binaries don't, which for a VPN client handling wallet seeds means a
+detached signature you verify against a key obtained separately:
+
+```bash
+gpg --verify SHA256SUMS.asc SHA256SUMS   # then check the fingerprint you expect
+```
+
+Maintainers: regenerate after every packaging build with `npm run checksums`, and sign
+with `gpg --armor --detach-sign dist/SHA256SUMS`.
+
 ### .deb — recommended
 
 ```bash
@@ -122,6 +143,17 @@ chmod +x dist/katacomb-vpn-0.1.0.AppImage
 No daemon here, so each privileged operation goes through `pkexec` (one prompt, cached
 for a while). On first run the app offers to install the polkit helper for you. Install
 `wireguard-tools` and `openvpn` yourself if you want those protocols.
+
+**Needs FUSE 2.** This is a type-2 AppImage, so it mounts itself with `libfuse.so.2`.
+Ubuntu dropped that from the default install at 22.04, so on 22.04/24.04 you may see
+`dlopen(): error loading libfuse.so.2` before the app starts at all. Either install it —
+`sudo apt install libfuse2t64` (24.04+) or `libfuse2` (22.04) — or skip FUSE entirely:
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 ./katacomb-vpn-0.1.0.AppImage
+```
+
+which unpacks to a temp directory and runs from there (verified working, no mount).
 
 > **On Ubuntu 24.04+ (and any distro with
 > `kernel.apparmor_restrict_unprivileged_userns=1`) the AppImage runs with Chromium's

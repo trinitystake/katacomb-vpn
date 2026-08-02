@@ -121,15 +121,23 @@ launch_and_wait() {
 # next launch via requestSingleInstanceLock() and fakes a passing window check.
 APP_PATTERN='^(katacomb-vpn( |$)|/opt/Katacomb VPN/katacomb-vpn|/usr/bin/katacomb-vpn|/tmp/\.mount_kataco[^ /]*/katacomb-vpn|/[^ ]*/katacomb-vpn-[0-9][^ ]*\.AppImage)'
 
+# Electron does not exit promptly on SIGTERM (it runs before-quit handlers, and
+# an AppImage also has a FUSE mount to release), so escalate and — critically —
+# keep waiting after the signal. A fixed 'sleep 1' after SIGKILL was not enough:
+# the process was still listed when the next assertion ran, aborting a cycle
+# whose app died a moment later.
 kill_app() {
-  local i
-  pkill -u "$GUI_USER" -f "$APP_PATTERN" 2>/dev/null
-  for i in $(seq 1 20); do
-    pgrep -u "$GUI_USER" -f "$APP_PATTERN" >/dev/null 2>&1 || break
-    sleep 0.5
+  local sig i pids
+  for sig in TERM TERM KILL KILL; do
+    pids="$(pgrep -u "$GUI_USER" -f "$APP_PATTERN" 2>/dev/null)"
+    [ -z "$pids" ] && return 0
+    # shellcheck disable=SC2086
+    kill -"$sig" $pids 2>/dev/null
+    for i in $(seq 1 10); do
+      pgrep -u "$GUI_USER" -f "$APP_PATTERN" >/dev/null 2>&1 || return 0
+      sleep 0.5
+    done
   done
-  pkill -9 -u "$GUI_USER" -f "$APP_PATTERN" 2>/dev/null
-  sleep 1
   return 0
 }
 
@@ -137,9 +145,14 @@ kill_app() {
 # launch check meaningless (the new process exits and the OLD window answers).
 # Abort rather than report results computed against a stale window.
 assert_no_app() {
-  local procs wins
-  procs="$(pgrep -u "$GUI_USER" -af "$APP_PATTERN" 2>/dev/null)"
-  wins="$(app_windows 2>/dev/null)"
+  local i procs wins
+  # Poll rather than sample once — a slow exit is not the same as a survivor.
+  for i in $(seq 1 20); do
+    procs="$(pgrep -u "$GUI_USER" -af "$APP_PATTERN" 2>/dev/null)"
+    wins="$(app_windows 2>/dev/null)"
+    if [ -z "$procs" ] && [ -z "$wins" ]; then return 0; fi
+    sleep 0.5
+  done
   if [ -n "$procs" ] || [ -n "$wins" ]; then
     no "app still running after kill_app — results past this point would be bogus, aborting"
     [ -n "$procs" ] && printf '    leftover process: %s\n' "$procs"

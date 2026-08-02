@@ -104,9 +104,14 @@ VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a po
 The `.deb` installs a **persistent root daemon** (systemd `katacomb-vpn-daemon`,
 run via `ELECTRON_RUN_AS_NODE` on the bundled Electron) so connect/disconnect
 **never prompt for a password**. The GUI (as the user) sends JSON ops over a Unix
-socket at `/run/katacomb-vpn/daemon.sock` (mode 0666 — any local user, Mullvad
-model). The AppImage and `npm run dev` have no daemon, so they fall back to the
-per-op `pkexec` helper (one cached prompt).
+socket at `/run/katacomb-vpn/daemon.sock`, owned `root:katacomb-vpn` **mode 0660**
+— members of the group the postinst creates, not every local user
+(`secureSocketPermissions`; the 0666 world-accessible fallback is dev-only, for when
+the group doesn't exist). Group membership only applies to **new login sessions**, so
+a fresh `.deb` install needs one log-out/log-in before the password-free path works —
+until then the GUI can't open the socket and silently falls back to `pkexec`. The
+AppImage and `npm run dev` have no daemon, so they fall back to the per-op `pkexec`
+helper (one cached prompt).
 
 - `daemon-core.ts`: socket server + op dispatch — **all validation lives here**,
   since the socket is unauthenticated it's the trust boundary. `daemon.ts`: the
@@ -535,4 +540,30 @@ This codebase follows Karpathy-style discipline. Apply these in order of precede
 
 ### Packaging
 
-`electron-builder.yml` targets Linux only (AppImage + deb). The deb declares `wireguard-tools` and `policykit-1` as dependencies. Bundled v2ray/tun2socks binaries are in `resources/linux/v2ray/` and copied to `extraResources`.
+`electron-builder.yml` targets Linux only (AppImage + deb). Bundled binaries live in
+`resources/linux/v2ray/` and are copied wholesale to `extraResources`.
+
+**Every custom key in `electron-builder.yml` REPLACES its default, never merges.**
+This cost three of the four defects in the portability audit: `deb.depends` dropped
+all nine of Chromium's GUI libraries, `deb.recommends` dropped `libappindicator3-1`,
+and `afterInstall` dropped electron-builder's own postinst (the AppArmor profile and
+the chrome-sandbox SUID logic — `resources/linux/postinstall.sh` now begins with that
+generated block verbatim, then appends ours). Each site says so inline; if you add a
+custom key, re-add whatever the default supplied.
+
+**Verify packaging by installing, not by reading config.** The AppArmor defect was
+invisible in development because Linux Mint ships
+`/etc/sysctl.d/20-apparmor-mint.conf` setting `kernel.apparmor_restrict_unprivileged_userns=0`,
+while stock Ubuntu 24.04+ leaves it at 1. With it at 1 and no profile installed, the
+app dies with `FATAL … chrome-sandbox … mode 4755` before a window ever appears.
+Flip the sysctl to reproduce stock behaviour on this hardware.
+
+Licensing (required for any public distribution): the app is **GPL-3.0-or-later**
+(`LICENSE`, `package.json` `license` → the deb's `License:` field). All six bundled
+binaries carry their upstream text as `resources/linux/v2ray/LICENSE.<name>`, and
+`THIRD-PARTY-LICENSES.md` records each one's pinned version/commit plus the GPL-2.0
+source offer for `awg`/`awg-quick` (the only copyleft binary — `tun2socks` v2.6.0 is
+MIT, despite the v1 series having been GPL-3.0). `LICENSE` and `THIRD-PARTY-LICENSES.md`
+ship via explicit `extraResources` entries so the notices travel with the binaries.
+**When bumping a bundled binary, re-check its LICENSE at the new tag** — it can change
+between versions.

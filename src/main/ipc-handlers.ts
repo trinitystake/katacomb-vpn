@@ -150,7 +150,7 @@ let cachedNodes: { address: string; moniker: string; country: string }[] = []
 // interface bytes). After disconnect the on-chain counter lags, so WALLET_SESSIONS
 // shows max(onChain, remembered) to keep the Session tab from collapsing to ~0
 // until the chain settles. In-memory only (resets on app restart).
-const lastSessionUsage = new Map<string, { downloadBytes: string; uploadBytes: string }>()
+const lastSessionUsage = new Map<string, { downloadBytes: string; uploadBytes: string; durationSeconds: number }>()
 
 // Shared in-memory cache for the full node list. Seeded from disk on startup,
 // refreshed on a 60s timer in main, broadcast to all renderer windows on update.
@@ -247,14 +247,22 @@ interface ActiveQuota {
   // Pinned to the session it was read for, so a stale quota can never be applied
   // to the next one.
   sessionId: string
-  startAtMs: number
   maxDurationSeconds: number | null
+  // What the chain had already metered when we captured it. Time and bytes are
+  // BOTH baseline-plus-live — see evaluateQuota for why time must not be wall-clock.
+  baselineDurationSeconds: number
   maxBytes: number
   baselineBytes: number
 }
 let activeQuota: ActiveQuota | null = null
 let quotaWarned = false
 let quotaTimer: ReturnType<typeof setInterval> | null = null
+// When the CURRENT tunnel came up. The quota watchdog measures elapsed session time
+// as "what the chain metered before this connect + how long we've been up", so this
+// is the second half of that sum. Deliberately not reset per auto-reconnect attempt:
+// an outage is bounded to about a minute by the backoff ladder, which is noise at
+// hour/GB granularity and not worth a second accumulator.
+let connectedAtMs: number | null = null
 // Why the last session ended, kept after teardown so the renderer can explain the
 // disconnect (and offer Restore when the kill switch is still blocking). Cleared by
 // the next connect and by performDisconnect.
@@ -273,11 +281,13 @@ function quotaFromSessionRow(row: SessionInfo): ActiveQuota | null {
   if (maxBytes <= 0 && !hasTimeCap) return null
   return {
     sessionId: row.id,
-    startAtMs: row.startAt ? new Date(row.startAt).getTime() : Date.now(),
     maxDurationSeconds: hasTimeCap ? row.maxDurationSeconds : null,
+    // What the chain has already metered before this connect; the watchdog adds the
+    // live tunnel's own usage on top (see evaluateQuota). `duration` is metered from
+    // the node's proofs, NOT from wall-clock since startAt — an idle session accrues
+    // nothing, so startAt is useless as a quota measure.
+    baselineDurationSeconds: row.durationSeconds ?? 0,
     maxBytes,
-    // The download already settled on chain before this connect; the watchdog adds
-    // the live interface counter on top (see evaluateQuota).
     baselineBytes: parseInt(row.downloadBytes, 10) || 0,
   }
 }
@@ -310,12 +320,12 @@ function setQuota(row: SessionInfo | undefined): void {
 function currentQuotaVerdict() {
   if (!activeQuota) return null
   return evaluateQuota({
-    startAtMs: activeQuota.startAtMs,
     maxDurationSeconds: activeQuota.maxDurationSeconds,
+    baselineDurationSeconds: activeQuota.baselineDurationSeconds,
+    connectedSeconds: connectedAtMs ? (Date.now() - connectedAtMs) / 1000 : 0,
     maxBytes: activeQuota.maxBytes,
     baselineBytes: activeQuota.baselineBytes,
     liveRxBytes: getTrafficStats().rxBytes,
-    nowMs: Date.now(),
   })
 }
 
@@ -332,6 +342,9 @@ function startQuotaWatchdog(): void {
   if (activeSessionId && activeQuota?.sessionId !== activeSessionId) {
     setQuota((lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeSessionId))
   }
+  // Before the timer guard: an auto-reconnect re-enters here with the timer already
+  // running, and the clock still has to start on the first bring-up of the session.
+  connectedAtMs ??= Date.now()
   if (quotaTimer) return
   quotaTimer = setInterval(() => {
     if (isIntentionalDisconnect || reconnectAttempt > 0 || !activeSessionId) return
@@ -351,6 +364,7 @@ function startQuotaWatchdog(): void {
 }
 
 function stopQuotaWatchdog(): void {
+  connectedAtMs = null
   if (quotaTimer) {
     clearInterval(quotaTimer)
     quotaTimer = null
@@ -855,13 +869,15 @@ export async function healStrandedKillSwitch(): Promise<void> {
 function rememberSessionUsage(): void {
   if (!activeSessionId) return
   const live = getTrafficStats()
-  const baseline = (lastKnownSessions as { id: string; downloadBytes?: string; uploadBytes?: string }[])
-    .find((s) => s?.id === activeSessionId)
+  const baseline = (lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeSessionId)
   const baseDown = parseInt(baseline?.downloadBytes || '0', 10) || 0
   const baseUp = parseInt(baseline?.uploadBytes || '0', 10) || 0
   lastSessionUsage.set(activeSessionId, {
     downloadBytes: String(baseDown + live.rxBytes),
     uploadBytes: String(baseUp + live.txBytes),
+    // Duration lags the same way bytes do — the node's final proof lands after we
+    // disconnect — so remember it too, or the time gauge jumps backwards.
+    durationSeconds: (baseline?.durationSeconds ?? 0) + (connectedAtMs ? (Date.now() - connectedAtMs) / 1000 : 0),
   })
 }
 
@@ -1257,6 +1273,9 @@ export function registerIpcHandlers(): void {
           ...s,
           downloadBytes: remembered ? maxUsageBytes(s.downloadBytes, remembered.downloadBytes) : s.downloadBytes,
           uploadBytes: remembered ? maxUsageBytes(s.uploadBytes, remembered.uploadBytes) : s.uploadBytes,
+          durationSeconds: remembered
+            ? Math.max(s.durationSeconds ?? 0, remembered.durationSeconds)
+            : s.durationSeconds,
           nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker,
           nodeCountry: saved?.nodeCountry || nodeMeta.country,
         }
@@ -1536,13 +1555,13 @@ export function registerIpcHandlers(): void {
     } catch { /* best-effort */ }
 
     // The chain row was unreadable or hadn't appeared yet — fall back to what the
-    // user just bought. Less exact (it starts the clock now rather than at the
-    // chain's startAt), but a watchdog on approximate numbers beats none.
+    // user just bought. A session created seconds ago has metered nothing, so both
+    // baselines are 0.
     if (!activeQuota) {
       activeQuota = {
         sessionId,
-        startAtMs: Date.now(),
         maxDurationSeconds: params.type === 'hours' ? params.amount * 3600 : null,
+        baselineDurationSeconds: 0,
         maxBytes: params.type === 'gigabytes' ? params.amount * 1024 ** 3 : 0,
         baselineBytes: 0,
       }
@@ -1864,6 +1883,10 @@ export function registerIpcHandlers(): void {
       killSwitchFailed: killSwitchFailed || undefined,
       killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
       sessionId: activeSessionId,
+      // When this tunnel came up. The Sessions card adds the time since to the
+      // chain's metered `duration` to draw a live time gauge — the same
+      // baseline-plus-live sum the quota watchdog scores against.
+      connectedAt: connectedAtMs ?? undefined,
       proxyMode: vpnStatus.proxyMode || undefined,
       socksAddr: vpnStatus.socksAddr,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,

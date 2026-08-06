@@ -172,6 +172,15 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 - **One instance.** `src/main/index.ts` takes `requestSingleInstanceLock()` and the loser
   exits via `app.exit(0)` — `app.quit()` would fire before-quit and tear down the
   *primary's* tunnel.
+- **Quota is METERED, never wall-clock.** The chain accrues a session's `duration` from
+  the node's usage proofs, so a session bought and left idle accrues *nothing* — mainnet
+  #53647217 sat 53 minutes at `duration: 0`. Both caps are therefore scored the same way,
+  "what the chain settled before this connect + what this tunnel has done since":
+  `baselineDurationSeconds + connectedSeconds` and `baselineBytes + liveRxBytes`.
+  `connectedAtMs` (set in `startQuotaWatchdog`, before its timer guard) is the second
+  half of the time sum and is surfaced as `ConnectionStatus.connectedAt` so the Sessions
+  card draws the identical number. **Never reintroduce `Date.now() - startAt` as a usage
+  measure** — it reads an untouched paid hour as spent and the watchdog then destroys it.
 - **Watch the paid quota.** Nothing else does: `startRootTunnelMonitor` polls whether the
   INTERFACE exists, and a node that has stopped forwarding leaves it up, so an exhausted
   session used to sit on a dead tunnel. Every tunnel bring-up calls `startQuotaWatchdog()`
@@ -191,7 +200,33 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   enum (1/2/3), not `=== 1 ? 'active' : 'inactive'`. Anything offering a per-session
   action must gate on `status === 'active'`: `MsgCancelSession` only accepts status 1, and
   `endSession` swallows exactly that guard (`isSessionNotActive`) for the poll-vs-click
-  race. Expired rows also count toward the Sessions header/tab badge.
+  race. Anything **counting** sessions must gate on it too (the Sessions header and the
+  tab badge do) — a settling row is not an active session.
+
+### Session lifecycle (verified against live mainnet, not inferred)
+
+- **Ending a session is two phases, and cancel/expiry are ONE path.** `x/session` has only
+  `MsgCancelSession` / `MsgUpdateSession` (the node's proofs) / `MsgUpdateParams` — there
+  is no settle or refund message. Phase 1 (the user's End, or the quota running out) sets
+  `active → inactive_pending` and stamps `inactiveAt = now + statusTimeout`; phase 2 is
+  the EndBlocker settling it there (`EventEnd`). **So End is NOT an instant refund** —
+  it just performs phase 1 by hand. Don't word it as one.
+- **`statusTimeout` is 7200s (2h)** on mainnet — a governance param, so read it rather
+  than hardcoding if it ever matters numerically.
+- **`inactiveAt` means two different things by status.** On an `inactive_pending` row it
+  is fixed at `statusAt + statusTimeout` — when the chain settles it. On an `active` row
+  it is a **sliding idle deadline that rolls forward as the node reports**: #53647217 was
+  watched moving 74.5 min in an hour, landing at `startAt + 3.24h`, so it is emphatically
+  NOT `startAt + statusTimeout`. Stop using a session and it is reaped 2h later. Since
+  quota is metered, that is the only clock running on an idle session — the card shows it
+  as "Expires in X if unused".
+- **The chain DELETES settled sessions.** `sessionsForAccount` returned
+  `pagination.total = 2` for an account with a long purchase history, so nothing
+  accumulates and `getActiveSessions`' `limit: 20` is in no danger of being crowded out.
+  Expired rows leave the list on their own; the app deletes nothing.
+- Settlement pays the node for actual usage and returns only the remainder, so an
+  **expired** session (quota fully consumed by definition) refunds ~nothing. The card
+  deliberately promises no refund.
 
 ### Vite Bundling (Critical)
 

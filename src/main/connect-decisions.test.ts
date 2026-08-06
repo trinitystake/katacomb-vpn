@@ -189,30 +189,47 @@ test('stripDnsLines: does not eat keys that merely start with DNS', () => {
 
 // --- evaluateQuota ---
 
-const T0 = 1_700_000_000_000
-// A capless session: no byte cap, no time cap. Every case below overrides only
-// the fields it is actually testing.
+// A capless session: no byte cap, no time cap, nothing used. Every case below
+// overrides only the fields it is actually testing.
 const CAPLESS = {
-  startAtMs: T0, maxDurationSeconds: null, maxBytes: 0,
-  baselineBytes: 0, liveRxBytes: 0, nowMs: T0,
+  maxDurationSeconds: null, baselineDurationSeconds: 0, connectedSeconds: 0,
+  maxBytes: 0, baselineBytes: 0, liveRxBytes: 0,
 }
 
 test('evaluateQuota: a session with NO cap never expires, however long it runs', () => {
-  const v = evaluateQuota({ ...CAPLESS, nowMs: T0 + 400 * 3600_000, liveRxBytes: 900e9 })
+  const v = evaluateQuota({ ...CAPLESS, connectedSeconds: 400 * 3600, liveRxBytes: 900e9 })
   assert.equal(v.level, 'ok')
 })
 
-test('evaluateQuota: time-only cap warns at 90% and expires at 100%', () => {
+// The regression this whole measure exists for. Session #53647217 on mainnet sat
+// for 53 minutes without being connected: chain `duration` 0, 0 bytes. Measured by
+// wall-clock since startAt that reads 88% and the watchdog tears it down, throwing
+// away a full paid hour that was never used.
+test('evaluateQuota: an idle unused session reads 0%, no matter how old it is', () => {
+  assert.deepEqual(
+    evaluateQuota({ ...CAPLESS, maxDurationSeconds: 3600, baselineDurationSeconds: 0, connectedSeconds: 0 }),
+    { level: 'ok', pct: 0 },
+  )
+})
+
+test('evaluateQuota: time counts the chain baseline PLUS this tunnel, warns at 90%, expires at 100%', () => {
   const hour = { ...CAPLESS, maxDurationSeconds: 3600 }
-  assert.deepEqual(evaluateQuota({ ...hour, nowMs: T0 + 1800_000 }), { level: 'ok', pct: 50 })
-  const warn = evaluateQuota({ ...hour, nowMs: T0 + 3300_000 }) // 55 min
+  // 20 min already metered on chain + 10 min on this tunnel = 50%.
+  assert.deepEqual(
+    evaluateQuota({ ...hour, baselineDurationSeconds: 1200, connectedSeconds: 600 }),
+    { level: 'ok', pct: 50 },
+  )
+  const warn = evaluateQuota({ ...hour, baselineDurationSeconds: 3000, connectedSeconds: 300 })
   assert.equal(warn.level, 'warn')
   assert.equal(warn.level === 'warn' && warn.reason, 'time')
   assert.equal(warn.level === 'warn' && warn.remaining, 300) // 5 min left, in seconds
-  assert.deepEqual(evaluateQuota({ ...hour, nowMs: T0 + 3600_000 }), { level: 'expired', reason: 'time' })
+  assert.deepEqual(
+    evaluateQuota({ ...hour, baselineDurationSeconds: 3000, connectedSeconds: 600 }),
+    { level: 'expired', reason: 'time' },
+  )
 })
 
-test('evaluateQuota: data-only cap counts the on-chain baseline PLUS the live interface bytes', () => {
+test('evaluateQuota: data counts the on-chain baseline PLUS the live interface bytes', () => {
   const gig = { ...CAPLESS, maxBytes: 1000 }
   assert.deepEqual(evaluateQuota({ ...gig, baselineBytes: 400, liveRxBytes: 100 }), { level: 'ok', pct: 50 })
   const warn = evaluateQuota({ ...gig, baselineBytes: 400, liveRxBytes: 550 })
@@ -228,14 +245,14 @@ test('evaluateQuota: data-only cap counts the on-chain baseline PLUS the live in
 test('evaluateQuota: with both caps the WORST one decides, and names itself as the reason', () => {
   const both = { ...CAPLESS, maxDurationSeconds: 3600, maxBytes: 1000 }
   // 10% of the time, 95% of the data → data warns.
-  const dataWorst = evaluateQuota({ ...both, nowMs: T0 + 360_000, liveRxBytes: 950 })
+  const dataWorst = evaluateQuota({ ...both, connectedSeconds: 360, liveRxBytes: 950 })
   assert.equal(dataWorst.level === 'warn' && dataWorst.reason, 'data')
   // 95% of the time, 10% of the data → time warns.
-  const timeWorst = evaluateQuota({ ...both, nowMs: T0 + 3420_000, liveRxBytes: 100 })
+  const timeWorst = evaluateQuota({ ...both, connectedSeconds: 3420, liveRxBytes: 100 })
   assert.equal(timeWorst.level === 'warn' && timeWorst.reason, 'time')
   // Either cap alone reaching 100% expires the session.
   assert.deepEqual(
-    evaluateQuota({ ...both, nowMs: T0 + 60_000, liveRxBytes: 1000 }),
+    evaluateQuota({ ...both, connectedSeconds: 60, liveRxBytes: 1000 }),
     { level: 'expired', reason: 'data' },
   )
 })
@@ -248,20 +265,8 @@ test('evaluateQuota: boundaries are inclusive — exactly 90% warns, exactly 100
   assert.equal(evaluateQuota({ ...gig, liveRxBytes: 1000 }).level, 'expired')
 })
 
-test('evaluateQuota: a time cap with no startAt is unmeasurable, not expired', () => {
-  // Without startAt there is no elapsed time to compare, so the time cap is
-  // ignored rather than assumed exhausted — tearing a paid tunnel down on a
-  // missing field would be the worse failure.
-  const v = evaluateQuota({ ...CAPLESS, startAtMs: null, maxDurationSeconds: 3600 })
-  assert.deepEqual(v, { level: 'ok', pct: 0 })
-  // …but a byte cap alongside it still counts.
-  assert.deepEqual(
-    evaluateQuota({ ...CAPLESS, startAtMs: null, maxDurationSeconds: 3600, maxBytes: 100, liveRxBytes: 100 }),
-    { level: 'expired', reason: 'data' },
-  )
-})
-
-test('evaluateQuota: a clock that ran backwards reads as 0% elapsed, never negative', () => {
-  const v = evaluateQuota({ ...CAPLESS, maxDurationSeconds: 3600, nowMs: T0 - 60_000 })
-  assert.deepEqual(v, { level: 'ok', pct: 0 })
+test('evaluateQuota: a node metering slightly past the cap still reads as expired, not negative', () => {
+  // #53634305 recorded 3618s against a 3600s cap.
+  const v = evaluateQuota({ ...CAPLESS, maxDurationSeconds: 3600, baselineDurationSeconds: 3618 })
+  assert.deepEqual(v, { level: 'expired', reason: 'time' })
 })

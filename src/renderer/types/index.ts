@@ -145,6 +145,13 @@ export interface ConnectionStatus {
   /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */
   socksAddr?: string
   sessionId?: string
+  /**
+   * Epoch ms when the current tunnel came up. The Sessions card adds the elapsed
+   * time since to the chain's metered `duration` for a live time gauge — the chain
+   * meters from node proofs, so wall-clock since the session's `startAt` is not a
+   * usage measure.
+   */
+  connectedAt?: number
   error?: string
   reconnectAttempt?: number
   reconnectMaxAttempts?: number

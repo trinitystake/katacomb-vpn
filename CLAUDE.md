@@ -254,6 +254,12 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `endSession` swallows exactly that guard (`isSessionNotActive`) for the poll-vs-click
   race. Anything **counting** sessions must gate on it too (the Sessions header and the
   tab badge do) — a settling row is not an active session.
+- **…and `'active'` does not mean *usable*.** The chain meters past the cap and leaves
+  the row active until it is cancelled or reaped: #53647217 read `duration` 5673s against
+  a paid 3600s, status 1. So a **Connect** action must additionally gate on the quota not
+  being spent (`ActiveSessions`' `quotaUsedUp`) — otherwise it buys a handshake and a
+  password prompt for a tunnel `startQuotaWatchdog` stands down at its next 15 s tick.
+  **End** stays enabled there; it is the action that fits.
 
 ### Session lifecycle (verified against live mainnet, not inferred)
 
@@ -303,6 +309,22 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   spinner until the app was restarted. Its `error` surfaces as a Retry pane, but
   only when there is no list at all; a failed refresh over a cached list just makes
   it stale, and blanking the table would be worse.
+- **Everything an IPC handler throws reaches the renderer wrapped.** `ipcRenderer.invoke`
+  rejects with ``Error invoking remote method '<channel>': Error: <our message>``, so a
+  `startsWith(MARKER)` test against the raw `err.message` is always false — the
+  `RPC_UNREACHABLE` / `INSUFFICIENT_FUNDS` / `DNS_PROVISION_FAILED` panes in
+  `ConnectErrorActions.tsx` silently never fired, and users read the wrapper as if it
+  were the fault. `connect-errors.ts` strips it (`unwrapIpc`) inside all four helpers;
+  route every marker check and every displayed error through them, never through
+  `err.message` directly. It is import-free + unit-tested for the native runner, so its
+  markers are inlined and the test asserts they match `shared/error-markers.ts` — the
+  same arrangement as `wallet-errors.ts`.
+- **`isRpcConnectivityError` must know the wording of whoever produced the status.**
+  `rpc-monitor.ts` says `RPC returned N`; **@cosmjs/tendermint-rpc says
+  `Bad status on response: N`**, and that is what every real chain call throws. Knowing
+  only the first meant a rate-limited endpoint (429 from `as-rpc.sentineldao.com`) both
+  surfaced raw and never reached `reportRpcFailure()`. Match 429/502/503/504 only — a
+  400 is the chain rejecting the request and keeps its own message.
 - BIP-39 validation lives in `src/shared/mnemonic.ts` (`checkMnemonic`, pure + unit-tested):
   word list, word count and **checksum**, re-run on every keystroke so the Import button
   only enables on a phrase that will actually import. It uses `@scure/bip39` — the package

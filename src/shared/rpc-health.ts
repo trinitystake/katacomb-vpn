@@ -115,12 +115,23 @@ export function pickBestRpc(candidates: RpcCandidate[], currentEndpoint: string)
  * chain said no"? Matches the shapes these calls actually produce: withTimeout's
  * label, undici/net fetch failures, and gateway responses.
  *
+ * Two different wordings for an HTTP status, because two different layers produce
+ * one: `RPC returned N` is rpc-monitor.ts's own probe, `Bad status on response: N`
+ * is @cosmjs/tendermint-rpc's filterBadStatus — i.e. every real chain call. This
+ * only ever knew the first, so a rate-limited endpoint reached the connect modal as
+ * a bare `Bad status on response: 429` (seen live on as-rpc.sentineldao.com) and
+ * never reported the failure to the health monitor.
+ *
+ * The status list stays narrow on purpose: 429/502/503/504 are the endpoint
+ * refusing to serve us, while a 400 is the chain rejecting the request and must
+ * keep its own message.
+ *
  * Deliberately does NOT match broadcastOrTimeout's transaction-timeout message —
  * a timed-out broadcast may still have landed, so it must never be reported as
  * a connectivity failure where nothing was sent.
  */
 export function isRpcConnectivityError(message: string): boolean {
-  return /RPC connect timed out|fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|network error|RPC returned (?:50[234]|429)/i.test(
+  return /RPC connect timed out|fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|network error|(?:RPC returned|Bad status on response:) (?:50[234]|429)/i.test(
     message,
   )
 }

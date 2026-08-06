@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { TimeoutError } from '@cosmjs/stargate'
 import { INSUFFICIENT_FUNDS } from '../shared/error-markers.ts'
-import { FUNDS_MESSAGE, assertTxSucceeded, broadcastOrTimeout, isChainNotFound, isInsufficientFundsFailure } from './tx-utils.ts'
+import { FUNDS_MESSAGE, assertTxSucceeded, broadcastOrTimeout, isChainNotFound, isInsufficientFundsFailure, isSessionNotActive } from './tx-utils.ts'
 
 test('the inlined marker prefix has not drifted from the shared one', () => {
   assert.ok(FUNDS_MESSAGE.startsWith(`${INSUFFICIENT_FUNDS}: `))
@@ -82,4 +82,24 @@ test('isChainNotFound does not swallow an unreachable RPC or any other failure',
   assert.equal(isChainNotFound('Query failed with (6): rpc error: code = Unimplemented desc = : unknown request'), false)
   assert.equal(isChainNotFound('Query failed with (18): invalid request'), false)
   assert.equal(isChainNotFound('RPC connect timed out'), false)
+})
+
+// A session that exhausts its paid quota flips to inactive_pending on its own, and
+// x/session refuses a cancel in any status but active — so "End" on a session that
+// just ran out fails with this, verbatim from the bug report.
+test('isSessionNotActive matches the status guard x/session rejects a late cancel with', () => {
+  assert.ok(isSessionNotActive(
+    'failed to execute message; message index: 0: invalid status inactive_pending ' +
+    'for session 53089875: invalid session status ' +
+    '[sentinel-official/sentinelhub/v12/x/session/types/errors.go:52]',
+  ))
+  assert.ok(isSessionNotActive('invalid status inactive for session 1: invalid session status'))
+})
+
+test('isSessionNotActive does not swallow an unrelated tx or query failure', () => {
+  assert.equal(isSessionNotActive('account sequence mismatch'), false)
+  assert.equal(isSessionNotActive('out of gas in location: ReadFlat'), false)
+  assert.equal(isSessionNotActive('rpc error: code = NotFound desc = session does not exist'), false)
+  assert.equal(isSessionNotActive('RPC connect timed out'), false)
+  assert.equal(isSessionNotActive(''), false)
 })

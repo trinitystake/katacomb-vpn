@@ -257,6 +257,7 @@ export async function getBalance(): Promise<{ denom: string; amount: string }[]>
 export interface SessionInfo {
   id: string
   nodeAddress: string
+  /** See sessionStatusLabel — 'active' | 'inactive_pending' | 'inactive' | 'unknown'. */
   status: string
   downloadBytes: string
   uploadBytes: string
@@ -275,6 +276,22 @@ function durationToSeconds(d?: { seconds: { toNumber(): number }; nanos: number 
   return d.seconds.toNumber() + d.nanos / 1e9
 }
 
+/**
+ * The chain's SessionStatus enum, spelled out. Statuses 2 and 3 used to collapse
+ * into one 'inactive' string, which hid the whole expiry state: a session that
+ * runs out of quota moves to inactive_pending(2) on its own, and until it settles
+ * to inactive(3) it is still the user's session — it just can no longer be
+ * cancelled. Merging the two made it vanish from the Sessions tab the moment the
+ * chain became reachable again, which is half of why the failing End button was
+ * unreadable.
+ */
+function sessionStatusLabel(status: number): string {
+  if (status === 1) return 'active'
+  if (status === 2) return 'inactive_pending'
+  if (status === 3) return 'inactive'
+  return 'unknown'
+}
+
 function decodeSession(any: { typeUrl: string; value: Uint8Array }): SessionInfo | null {
   try {
     if (any.typeUrl === '/sentinel.node.v3.Session') {
@@ -284,7 +301,7 @@ function decodeSession(any: { typeUrl: string; value: Uint8Array }): SessionInfo
       return {
         id: base.id.toString(),
         nodeAddress: base.nodeAddress,
-        status: base.status === 1 ? 'active' : 'inactive',
+        status: sessionStatusLabel(base.status),
         downloadBytes: base.downloadBytes,
         uploadBytes: base.uploadBytes,
         maxBytes: base.maxBytes,
@@ -304,7 +321,7 @@ function decodeSession(any: { typeUrl: string; value: Uint8Array }): SessionInfo
       return {
         id: base.id.toString(),
         nodeAddress: base.nodeAddress,
-        status: base.status === 1 ? 'active' : 'inactive',
+        status: sessionStatusLabel(base.status),
         downloadBytes: base.downloadBytes,
         uploadBytes: base.uploadBytes,
         maxBytes: base.maxBytes,
@@ -339,9 +356,14 @@ export async function getActiveSessions(): Promise<SessionInfo[]> {
 
       if (!result || !result.sessions) return []
 
+      // 'inactive_pending' is kept alongside 'active': that is the state a session
+      // lands in when its own quota runs out, and the user still needs to SEE it —
+      // labelled as expired, with the End button withdrawn — rather than have it
+      // silently disappear the moment the chain becomes reachable again. Fully
+      // 'inactive' (settled) sessions stay filtered; the list would grow forever.
       return result.sessions
         .map((s: { typeUrl: string; value: Uint8Array }) => decodeSession(s))
-        .filter((s): s is SessionInfo => s !== null && s.status === 'active')
+        .filter((s): s is SessionInfo => s !== null && (s.status === 'active' || s.status === 'inactive_pending'))
     } finally {
       client.disconnect()
     }

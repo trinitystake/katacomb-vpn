@@ -141,6 +141,50 @@ export function extractWireguardEndpointHost(config: string): string | null {
   return null
 }
 
+/**
+ * Rewrite `Endpoint = host:port` to `Endpoint = <ipv4>:port`, resolving the host
+ * once, before the tunnel exists. Same medicine pinV2RayNodeAddresses applies to
+ * v2ray/xray and the inline pin applies to hysteria2/openvpn — WireGuard and
+ * AmneziaWG were the only protocols still handing a hostname to the tunnel.
+ *
+ * Why it is load-bearing here, in two separate ways:
+ *  - The kill switch whitelists the server by IP (`-d host/32 -j ACCEPT`). With a
+ *    hostname Endpoint, getWireGuardRemoteHost() finds no IPv4 and the whitelist
+ *    ends up covering nothing, so the DROP-all rule blackholes the tunnel's OWN
+ *    outer UDP. The interface comes up, wg reports no error, and not one packet
+ *    is ever answered.
+ *  - wg-quick re-resolves the hostname on every `up`. On a reconnect with the kill
+ *    switch armed that lookup goes into a tunnel that isn't carrying traffic yet —
+ *    the same deadlock the v2ray fix was written for.
+ *
+ * Unresolvable hostnames are left untouched (best effort, matching the v2ray
+ * helper); the caller decides whether to arm the kill switch without an IP.
+ */
+export function pinWireguardEndpoint(
+  config: string,
+  resolve: (host: string) => string | null,
+): string {
+  return config
+    .split('\n')
+    .map((raw) => {
+      const eq = raw.indexOf('=')
+      if (eq === -1) return raw
+      if (raw.slice(0, eq).trim().toLowerCase() !== 'endpoint') return raw
+      const value = raw.slice(eq + 1).trim()
+      // Bracketed IPv6 has no IPv4 to pin to; leave it alone.
+      if (value.startsWith('[')) return raw
+      const colon = value.lastIndexOf(':')
+      if (colon <= 0) return raw
+      const host = value.slice(0, colon)
+      const port = value.slice(colon + 1)
+      if (isIPv4(host)) return raw
+      const ip = resolve(host)
+      if (!ip || !isIPv4(ip)) return raw
+      return `${raw.slice(0, eq)}= ${ip}:${port}`
+    })
+    .join('\n')
+}
+
 const MAX_BYPASS_ROUTES = 64
 
 /**

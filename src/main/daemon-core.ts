@@ -245,6 +245,10 @@ export function handleRequest(req: DaemonRequest, deps: DaemonDeps): DaemonRespo
         const a = args as Record<string, unknown>
         if (typeof a.iface !== 'string' || !isValidInterfaceName(a.iface)) return fail('killswitch_on: invalid iface')
         if (typeof a.remoteHost !== 'string' || !isIPv4(a.remoteHost)) return fail('killswitch_on: invalid remoteHost')
+        // 0.0.0.0/32 whitelists nothing, so arming with it blackholes the very
+        // tunnel the chain is meant to protect. Refuse rather than install a
+        // kill switch that can only break the connection.
+        if (a.remoteHost === '0.0.0.0') return fail('killswitch_on: remoteHost 0.0.0.0 whitelists nothing')
         const helperArgs = ['killswitch-on', a.iface, a.remoteHost]
         if (a.dnsIp !== undefined && a.dnsIp !== null) {
           if (typeof a.dnsIp !== 'string' || !isIPv4(a.dnsIp)) return fail('killswitch_on: invalid dnsIp')

@@ -794,9 +794,19 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v
       // Whitelist the *real* server endpoint so the tunnel can re-handshake
       // while the kill switch is engaged (was hardcoded to a useless 0.0.0.0
       // for WireGuard — see finding H2).
-      const remoteHost = (
+      const remoteHost =
         isWgLike ? getWireGuardRemoteHost() : isOpenVpn ? getOpenVpnRemoteHost() : getV2RayRemoteHost()
-      ) || '0.0.0.0'
+      // No endpoint IP means there is nothing to whitelist, and arming anyway is
+      // strictly worse than not arming: `-d 0.0.0.0/32 -j ACCEPT` matches nothing,
+      // so the DROP-all rule swallows the tunnel's OWN outer packets and the
+      // connection dies with the interface still up and reporting "connected".
+      // That placeholder is what a hostname Endpoint used to fall back to. Leave
+      // the traffic flowing and tell the user the kill switch is off instead.
+      if (!remoteHost) {
+        console.error(`[killswitch] no endpoint IP for ${protocol} — not arming (traffic would be blackholed)`)
+        killSwitchFailed = true
+        return
+      }
       const dnsIp = v2rayDnsIp ?? undefined
       await enableKillSwitch(vpnIface, remoteHost, dnsIp)
     } catch (err) {
@@ -2021,10 +2031,18 @@ export function registerIpcHandlers(): void {
         // fall through
       }
     }
-    const response = await net.fetch('https://icanhazip.com', { signal: AbortSignal.timeout(15000) })
-    if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`)
-    const ip = (await response.text()).trim()
-    return { ip, country: '', city: '', asn: '', org: '' }
+    // A failed lookup is an ordinary outcome, not a fault: it is exactly what a
+    // tunnel that isn't passing traffic looks like. Letting the AbortError escape
+    // made Electron log a handler stack trace on every poll, burying real errors.
+    // The renderer treats an empty ip as "unknown" and says so.
+    try {
+      const response = await net.fetch('https://icanhazip.com', { signal: AbortSignal.timeout(15000) })
+      if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`)
+      const ip = (await response.text()).trim()
+      return { ip, country: '', city: '', asn: '', org: '' }
+    } catch {
+      return { ip: '', country: '', city: '', asn: '', org: '' }
+    }
   })
 
   // Plan Discovery

@@ -15,11 +15,19 @@ export default function IpDisplay({ connected }: Props) {
   const prevConnected = useRef(connected)
   const [ipStale, setIpStale] = useState(false)
 
-  const fetchIp = useCallback(async (retries = 2, includeGeo = true) => {
+  // `clearOnFailure` is set only by the connect/disconnect effect below. Keeping
+  // the previous answer there would leave the IP from BEFORE the transition on
+  // screen — i.e. the user's real IP, in the green "connected" style, which reads
+  // as proof the tunnel is up when it is in fact the proof it is not. A transient
+  // blip on the idle poll or a manual refresh still keeps the last good value.
+  const fetchIp = useCallback(async (retries = 2, includeGeo = true, clearOnFailure = false) => {
     setLoading(true)
     for (let i = 0; i <= retries; i++) {
       try {
         const result = await window.api.networkGetIp(includeGeo)
+        // Main reports an unreachable lookup as an empty ip rather than throwing
+        // (it is not a fault worth a stack trace) — retry it like any other miss.
+        if (!result.ip) throw new Error('no ip')
         setIpInfo((prev) => {
           // If polled refresh returned no geo but we had geo before and the IP
           // didn't change, preserve the existing geo instead of blanking it.
@@ -37,6 +45,7 @@ export default function IpDisplay({ connected }: Props) {
         }
       }
     }
+    if (clearOnFailure) setIpInfo(null)
     setIpStale(false)
     setLoading(false)
   }, [])
@@ -52,7 +61,7 @@ export default function IpDisplay({ connected }: Props) {
       setIpStale(true)
       setLoading(true)
       const delay = connected ? 1500 : 1000
-      const timer = setTimeout(() => fetchIp(2, true), delay)
+      const timer = setTimeout(() => fetchIp(2, true, true), delay)
       return () => clearTimeout(timer)
     }
   }, [connected, fetchIp])
@@ -79,6 +88,13 @@ export default function IpDisplay({ connected }: Props) {
       {loading || ipStale ? (
         <span className="flex items-center gap-1 text-text-secondary">
           <Spinner /> checking...
+        </span>
+      ) : connected && !ip ? (
+        // Connected, and three attempts could not reach the IP service through
+        // the tunnel. That is the signature of a tunnel that is up but carrying
+        // nothing, so say so rather than showing a reassuring blank.
+        <span className="text-danger" title="Could not reach the internet through the tunnel — it may be up but not passing traffic.">
+          unreachable
         </span>
       ) : (
         <span

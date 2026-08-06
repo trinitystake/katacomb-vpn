@@ -8,6 +8,7 @@ import {
   assertSafeV2RayConfig,
   withV2RayDiagnosticLog,
   pinV2RayNodeAddresses,
+  pinWireguardEndpoint,
   classifyV2RayInbound,
   filterV2RayMetadata,
   isAllCleartext,
@@ -37,6 +38,58 @@ PersistentKeepalive = 25
 
 test('assertSafeWireguardConfig accepts a clean Interface/Peer config', () => {
   assert.doesNotThrow(() => assertSafeWireguardConfig(CLEAN_WG))
+})
+
+// --- Endpoint pinning ---
+// Nodes advertise a hostname (BUSURNODE-AU-001's on-chain remoteAddrs is
+// "helen.busur.cc:63115"), and the SDK copies it straight into Endpoint. Left
+// unpinned, getWireGuardRemoteHost finds no IPv4, the kill switch whitelists
+// nothing, and the DROP-all rule blackholes the tunnel's own outer UDP.
+const HOSTNAME_WG = CLEAN_WG.replace('Endpoint = 203.0.113.7:51820', 'Endpoint = helen.busur.cc:63115')
+const resolveWg = (host: string): string | null => (host === 'helen.busur.cc' ? '203.0.113.9' : null)
+
+test('pinWireguardEndpoint replaces a hostname endpoint with its resolved IP', () => {
+  const out = pinWireguardEndpoint(HOSTNAME_WG, resolveWg)
+  assert.match(out, /^Endpoint = 203\.0\.113\.9:63115$/m)
+  assert.equal(extractWireguardEndpointHost(out), '203.0.113.9')
+})
+
+test('pinWireguardEndpoint keeps every other line byte-identical', () => {
+  const out = pinWireguardEndpoint(HOSTNAME_WG, resolveWg)
+  const strip = (c: string) => c.split('\n').filter((l) => !l.startsWith('Endpoint')).join('\n')
+  assert.equal(strip(out), strip(HOSTNAME_WG))
+})
+
+test('pinWireguardEndpoint leaves an IP endpoint untouched without resolving', () => {
+  const out = pinWireguardEndpoint(CLEAN_WG, () => { throw new Error('must not resolve an IP') })
+  assert.equal(out, CLEAN_WG)
+})
+
+test('pinWireguardEndpoint leaves an unresolvable hostname as-is (best effort)', () => {
+  const out = pinWireguardEndpoint(HOSTNAME_WG, () => null)
+  assert.equal(extractWireguardEndpointHost(out), 'helen.busur.cc')
+})
+
+test('pinWireguardEndpoint ignores a resolver that returns a non-IPv4', () => {
+  const out = pinWireguardEndpoint(HOSTNAME_WG, () => 'still.a.hostname')
+  assert.equal(extractWireguardEndpointHost(out), 'helen.busur.cc')
+})
+
+test('pinWireguardEndpoint leaves a bracketed IPv6 endpoint alone', () => {
+  const v6 = CLEAN_WG.replace('Endpoint = 203.0.113.7:51820', 'Endpoint = [2001:db8::1]:51820')
+  assert.equal(pinWireguardEndpoint(v6, () => '203.0.113.9'), v6)
+})
+
+test('pinWireguardEndpoint output still passes both root-protocol guards', () => {
+  const out = pinWireguardEndpoint(HOSTNAME_WG, resolveWg)
+  assert.doesNotThrow(() => assertSafeWireguardConfig(out))
+  assert.doesNotThrow(() => assertSafeAmneziaWgConfig(out))
+})
+
+test('pinWireguardEndpoint cannot inject a directive through the resolver', () => {
+  const evil = pinWireguardEndpoint(HOSTNAME_WG, () => '1.2.3.4\nPostUp = /bin/sh -c evil')
+  assert.doesNotThrow(() => assertSafeWireguardConfig(evil))
+  assert.equal(extractWireguardEndpointHost(evil), 'helen.busur.cc')
 })
 
 // The core LPE vector: wg-quick executes these directives as root.

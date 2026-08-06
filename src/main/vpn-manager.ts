@@ -13,6 +13,7 @@ import {
   withV2RayDiagnosticLog,
   withV2RayDoH,
   pinV2RayNodeAddresses,
+  pinWireguardEndpoint,
   sanitizeBypassRoutes,
   extractWireguardEndpointHost,
   assertSafeOpenVpnConfig,
@@ -576,10 +577,15 @@ export async function connectWireGuard(wg: Wireguard): Promise<void> {
 
   // Use buildConfigString and write to our own sntl0.conf instead of SDK's wgsent0.conf
   // This ensures we always use the sntl0 interface name, compatible with the helper script
-  const configString = wg.buildConfigString()
-  if (!configString) {
+  const built = wg.buildConfigString()
+  if (!built) {
     throw new Error('Failed to build WireGuard config')
   }
+
+  // Nodes advertise their endpoint as a hostname (on-chain remoteAddrs), which
+  // leaves the kill switch with nothing to whitelist. Pin it while normal DNS
+  // still works — before the guard, so what we validate is what we write.
+  const configString = pinWireguardEndpoint(built, resolveHostToIPv4)
 
   // Node operators are untrusted: reject any config carrying script-executing
   // directives (PostUp/PreUp/…) before wg-quick runs it as root.
@@ -595,7 +601,7 @@ export async function connectWireGuard(wg: Wireguard): Promise<void> {
   activeConfigFile = configFile
 }
 
-export async function connectWireGuardFromConfig(configString: string): Promise<void> {
+export async function connectWireGuardFromConfig(raw: string): Promise<void> {
   if (!binaryExists('wg-quick')) {
     throw new Error(
       'wg-quick not found in PATH. Install wireguard-tools: sudo apt install wireguard-tools'
@@ -603,6 +609,11 @@ export async function connectWireGuardFromConfig(configString: string): Promise<
   }
 
   await ensureSntl0Down()
+
+  // A saved config carries whatever the node advertised at handshake time, so a
+  // reconnect needs the same endpoint pin as a fresh connect (and needs it more:
+  // by now the kill switch may be the thing blocking the lookup).
+  const configString = pinWireguardEndpoint(raw, resolveHostToIPv4)
 
   // Saved/reconnect configs are equally untrusted — guard before wg-quick (root).
   assertSafeWireguardConfig(configString)
@@ -644,11 +655,14 @@ async function bringUpAmneziaWg(configFile: string, binDir: string): Promise<voi
   }
 }
 
-export async function connectAmneziaWgFromConfig(configString: string): Promise<void> {
+export async function connectAmneziaWgFromConfig(raw: string): Promise<void> {
   // Fail fast on missing/tampered bundled binaries before any tunnel state changes.
   const binDir = resolveAmneziaWgBinDir()
 
   await ensureSntl0Down()
+
+  // Rides the WG branch, so it has the WG endpoint problem too — same pin.
+  const configString = pinWireguardEndpoint(raw, resolveHostToIPv4)
 
   // Node operators are untrusted: same PostUp/PreUp root-exec surface as
   // wg-quick, guarded by the AWG-aware allow-list before awg-quick runs as root.

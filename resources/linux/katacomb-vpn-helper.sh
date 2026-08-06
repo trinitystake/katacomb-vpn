@@ -502,6 +502,13 @@ case "${1:-}" in
 
     validate_iface "$VPN_IFACE"
     validate_ipv4 "$REMOTE_HOST"
+    # A 0.0.0.0 whitelist matches no packet, so the DROP-all rule below would
+    # swallow the tunnel's own outer traffic — the interface stays up and nothing
+    # ever gets through. Refuse instead of installing a self-defeating chain.
+    if [[ "$REMOTE_HOST" == "0.0.0.0" ]]; then
+      echo "Error: killswitch remote host 0.0.0.0 whitelists nothing" >&2
+      exit 1
+    fi
     if [[ -n "$DNS_IP" ]]; then
       validate_ipv4 "$DNS_IP"
     fi

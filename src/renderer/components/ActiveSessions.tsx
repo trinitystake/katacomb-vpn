@@ -86,8 +86,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   // it is not an active session, and counting it as one is what produced
   // "Active Sessions (2)" over a single running session.
   const activeCount = sessions.filter((s) => s.status === 'active').length
-  const endingCount = sessions.length - activeCount
-  const sessionCountLabel = `${activeCount} active${endingCount > 0 ? ` · ${endingCount} ending` : ''}`
+  // "ending" read as still-in-progress to the one person who has used this screen:
+  // the session is over, what remains is the chain settling it. Match the row's own
+  // "Ended" badge rather than inventing a second tense for the same state.
+  const endedCount = sessions.length - activeCount
+  const sessionCountLabel = `${activeCount} active${endedCount > 0 ? ` · ${endedCount} ended` : ''}`
 
   // Drop an ended row as soon as the chain settles it, rather than leaving it up to
   // two minutes (the useSessions poll) after it has ceased to exist. One timer for
@@ -312,7 +315,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                   <div className="flex items-center gap-2">
                     {isEnded ? (
                       <span className="text-text-secondary text-xs border border-border px-1.5 py-0.5 rounded-sm font-medium">
-                        Expired
+                        Ended
                       </span>
                     ) : (
                       <>
@@ -360,11 +363,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                   <div className="mb-2">
                     <div className="flex items-center justify-between text-xs mb-1">
                       <span className="text-text-secondary">
-                        Data: {formatBytes(downloadBytes)} / {formatBytes(session.maxBytes)}
+                        Data used: {formatBytes(downloadBytes)} of {formatBytes(session.maxBytes)}
                         {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
                       </span>
                       <span className={`font-mono ${dataPct > 90 ? 'text-danger' : dataPct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
-                        {dataPct >= 100 ? 'Expired' : `${dataPct.toFixed(1)}%`}
+                        {dataPct >= 100 ? 'Used up' : `${dataPct.toFixed(1)}%`}
                       </span>
                     </div>
                     <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
@@ -382,12 +385,19 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                 {hasTimeCap && (
                   <div className="mb-2">
                     <div className="flex items-center justify-between text-xs mb-1">
-                      <span className="text-text-secondary">
-                        Time: {formatDuration(elapsedSeconds)} / {formatDuration(session.maxDurationSeconds)}
+                      {/* "Time" alone read as wall-clock since purchase, which made a
+                          correct 1m-of-1h look broken on a session bought an hour
+                          earlier. Name what is actually metered, and explain it. */}
+                      <span
+                        className="text-text-secondary"
+                        title={'Time spent connected to the node, not time since you paid.\n' +
+                          'The chain meters it from the node\'s usage reports, so a session you leave idle stays where it is.'}
+                      >
+                        Time used: {formatDuration(elapsedSeconds)} of {formatDuration(session.maxDurationSeconds)}
                         {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
                       </span>
                       <span className={`font-mono ${timePct > 90 ? 'text-danger' : timePct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
-                        {timePct >= 100 ? 'Expired' : `${timePct.toFixed(1)}%`}
+                        {timePct >= 100 ? 'Used up' : `${timePct.toFixed(1)}%`}
                       </span>
                     </div>
                     <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">

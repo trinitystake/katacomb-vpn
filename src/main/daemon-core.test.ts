@@ -243,3 +243,20 @@ test('openvpn_down calls the ovpn-down verb', () => {
   assert.equal(res.ok, true)
   assert.deepEqual(helperCalls, [['ovpn-down']])
 })
+
+test('killswitch_on passes a real endpoint IP through to the helper', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('killswitch_on', { iface: 'sntl0', remoteHost: '203.0.113.7' }), deps)
+  assert.equal(res.ok, true)
+  assert.deepEqual(helperCalls, [['killswitch-on', 'sntl0', '203.0.113.7']])
+})
+
+// A 0.0.0.0 whitelist matches no packet, so arming with it leaves the DROP-all
+// rule swallowing the tunnel's own outer UDP: interface up, "connected", nothing
+// gets through. It is a valid IPv4 literal, so isIPv4 alone would let it past.
+test('killswitch_on refuses the 0.0.0.0 whitelist that blackholes the tunnel', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('killswitch_on', { iface: 'sntl0', remoteHost: '0.0.0.0' }), deps)
+  assert.equal(res.ok, false)
+  assert.equal(helperCalls.length, 0)
+})

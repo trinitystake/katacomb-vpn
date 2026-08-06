@@ -160,6 +160,19 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   go through `broadcastOrTimeout` and set a `timeoutHeight`. `provider-service.ts` is the
   reference for the timeout pattern. (`node-tester.ts`'s `nodeFetch` timeout does NOT
   cover the TCP connect — a blackholed node hangs past it — so wrap its callers.)
+- **Pin every node endpoint to an IPv4 literal, for EVERY protocol.** Nodes advertise
+  themselves by hostname on chain (`remoteAddrs: ["helen.busur.cc:63115"]`), and two
+  separate things break on that: the tunnel re-resolves it *through itself* (the v2ray
+  DNS deadlock), and the kill switch has no IP to whitelist. v2ray/xray go through
+  `pinV2RayNodeAddresses`, hysteria2/openvpn pin inline, and WireGuard/AmneziaWG go
+  through `pinWireguardEndpoint` (pure, unit-tested) in all three connect paths —
+  pin BEFORE the config-guard assert, so what is validated is what gets written.
+  **The kill switch is never armed without a real endpoint IP**: `-d 0.0.0.0/32 -j ACCEPT`
+  matches nothing, so the DROP-all rule swallows the tunnel's own outer UDP and the
+  connection dies with the interface still up and the UI still saying "connected". That
+  `|| '0.0.0.0'` fallback is what caused it; `applyPostConnectSettings` now skips arming
+  and sets `killSwitchFailed`, and both the daemon and the bash helper reject `0.0.0.0`
+  outright. Symptom to recognise: bytes out, ~zero bytes in, no DNS, IP unchanged.
 - **Preflight before paying.** The three session-creating handlers call
   `preflightConnect(nodeType, apiField)` BEFORE the tx: `protocolRuntimeError()`
   (binaries present + SHA-verified; WG/AWG also need `canEscalatePrivileges()`), then

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
 
 // --- sessionFailureMessage ---
 
@@ -301,4 +301,82 @@ test('isTunnelOneWay: the #53647217 shape — a node that never answered the han
   assert.equal(isTunnelOneWay(3119, 3 * 60_000), false)
   // Left up longer, the app's own retries push it past the floor and it trips.
   assert.equal(isTunnelOneWay(80 * 1024, 5 * 60_000), true)
+})
+
+// --- describeNodeApiError ---
+
+/** The rejection shape axios produces, trimmed to the fields that matter. */
+function axiosError(status: number, nodeMessage: string) {
+  return {
+    isAxiosError: true,
+    message: `Request failed with status code ${status}`,
+    response: { status, data: { success: false, error: { code: 3, message: nodeMessage } } },
+  }
+}
+
+test('describeNodeApiError: the node\'s own sentence wins over axios\' generic one', () => {
+  // Verbatim from a reconnect to mainnet #53670474 on helen.busur.cc.
+  const d = describeNodeApiError(axiosError(409, 'session 53670474 already exists in database'))
+  assert.equal(d.status, 409)
+  assert.equal(d.message, 'session 53670474 already exists in database')
+})
+
+test('describeNodeApiError: falls back to the error message when the node sent no body', () => {
+  assert.deepEqual(describeNodeApiError({ message: 'node handshake timed out after 20000ms' }), {
+    status: null,
+    message: 'node handshake timed out after 20000ms',
+  })
+  assert.deepEqual(describeNodeApiError(new Error('socket hang up')), {
+    status: null,
+    message: 'socket hang up',
+  })
+})
+
+test('describeNodeApiError: a status with an unusable body still reports the status', () => {
+  assert.deepEqual(describeNodeApiError({ message: 'Request failed with status code 502', response: { status: 502 } }), {
+    status: 502,
+    message: 'Request failed with status code 502',
+  })
+  // An empty node message is not an explanation — keep axios' own.
+  assert.equal(describeNodeApiError(axiosError(500, '')).message, 'Request failed with status code 500')
+})
+
+test('describeNodeApiError: survives shapes it was never given', () => {
+  assert.deepEqual(describeNodeApiError(null), { status: null, message: 'null' })
+  assert.deepEqual(describeNodeApiError('plain string'), { status: null, message: 'plain string' })
+  assert.equal(describeNodeApiError({ response: { status: '409' } }).status, null)
+})
+
+// --- deadTunnelMessage ---
+
+test('deadTunnelMessage: a replayed config that carries nothing is unrecoverable, not retryable', () => {
+  // Mainnet #53670474: the node answered 409 (record present, no new peer), the
+  // saved config was replayed, and the tunnel moved nothing. Verified by sending a
+  // real WireGuard initiation with that config's own keys — no answer at all.
+  const msg = deadTunnelMessage(false)
+  // It must NOT send the user back round the loop that just failed — which is
+  // exactly what the single old message did ("reconnect from the Sessions tab to
+  // renew the handshake with the node"), for a node that cannot renew it.
+  assert.equal(/retry/i.test(msg), false)
+  assert.equal(/reconnect from|reconnect(ing)? (to|and)/i.test(msg), false)
+  // It must say the session is finished and name the way out.
+  assert.match(msg, /cannot be reconnected/i)
+  assert.match(msg, /new session/i)
+})
+
+test('deadTunnelMessage: a freshly issued peer that carries nothing is worth one retry', () => {
+  // The node minted a peer for this very tunnel, so the dead-peer verdict does not
+  // apply — the fault may be local (routing, kill switch) or a momentary node stall.
+  const msg = deadTunnelMessage(true)
+  assert.match(msg, /retry/i)
+  // Still true in both cases: the session is paid for and stays open.
+  assert.match(msg, /still open/i)
+})
+
+test('deadTunnelMessage: neither wording promises money back', () => {
+  // Ending a session forfeits the remainder (the confirm dialog says so); the panel
+  // must not contradict it.
+  for (const msg of [deadTunnelMessage(true), deadTunnelMessage(false)]) {
+    assert.equal(/refund|reclaim|deposit back/i.test(msg), false)
+  }
 })

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useConnection } from '../hooks/useConnection'
 import { usePlans } from '../hooks/usePlans'
 import { useTrafficStats } from '../hooks/useTrafficStats'
@@ -58,6 +58,13 @@ function timePercent(elapsedSeconds: number, maxSeconds: number | null): number 
   return Math.min(100, (elapsedSeconds / maxSeconds) * 100)
 }
 
+/** What a session's gauges show: on-chain baseline plus this tunnel's live meter. */
+interface SessionUsage {
+  downloadBytes: number
+  uploadBytes: number
+  seconds: number
+}
+
 export default function ActiveSessions({ sessions, loading, refreshing, refresh }: Props) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -82,6 +89,49 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
     }),
     [sessions],
   )
+  // The highest usage already shown for each session id. Usage only ever increases
+  // on chain, so flooring the display at it states no more than the truth — it is
+  // the same rule the main process applies with lastSessionUsage.
+  const shownUsage = useRef(new Map<string, SessionUsage>())
+
+  // Each row's usage, floored. Two sources feed these gauges and they do NOT hand
+  // over at the same instant: the live half (interface counters + connectedAt)
+  // vanishes the moment the 3s status poll reports the tunnel down, while the row
+  // carrying the main process's remembered figure is a chain round-trip behind it.
+  // In that ~1-2s gap the card fell back to the pre-connect baseline, so the time
+  // gauge visibly dropped from 8m to 3m and then jumped back to 8m. The bytes gauge
+  // had the identical flicker. Both close by never letting a reading go backwards.
+  const rows = ordered.map((session) => {
+    const live = vpnConnected && status.sessionId === session.id
+    const reading: SessionUsage = {
+      downloadBytes: (parseInt(session.downloadBytes || '0', 10) || 0) + (live ? liveStats.rxBytes : 0),
+      uploadBytes: (parseInt(session.uploadBytes || '0', 10) || 0) + (live ? liveStats.txBytes : 0),
+      // Time is measured exactly like bytes: what the chain has already metered,
+      // plus what THIS tunnel has done since it came up.
+      //
+      // NOT wall-clock since startAt. The chain meters `duration` from the node's
+      // usage proofs, so a session you bought but never connected to accrues
+      // nothing — mainnet #53647217 sat 53 minutes at `duration: 0` while this card
+      // read "47m / 1h 0m, 79.4%", an entire paid hour shown as spent.
+      seconds: (session.durationSeconds ?? 0) +
+        (live && status.connectedAt ? Math.max(0, (Date.now() - status.connectedAt) / 1000) : 0),
+    }
+    const floor = shownUsage.current.get(session.id)
+    const usage: SessionUsage = floor
+      ? {
+          downloadBytes: Math.max(reading.downloadBytes, floor.downloadBytes),
+          uploadBytes: Math.max(reading.uploadBytes, floor.uploadBytes),
+          seconds: Math.max(reading.seconds, floor.seconds),
+        }
+      : reading
+    return { session, usage }
+  })
+  // Rebuilt from the current rows every render, so a settled session's entry leaves
+  // with its row instead of accumulating. Writing the ref here rather than in an
+  // effect is safe: Math.max is idempotent, so a re-invoked render produces exactly
+  // the same map.
+  shownUsage.current = new Map(rows.map((r) => [r.session.id, r.usage]))
+
   // Counts the live ones. An ended row is still shown (it is settling on chain) but
   // it is not an active session, and counting it as one is what produced
   // "Active Sessions (2)" over a single running session.
@@ -234,17 +284,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
               Sessions ({sessionCountLabel})
             </div>
           )}
-          {ordered.map((session) => {
+          {rows.map(({ session, usage }) => {
             const isBusy = busy === session.id
             const isConnectedSession = vpnConnected && status.sessionId === session.id
-            // For the live session, add the real-time interface counter to the
-            // on-chain baseline (settled before this connect) so the gauge moves.
-            const downloadBytes = isConnectedSession
-              ? String(parseInt(session.downloadBytes || '0', 10) + liveStats.rxBytes)
-              : session.downloadBytes
-            const uploadBytes = isConnectedSession
-              ? String(parseInt(session.uploadBytes || '0', 10) + liveStats.txBytes)
-              : session.uploadBytes
+            const downloadBytes = String(Math.round(usage.downloadBytes))
+            const uploadBytes = String(Math.round(usage.uploadBytes))
             const dataPct = usagePercent(downloadBytes, session.maxBytes)
             // A session is metered on data (per-GB, maxBytes>0), on time
             // (per-hour, maxDuration>0), or both (plan). Show a gauge only for a
@@ -252,18 +296,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             const maxBytesNum = parseInt(session.maxBytes, 10)
             const hasByteCap = !isNaN(maxBytesNum) && maxBytesNum > 0
             const hasTimeCap = session.maxDurationSeconds !== null && session.maxDurationSeconds > 0
-            // Time is measured exactly like bytes above: what the chain has already
-            // metered, plus what THIS tunnel has done since it came up.
-            //
-            // NOT wall-clock since startAt. The chain meters `duration` from the
-            // node's usage proofs, so a session you bought but never connected to
-            // accrues nothing — mainnet #53647217 sat 53 minutes at `duration: 0`
-            // while this card read "47m / 1h 0m, 79.4%", an entire paid hour shown
-            // as spent.
-            const meteredSeconds = (session.durationSeconds ?? 0) +
-              (isConnectedSession && status.connectedAt
-                ? Math.max(0, (Date.now() - status.connectedAt) / 1000)
-                : 0)
+            const meteredSeconds = usage.seconds
             // A node can meter slightly past the cap (#53634305 recorded 3618s of
             // 3600s), so clamp the READOUT to what was paid for.
             const elapsedSeconds = hasTimeCap

@@ -202,3 +202,70 @@ export const ONE_WAY_SILENCE_MS = 90_000
 export function isTunnelOneWay(txSinceLastRx: number, msSinceLastRx: number): boolean {
   return txSinceLastRx >= ONE_WAY_TX_FLOOR_BYTES && msSinceLastRx >= ONE_WAY_SILENCE_MS
 }
+
+/**
+ * What to tell the user when a tunnel came up and then carried nothing. The two
+ * cases are NOT the same failure and must not get the same advice.
+ *
+ * `nodeIssuedFreshPeer` is the whole distinction: did the node mint a peer for the
+ * config this tunnel was built from, or did we replay a saved one?
+ *
+ * When we replayed a saved config, the tunnel is dead for good. A dvpnx node's two
+ * cleanup paths do NOT fire together (workers/session.go): it drops the PEER on any
+ * of four triggers — max bytes, max duration, the chain session missing, or the
+ * chain session no longer active — but deletes its own session RECORD on the last
+ * of those alone. So a node routinely holds a record with no peer behind it, and
+ * with a record present its handshake handler answers 409 and refuses to issue a
+ * new peer (api/handshake/handlers.go rejects on session id OR peer request, before
+ * doing anything else). Its whole API is `GET /` and `POST /` — there is no route
+ * that clears the stale record. Nothing the client can do brings that peer back
+ * while the session lives on chain, so "reconnect and try again" is a loop with no
+ * exit: verified on mainnet #53670474, where a WireGuard initiation built from the
+ * saved config's own keys drew no answer at all while the node's API was up and
+ * serving four other peers.
+ *
+ * When the node DID just issue a peer, none of that applies — the fault may be
+ * local (routing, the kill switch) or a momentary stall at the node — so the
+ * existing retry-without-re-paying path is the right offer.
+ *
+ * Neither wording promises money back: ending a session forfeits its remainder,
+ * which is what the confirm dialog already tells the user.
+ */
+export function deadTunnelMessage(nodeIssuedFreshPeer: boolean): string {
+  if (nodeIssuedFreshPeer) {
+    return 'The tunnel came up but no traffic is getting through — the node is not carrying ' +
+      'traffic for the peer it just issued.\n\n' +
+      'Your session is still open and paid for, so retry the connection. If it fails again, ' +
+      'end the session and pick a different node.'
+  }
+  return 'The tunnel came up but no traffic is getting through — the node has dropped this ' +
+    "session's tunnel peer.\n\n" +
+    'It will not issue a replacement: the node still holds its own record of the session, and ' +
+    'it only clears that once the session is gone from the chain. This session cannot be ' +
+    'reconnected — every attempt rebuilds the same dead tunnel. End it from the Sessions tab ' +
+    'and start a new session.'
+}
+
+/**
+ * Reduce a failed node API call to its HTTP status and the node's OWN error text.
+ *
+ * The SDK's handshake is a bare axios POST, so a rejection is an AxiosError whose
+ * `message` says only "Request failed with status code N" — and logging the error
+ * object itself prints ~600 lines of request, socket, agent and TLS internals
+ * without ever showing what the node objected to. The useful sentence is in the
+ * response body: dvpnx answers with go-sdk `types.Response`,
+ * `{success:false, error:{code, message}}`.
+ *
+ * Returns a null status when the call never got an HTTP response at all (timeout,
+ * DNS, connection refused), which is itself the distinction worth logging.
+ */
+export function describeNodeApiError(err: unknown): { status: number | null; message: string } {
+  const e = err as {
+    response?: { status?: unknown; data?: { error?: { message?: unknown } } }
+    message?: unknown
+  }
+  const status = typeof e?.response?.status === 'number' ? e.response.status : null
+  const nodeMessage = e?.response?.data?.error?.message
+  if (typeof nodeMessage === 'string' && nodeMessage !== '') return { status, message: nodeMessage }
+  return { status, message: typeof e?.message === 'string' ? e.message : String(err) }
+}

@@ -226,13 +226,33 @@ The connect path spends real on-chain funds, so these are enforced and must hold
     not a fault. It stands down through `standDownSession('stalled')` rather than
     `attemptReconnect` — with auto-reconnect off, that gate returns silently and
     leaves the dead tunnel up, which is the state being detected.
-- **A saved session config expires with the node's peer, so reconnect RE-HANDSHAKES.**
-  `CONNECTION_RECONNECT` used to replay `SavedSessionConfig.configString` verbatim,
-  which can only rebuild the same dead tunnel once the node has dropped the peer it
-  created at handshake time. It now calls `performHandshake` for the same session
-  first and falls back to the saved config only if that fails. This costs nothing —
-  one HTTPS call for a session already paid for and still active on chain — and is
-  deliberately NOT wrapped in `establishSessionOrRefund`: there is no new session to
+- **Reconnect re-handshakes first, and a 409 back means the node kept the RECORD —
+  it says nothing about the PEER.** `CONNECTION_RECONNECT` calls `performHandshake`
+  for the session before falling back to `SavedSessionConfig.configString`. Read
+  against the node's source (`sentinel-dvpnx`), what that buys is narrower than it
+  looks: `api/handshake/handlers.go` looks the node's own database up by session id
+  **first** and answers **409 Conflict** if a record exists (error codes 1 "maximum
+  peer limit", 3 "session already exists in database", 4 "same peer request" — all
+  409). It never re-issues a peer. And `workers/session.go` drops the **peer** on four
+  triggers (max bytes, max duration, `session == nil`, chain status not active) but
+  deletes the **record** on `session == nil` alone. So "record present, peer gone" is
+  an ordinary state — and a **permanent** one: the node's entire API is `GET /` and
+  `POST /`, with no route that clears a stale record, so nothing the client does
+  brings the peer back while the chain session lives. Every session the UI offers a
+  reconnect for is chain-active, so **409 is the normal outcome** and the renewal only
+  wins when the node lost its own record (reset/rebuilt DB). Keep it — it is one HTTPS
+  call. **Do not read a 409 as proof the peer survives** (this doc said so for one
+  commit; mainnet #53670474 disproved it — a WireGuard initiation built from the saved
+  config's own keys drew no reply while the node's API was up serving four peers).
+  What the fallback path must do instead is clear `nodeIssuedFreshPeer`, so that if
+  `assertTunnelCarriesTraffic` then finds nothing coming back, `deadTunnelMessage`
+  tells the user the session is finished rather than sending them round the
+  reconnect loop that just failed. Log the conflict as information;
+  `console.error(err)` on an AxiosError prints ~600 lines of socket internals and
+  reads like a crash (`describeNodeApiError` in `connect-decisions.ts` reduces any
+  node failure to status + the node's own message, which lives at
+  `response.data.error.message` — go-sdk `types.Response`).
+  Deliberately NOT wrapped in `establishSessionOrRefund`: there is no new session to
   refund, and cancelling the user's live session over a briefly unreachable node is
   the opposite of the intent.
 - **Usage time accrues only while the tunnel is alive.** `connectedSecondsAlive()`,
@@ -319,6 +339,18 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `err.message` directly. It is import-free + unit-tested for the native runner, so its
   markers are inlined and the test asserts they match `shared/error-markers.ts` — the
   same arrangement as `wallet-errors.ts`.
+- **A session's usage gauges must never go backwards.** `ActiveSessions` builds each
+  row's usage from two sources that do NOT hand over at the same instant: the live
+  half (`useTrafficStats` + `status.connectedAt`) disappears the moment the 3 s status
+  poll reports the tunnel down, while the row carrying main's remembered figure
+  (`lastSessionUsage`) is a chain round-trip behind. In that ~1–2 s gap the card fell
+  back to the *pre-connect* baseline — the time gauge dropped 8m → 3m → 8m, and the
+  bytes gauge did the same. Fixed by flooring every reading at the highest already
+  shown for that session id (`shownUsage`, rebuilt from the rows each render so
+  settled sessions prune themselves). Usage only ever increases on chain, so this
+  states no more than the truth — it is main's `maxUsageBytes` rule applied to the
+  view. Don't "simplify" it away by trusting a single source; both are needed (main's
+  is authoritative but slow, the live one is fast but ends early).
 - **`isRpcConnectivityError` must know the wording of whoever produced the status.**
   `rpc-monitor.ts` says `RPC returned N`; **@cosmjs/tendermint-rpc says
   `Bad status on response: N`**, and that is what every real chain call throws. Knowing

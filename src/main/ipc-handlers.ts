@@ -27,7 +27,7 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay } from './connect-decisions'
+import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -130,6 +130,14 @@ let activeAmneziaWgConfig: string | null = null
 let activeOpenVpnConfig: string | null = null
 let activeSessionId: string | null = null
 let activeNodeInfo: { address: string; moniker: string; country: string; type: number; v2raySummary?: string } | null = null
+// Did the node mint a peer for the config we are about to build a tunnel from, or is
+// that config a replayed saved one? Only deadTunnelMessage cares, and only when the
+// tunnel turns out to carry nothing — at which point the answer is the difference
+// between "retry, it may be local" and "this session is over" (see that function).
+// Set by applySession (every fresh handshake goes through it) and cleared by the one
+// path that replays a saved config. Optimistic default: mislabelling a live session
+// dead is the worse error of the two.
+let nodeIssuedFreshPeer = true
 // True when the user enabled the kill switch but arming it failed — surfaced to
 // the renderer so "protected" is never silently a lie.
 let killSwitchFailed = false
@@ -660,14 +668,13 @@ async function tunnelCarriesTraffic(): Promise<boolean> {
  */
 async function assertTunnelCarriesTraffic(): Promise<void> {
   if (await tunnelCarriesTraffic()) return
-  console.error('[vpn] tunnel came up but carries no traffic — tearing it down')
+  console.error(
+    '[vpn] tunnel came up but carries no traffic — tearing it down ' +
+    `(peer ${nodeIssuedFreshPeer ? 'freshly issued by the node' : 'replayed from the saved config'})`,
+  )
   await revertPostConnectSettings()
   await disconnect()
-  throw new Error(
-    'The tunnel came up but no traffic is getting through — the node is not responding.\n\n' +
-    'This usually means the node dropped your connection details. Your session is still ' +
-    'open and paid for: reconnect from the Sessions tab to renew the handshake with the node.',
-  )
+  throw new Error(deadTunnelMessage(nodeIssuedFreshPeer))
 }
 
 // Main-process listeners (e.g. the tray) for connection-state changes. Mirrors
@@ -726,6 +733,9 @@ function applySession(
   activeHysteria2Config = result.protocol === 'hysteria2' ? result.configString : null
   activeAmneziaWgConfig = result.protocol === 'amneziawg' ? result.configString : null
   activeOpenVpnConfig = result.protocol === 'openvpn' ? result.configString : null
+  // Every caller reached here through a handshake the node answered, so the peer
+  // behind this config is as fresh as it gets.
+  nodeIssuedFreshPeer = true
 }
 
 /**
@@ -1213,6 +1223,10 @@ async function attemptReconnect(): Promise<void> {
           await teardownToIdle(true)
           return
         }
+        // Replayed verbatim — no handshake here, deliberately (auto-reconnect must
+        // not renew anything on its own). So the peer behind it is unconfirmed, the
+        // same as the manual fallback path.
+        nodeIssuedFreshPeer = false
 
         // Re-establish the tunnel
         if (saved.protocol === 'wireguard') {
@@ -1842,15 +1856,24 @@ export function registerIpcHandlers(): void {
       type: nodeType,
     }
 
-    // Renew the handshake rather than replaying the saved one. The saved config is
-    // only valid for as long as the NODE keeps the peer it created at handshake
+    // Ask for a fresh peer before falling back to the saved config. The saved config
+    // is only valid for as long as the NODE keeps the peer it created at handshake
     // time, and it does not keep it forever: mainnet #53647217 was verified — by
     // sending a well-formed WireGuard initiation with the saved config's own keys —
-    // to get no answer at all, hours after the node had stopped reporting usage for
-    // it. Replaying that config can only ever rebuild the same dead tunnel.
+    // to get no answer at all, hours after the node had stopped reporting usage.
     //
-    // This costs nothing: the handshake is one HTTPS call to the node for a session
-    // that is already paid for and still active on chain. No tx, so deliberately NOT
+    // Read the 409 branch below before touching this: a dvpnx node will NOT re-issue
+    // a peer for a session it still has a record for, and it only deletes that record
+    // once the CHAIN has deleted the session (workers/session.go deleteSessionFunc
+    // fires on `session == nil` alone). Every session we offer a reconnect for is
+    // chain-active, so the usual answer here is a conflict and the saved config.
+    // The renewal therefore only wins in the narrow case where the node lost its own
+    // record — a reset or a rebuilt database — while the session lived on. It is kept
+    // for that case and because it is cheap; the actual dead-peer safety net is
+    // assertTunnelCarriesTraffic, which refuses to report a tunnel nothing comes back
+    // through, whichever config built it.
+    //
+    // One HTTPS call for a session already paid for. No tx, so deliberately NOT
     // wrapped in establishSessionOrRefund — there is no new session to refund, and
     // cancelling the user's live session because a node was briefly unreachable
     // would be the opposite of the intent.
@@ -1875,13 +1898,43 @@ export function registerIpcHandlers(): void {
           configString: fresh.configString,
         }
       } catch (err) {
-        // A node that won't handshake usually won't tunnel either, but the saved
-        // config is still the best remaining shot (the node's API and its data plane
-        // can fail independently) — and the tunnel check now catches it if it is dead.
-        console.error('[reconnect] handshake renewal failed, falling back to the saved config:', err)
+        const { status, message } = describeNodeApiError(err)
+        if (status === 409) {
+          // Expected, and not a failure by itself. A dvpnx node's handshake handler
+          // looks its own database up by session id before doing anything else and
+          // answers 409 Conflict if a record exists (api/handshake/handlers.go: error
+          // codes 1 "maximum peer limit", 3 "session already exists in database" and
+          // 4 "session already exists for peer request" are all 409). It never
+          // re-issues a peer for a session it already holds.
+          //
+          // A conflict says the node still holds the RECORD. It says nothing about
+          // the PEER — do not read it as one implying the other, which is what this
+          // comment used to claim. workers/session.go drops the peer on four triggers
+          // (max bytes, max duration, chain session nil, chain status not active) and
+          // deletes the record on the last of those alone, so "record, no peer" is an
+          // ordinary steady state and a permanent one: no route on the node clears
+          // that record while the chain session lives. Replaying the saved config is
+          // then the only move available, but it may well be a dead one — see the
+          // nodeIssuedFreshPeer note on the fallback return below.
+          console.log(`[reconnect] node still holds session #${saved.sessionId} (${message}) — replaying the saved config`)
+        } else {
+          // A node that won't handshake usually won't tunnel either, but the saved
+          // config is still the best remaining shot (the node's API and its data plane
+          // can fail independently) — and the tunnel check now catches it if it is dead.
+          console.error(
+            `[reconnect] handshake renewal failed${status ? ` (HTTP ${status})` : ''}: ${message} — ` +
+            'falling back to the saved config',
+          )
+        }
       }
     }
 
+    // Every way of getting here — 409, a node that never answered, no wallet key to
+    // sign a renewal with — replays a config the node minted at some earlier point
+    // and has NOT reconfirmed. If the tunnel it builds then carries nothing, that is
+    // the unrecoverable dead-peer case rather than something a retry can fix, and
+    // deadTunnelMessage needs to know which of the two it is talking about.
+    nodeIssuedFreshPeer = false
     return {
       sessionId: saved.sessionId,
       protocol: saved.protocol,

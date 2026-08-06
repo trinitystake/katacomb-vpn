@@ -172,6 +172,26 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 - **One instance.** `src/main/index.ts` takes `requestSingleInstanceLock()` and the loser
   exits via `app.exit(0)` — `app.quit()` would fire before-quit and tear down the
   *primary's* tunnel.
+- **Watch the paid quota.** Nothing else does: `startRootTunnelMonitor` polls whether the
+  INTERFACE exists, and a node that has stopped forwarding leaves it up, so an exhausted
+  session used to sit on a dead tunnel. Every tunnel bring-up calls `startQuotaWatchdog()`
+  (all six protocols + proxy mode + the reconnect success path — 7 sites); it scores
+  `evaluateQuota` (pure, in `connect-decisions.ts`) every 15 s and hands expiry to
+  `handleQuotaExpiry`, which repeats `performDisconnect`'s epoch-bump-before-the-lock
+  stand-down so the reconnect timer can't resurrect a session the chain has closed.
+  Teardown is unconditional; the **kill-switch setting** decides whether the DROP-all
+  chain stays armed afterwards (`trafficBlocked` is read back off `isKillSwitchArmed()`,
+  never off the setting). Never auto-renew — expiry always ends in a disconnect.
+  That "expired, traffic blocked" state deliberately does NOT survive a restart:
+  `healStrandedKillSwitch()` reverts it at next launch and must not be weakened to
+  preserve it.
+- **A session row is not necessarily live.** `getActiveSessions()` returns `'active'` AND
+  `'inactive_pending'` — the state a session enters on its own when its quota runs out —
+  so it can be labelled rather than vanishing mid-error. `decodeSession` maps the real
+  enum (1/2/3), not `=== 1 ? 'active' : 'inactive'`. Anything offering a per-session
+  action must gate on `status === 'active'`: `MsgCancelSession` only accepts status 1, and
+  `endSession` swallows exactly that guard (`isSessionNotActive`) for the poll-vs-click
+  race. Expired rows also count toward the Sessions header/tab badge.
 
 ### Vite Bundling (Critical)
 

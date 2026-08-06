@@ -144,6 +144,16 @@ test('isRpcConnectivityError matches the shapes these calls actually produce', (
   assert.ok(isRpcConnectivityError('RPC returned 502'))
 })
 
+// The shape @cosmjs/tendermint-rpc actually throws (filterBadStatus). Missing it
+// meant a rate-limited endpoint surfaced raw in the connect modal.
+test('isRpcConnectivityError matches cosmjs bad-status errors, but only the "endpoint refused us" codes', () => {
+  assert.ok(isRpcConnectivityError('Bad status on response: 429'))
+  assert.ok(isRpcConnectivityError('Bad status on response: 503'))
+  // 400 is the chain rejecting the request, not an unreachable endpoint.
+  assert.equal(isRpcConnectivityError('Bad status on response: 400'), false)
+  assert.equal(isRpcConnectivityError('Bad status on response: 404'), false)
+})
+
 test('isRpcConnectivityError does NOT match a broadcast timeout — that tx may have landed', () => {
   assert.equal(
     isRpcConnectivityError(

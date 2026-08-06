@@ -275,6 +275,14 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             // longer be cancelled or connected to — only watched until it drops off
             // the list.
             const isEnded = session.status !== 'active'
+            // 'active' does NOT mean 'usable'. The chain keeps metering a session
+            // past what it was paid for and leaves the row active until someone
+            // cancels it or the EndBlocker reaps it — #53647217 read duration
+            // 5673s against a paid 3600s, status 1, with Connect still offered.
+            // Connecting there costs a handshake and a password prompt to bring up
+            // a tunnel the quota watchdog stands down at its next 15s tick. End is
+            // the action that fits, and it stays enabled.
+            const quotaUsedUp = (hasTimeCap && timePct >= 100) || (hasByteCap && dataPct >= 100)
             // `inactiveAt` means two different things depending on status — both
             // measured against mainnet, where statusTimeout is 7200s:
             //   ended  (2): fixed at statusAt + 2h — when the chain settles it and
@@ -324,9 +332,15 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                         {!isConnectedSession && (
                           <button
                             onClick={() => handleReconnect(session)}
-                            disabled={isBusy || busy !== null || vpnConnected}
+                            disabled={isBusy || busy !== null || vpnConnected || quotaUsedUp}
                             className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
-                            title={vpnConnected ? 'Disconnect current VPN first' : undefined}
+                            title={
+                              quotaUsedUp
+                                ? 'This session has used everything it was paid for — end it and start a new one'
+                                : vpnConnected
+                                  ? 'Disconnect current VPN first'
+                                  : undefined
+                            }
                           >
                             {isBusy ? <Spinner /> : 'Connect'}
                           </button>

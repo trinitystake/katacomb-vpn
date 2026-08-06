@@ -1,6 +1,6 @@
 import { ipcMain, net, BrowserWindow, Notification, app } from 'electron'
 import { is } from '@electron-toolkit/utils'
-import { existsSync, unlinkSync } from 'fs'
+import { existsSync, unlinkSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { IPC } from '../shared/ipc-channels'
 import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
@@ -27,7 +27,7 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
+import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -82,7 +82,7 @@ import {
 import { runPrivileged, canEscalatePrivileges } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
-import { getTrafficStats, resetTrafficStats, maxUsageBytes } from './traffic-stats'
+import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType } from './node-tester'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
@@ -146,11 +146,45 @@ let lastKnownBalance: { denom: string; amount: string }[] | null = null
 let lastKnownSessions: unknown[] = []
 let cachedNodes: { address: string; moniker: string; country: string }[] = []
 
+interface RememberedUsage {
+  downloadBytes: string
+  uploadBytes: string
+  durationSeconds: number
+}
+
 // Per-session usage measured live during the last connect (on-chain baseline +
 // interface bytes). After disconnect the on-chain counter lags, so WALLET_SESSIONS
 // shows max(onChain, remembered) to keep the Session tab from collapsing to ~0
-// until the chain settles. In-memory only (resets on app restart).
-const lastSessionUsage = new Map<string, { downloadBytes: string; uploadBytes: string; durationSeconds: number }>()
+// until the chain settles.
+//
+// Persisted, because the lag outlives the process: quit the app after using a
+// session and the next launch had nothing but the chain's not-yet-settled figure,
+// which reads as the gauge resetting itself. It is only ever a FLOOR — the chain
+// overtakes it and wins automatically (see maxUsageBytes), so a stale entry can
+// never inflate usage past what was actually settled.
+const lastSessionUsage = new Map<string, RememberedUsage>()
+
+function usageStorePath(): string {
+  return join(app.getPath('userData'), 'session-usage.json')
+}
+
+/** Load the remembered usage written by a previous run. Best-effort by design. */
+function loadSessionUsage(): void {
+  try {
+    const raw = JSON.parse(readFileSync(usageStorePath(), 'utf-8')) as Record<string, RememberedUsage>
+    for (const [id, u] of Object.entries(raw)) {
+      if (typeof u?.durationSeconds === 'number' && typeof u.downloadBytes === 'string') {
+        lastSessionUsage.set(id, u)
+      }
+    }
+  } catch { /* absent or corrupt — the chain is still authoritative */ }
+}
+
+function saveSessionUsage(): void {
+  try {
+    writeFileAtomic(usageStorePath(), JSON.stringify(Object.fromEntries(lastSessionUsage), null, 2))
+  } catch { /* best-effort — losing this only costs display accuracy */ }
+}
 
 // Shared in-memory cache for the full node list. Seeded from disk on startup,
 // refreshed on a 60s timer in main, broadcast to all renderer windows on update.
@@ -265,8 +299,15 @@ let quotaTimer: ReturnType<typeof setInterval> | null = null
 let connectedAtMs: number | null = null
 // Why the last session ended, kept after teardown so the renderer can explain the
 // disconnect (and offer Restore when the kill switch is still blocking). Cleared by
-// the next connect and by performDisconnect.
-let lastExpiry: { sessionId: string; nodeMoniker: string; reason: 'time' | 'data'; trafficBlocked: boolean } | null = null
+// the next connect and by performDisconnect. 'stalled' is not an expiry — the session
+// is usually still live on chain — so the banner words it differently and points at
+// reconnecting rather than re-buying.
+let lastExpiry: {
+  sessionId: string
+  nodeMoniker: string
+  reason: 'time' | 'data' | 'stalled'
+  trafficBlocked: boolean
+} | null = null
 
 // Quota is coarse — the 5s interface poll is not a useful cadence for it.
 const QUOTA_POLL_MS = 15_000
@@ -322,7 +363,7 @@ function currentQuotaVerdict() {
   return evaluateQuota({
     maxDurationSeconds: activeQuota.maxDurationSeconds,
     baselineDurationSeconds: activeQuota.baselineDurationSeconds,
-    connectedSeconds: connectedAtMs ? (Date.now() - connectedAtMs) / 1000 : 0,
+    connectedSeconds: connectedSecondsAlive(),
     maxBytes: activeQuota.maxBytes,
     baselineBytes: activeQuota.baselineBytes,
     liveRxBytes: getTrafficStats().rxBytes,
@@ -345,13 +386,23 @@ function startQuotaWatchdog(): void {
   // Before the timer guard: an auto-reconnect re-enters here with the timer already
   // running, and the clock still has to start on the first bring-up of the session.
   connectedAtMs ??= Date.now()
+  // max(), not assignment: an auto-reconnect re-enters here with connectedAtMs still
+  // at the ORIGINAL bring-up, so assigning would rewind the alive clock and discard
+  // usage already accrued. A fresh connect has a stale (older) aliveUntilMs, so the
+  // max is connectedAtMs — correct in both cases.
+  aliveUntilMs = Math.max(aliveUntilMs, connectedAtMs)
+  resetOneWayTracking()
   if (quotaTimer) return
   quotaTimer = setInterval(() => {
     if (isIntentionalDisconnect || reconnectAttempt > 0 || !activeSessionId) return
+    if (checkTunnelStalled()) {
+      void standDownSession('stalled')
+      return
+    }
     const verdict = currentQuotaVerdict()
     if (!verdict) return
     if (verdict.level === 'expired') {
-      void handleQuotaExpiry(verdict.reason)
+      void standDownSession(verdict.reason)
       return
     }
     if (verdict.level === 'warn' && !quotaWarned) {
@@ -369,6 +420,69 @@ function stopQuotaWatchdog(): void {
     clearInterval(quotaTimer)
     quotaTimer = null
   }
+  resetOneWayTracking()
+}
+
+// Interface counters as of the last moment anything came IN, and when that was.
+// Tracked here rather than through getTrafficStats(), which mutates the speed
+// baseline as a side effect and would corrupt every reading if sampled on this loop.
+let lastRxBytes = 0
+let lastTxAtRx = 0
+let lastRxMovedAtMs = 0
+// The last moment the tunnel was known to be carrying traffic. Time after this point
+// is NOT counted as session usage: on a tunnel the node has stopped answering, the
+// chain meters nothing, and neither should we.
+let aliveUntilMs = 0
+
+function resetOneWayTracking(): void {
+  lastRxBytes = 0
+  lastTxAtRx = 0
+  lastRxMovedAtMs = 0
+}
+
+/**
+ * Is the tunnel transmitting with nothing coming back? The interface-presence monitor
+ * cannot see this: `wg-quick up` succeeds whether or not the node ever answers a
+ * handshake, so a node that has dropped our peer leaves sntl0 up forever. Mainnet
+ * #53647217 sat in exactly that state for hours — ~3 KB out, 0 bytes in, the UI
+ * saying "Connected" and this very watchdog counting the paid hour down against a
+ * tunnel that moved nothing.
+ *
+ * Runs on the quota loop rather than the root-tunnel monitor so it covers all six
+ * protocols, including the tun2socks ones. In local-proxy mode there is no interface,
+ * readTunnelBytes() returns null, and the check correctly abstains.
+ *
+ * The stand-down deliberately does NOT go through attemptReconnect's autoReconnect
+ * gate: with auto-reconnect off that returns silently and leaves the dead tunnel up,
+ * which is the very state being detected.
+ */
+function checkTunnelStalled(): boolean {
+  const now = Date.now()
+  const bytes = readTunnelBytes()
+  // Local-proxy mode has no interface to judge — abstain, and keep the clock running
+  // (the session is being spent either way).
+  if (!bytes) {
+    aliveUntilMs = now
+    return false
+  }
+  if (lastRxMovedAtMs === 0 || bytes.rx > lastRxBytes) {
+    lastRxBytes = bytes.rx
+    lastTxAtRx = bytes.tx
+    lastRxMovedAtMs = now
+  }
+  if (!isTunnelOneWay(bytes.tx - lastTxAtRx, now - lastRxMovedAtMs)) {
+    // Includes the genuinely idle tunnel: nothing out, nothing back, nothing wrong.
+    aliveUntilMs = now
+    return false
+  }
+  // Stalled. The tunnel was last useful when something last came back, so that — not
+  // now — is where usage stops accruing.
+  aliveUntilMs = lastRxMovedAtMs
+  console.error(
+    `[vpn] tunnel is one-way — ${bytes.tx - lastTxAtRx} bytes sent with no reply for ` +
+    `${Math.round((now - lastRxMovedAtMs) / 1000)}s. The node has stopped forwarding.`,
+  )
+  return true
 }
 
 /** "10 minutes" / "1.2 GB" — the remaining-quota phrase for the warning notification. */
@@ -406,26 +520,39 @@ function notify(title: string, body: string): void {
 }
 
 /**
- * The session ran out. Modelled on performDisconnect so it inherits the same
- * serialization invariants (epoch bumped synchronously before the lock, reconnect
- * machinery stood down first), because the one thing that must not happen here is
- * the reconnect timer resurrecting a session the chain has already closed.
+ * End the tunnel for a reason of our own, rather than the user's. Two callers, and
+ * they need identical teardown: the session ran out of what it was paid for
+ * ('time'/'data'), or the tunnel stopped carrying traffic ('stalled'). Only the log
+ * line, the notification and the banner wording differ — the stand-down itself is
+ * one path so the two can never drift apart.
+ *
+ * Modelled on performDisconnect so it inherits the same serialization invariants
+ * (epoch bumped synchronously before the lock, reconnect machinery stood down
+ * first), because the one thing that must not happen here is the reconnect timer
+ * resurrecting a tunnel we have just decided to end.
  *
  * The tunnel ALWAYS comes down; the kill-switch preference decides what happens to
  * internet access. On → the DROP-all chain stays armed and the user is told traffic
  * is blocked, with a Restore button. Off → full revert, exactly like a manual
- * disconnect. Never auto-renew: on-chain spending stays user-initiated.
+ * disconnect. That holds for 'stalled' too: a tunnel that has stopped forwarding is
+ * precisely the case the kill switch exists for, so it stays armed and the user
+ * chooses when to drop the protection. Never auto-renew: on-chain spending stays
+ * user-initiated.
  *
  * KNOWN LIMITATION: the "expired, traffic blocked" state does not survive an app
  * restart. healStrandedKillSwitch() reverts an armed-but-disconnected kill switch at
  * next launch, by design — that self-heal is load-bearing (it is what rescues a user
  * from a chain stranded by a crash) and must NOT be weakened to preserve this state.
  */
-async function handleQuotaExpiry(reason: 'time' | 'data'): Promise<void> {
+async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<void> {
   const sessionId = activeSessionId
   if (!sessionId) return
   const nodeMoniker = activeNodeInfo?.moniker || ''
-  console.log(`[quota] session #${sessionId} exhausted its ${reason} quota — disconnecting`)
+  console.log(
+    reason === 'stalled'
+      ? `[vpn] session #${sessionId} tunnel stopped carrying traffic — disconnecting`
+      : `[quota] session #${sessionId} exhausted its ${reason} quota — disconnecting`,
+  )
 
   // Same synchronous stand-down performDisconnect does, and for the same reason:
   // an in-flight reconnect must bail at its next epoch check even while another op
@@ -472,11 +599,74 @@ async function handleQuotaExpiry(reason: 'time' | 'data'): Promise<void> {
     sendStateChange('idle')
   })
 
+  const blocked = lastExpiry?.trafficBlocked
   notify(
     'Katacomb VPN',
-    lastExpiry?.trafficBlocked
-      ? 'Session ended — VPN disconnected. The kill switch is still blocking all traffic.'
-      : 'Session ended — VPN disconnected.',
+    reason === 'stalled'
+      ? blocked
+        ? 'The tunnel stopped carrying traffic — disconnected. The kill switch is still blocking all traffic.'
+        : 'The tunnel stopped carrying traffic — disconnected.'
+      : blocked
+        ? 'Session ended — VPN disconnected. The kill switch is still blocking all traffic.'
+        : 'Session ended — VPN disconnected.',
+  )
+}
+
+// Reachability probe for a freshly-built tunnel. Small response, plain HTTPS, and
+// already contacted by NETWORK_GET_IP — no new third party is introduced.
+const TUNNEL_PROBE_URL = 'https://icanhazip.com'
+const TUNNEL_PROBE_TIMEOUT_MS = 6000
+const TUNNEL_PROBE_ATTEMPTS = 3
+
+/**
+ * Does the tunnel we just built actually carry traffic? An interface existing does
+ * not mean it does: `wg-quick up` reports success whether or not the node ever
+ * answers a handshake, so a node that has dropped our peer yields a perfectly
+ * healthy-looking sntl0 that will never move a byte. That is how mainnet #53647217
+ * spent hours reporting "Connected" while the public IP never changed — the only
+ * honest signal on screen was the IP lookup failing, which nothing acted on.
+ *
+ * Two independent ways to pass, because either one alone has a false negative:
+ *  - the probe fetch succeeds — the path works end to end, including DNS;
+ *  - inbound bytes appear on the interface — protocol-agnostic proof the far end is
+ *    answering, and the verdict when it is the probe HOST that is down rather than
+ *    the tunnel.
+ * Only both failing, repeatedly, is a verdict.
+ */
+async function tunnelCarriesTraffic(): Promise<boolean> {
+  const before = readTunnelBytes()
+  for (let attempt = 0; attempt < TUNNEL_PROBE_ATTEMPTS; attempt++) {
+    try {
+      const res = await net.fetch(TUNNEL_PROBE_URL, {
+        signal: AbortSignal.timeout(TUNNEL_PROBE_TIMEOUT_MS),
+      })
+      if (res.ok) return true
+    } catch { /* the byte check below is the second opinion */ }
+    const now = readTunnelBytes()
+    if (before && now && now.rx > before.rx) return true
+  }
+  return false
+}
+
+/**
+ * Gate a bring-up on the tunnel actually working, and tear it down if it doesn't.
+ * Runs AFTER applyPostConnectSettings deliberately: the kill switch is part of what
+ * can strangle a tunnel (arming it against a hostname endpoint is exactly what broke
+ * #53647217), so what gets verified has to be the final state, not an intermediate one.
+ *
+ * Failure leaves main's stashed session config alone, so the connect modals still
+ * offer "Retry connection" rather than resetting to the subscribe form — the session
+ * is paid for and still live on chain.
+ */
+async function assertTunnelCarriesTraffic(): Promise<void> {
+  if (await tunnelCarriesTraffic()) return
+  console.error('[vpn] tunnel came up but carries no traffic — tearing it down')
+  await revertPostConnectSettings()
+  await disconnect()
+  throw new Error(
+    'The tunnel came up but no traffic is getting through — the node is not responding.\n\n' +
+    'This usually means the node dropped your connection details. Your session is still ' +
+    'open and paid for: reconnect from the Sessions tab to renew the handshake with the node.',
   )
 }
 
@@ -887,8 +1077,26 @@ function rememberSessionUsage(): void {
     uploadBytes: String(baseUp + live.txBytes),
     // Duration lags the same way bytes do — the node's final proof lands after we
     // disconnect — so remember it too, or the time gauge jumps backwards.
-    durationSeconds: (baseline?.durationSeconds ?? 0) + (connectedAtMs ? (Date.now() - connectedAtMs) / 1000 : 0),
+    //
+    // Counted only up to `aliveUntilMs`, the last moment the tunnel was seen carrying
+    // traffic. The chain meters `duration` from the node's proofs, and a node that has
+    // stopped answering submits none, so counting wall-clock past that point would
+    // record time the user was never charged for — and, since this value is a floor
+    // under the quota gauge, would end a session that still had paid time on it.
+    durationSeconds: (baseline?.durationSeconds ?? 0) + connectedSecondsAlive(),
   })
+  saveSessionUsage()
+}
+
+/**
+ * How long the CURRENT tunnel has been up AND working, in seconds. Clamped at the
+ * last confirmed sign of life so a stalled tunnel stops accruing usage; see
+ * checkTunnelStalled for how that moment is established.
+ */
+function connectedSecondsAlive(): number {
+  if (!connectedAtMs) return 0
+  const until = Math.max(aliveUntilMs, connectedAtMs)
+  return Math.max(0, (Math.min(Date.now(), until) - connectedAtMs) / 1000)
 }
 
 /**
@@ -974,7 +1182,7 @@ async function attemptReconnect(): Promise<void> {
     // reason rather than a generic connection failure.
     const verdict = currentQuotaVerdict()
     if (verdict && (verdict.level === 'expired' || (verdict.level === 'warn' && verdict.pct >= QUOTA_GIVE_UP_PCT))) {
-      await handleQuotaExpiry(verdict.reason)
+      await standDownSession(verdict.reason)
       return
     }
     await teardownToIdle(true)
@@ -1048,6 +1256,11 @@ async function attemptReconnect(): Promise<void> {
         // the CONNECTION_CONNECT branches)
         if (desiredMode !== 'proxy') {
           await applyPostConnectSettings(saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn')
+          // An auto-reconnect that brings up a tunnel the node won't answer is worse
+          // than one that fails: it stops the retry ladder and parks the user on a
+          // dead connection labelled "connected". Throwing feeds the catch below,
+          // which schedules the next attempt.
+          await assertTunnelCarriesTraffic()
         }
 
         desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
@@ -1207,6 +1420,10 @@ function handle(channel: string, listener: Parameters<typeof ipcMain.handle>[1])
 }
 
 export function registerIpcHandlers(): void {
+  // Bring forward what the last run measured, so the Sessions gauges don't reset to
+  // a not-yet-settled chain figure on relaunch. Pruned on the first sessions read.
+  loadSessionUsage()
+
   // Wallet
   handle(IPC.WALLET_HAS_STORED, async () => {
     return hasStoredWallet()
@@ -1291,6 +1508,21 @@ export function registerIpcHandlers(): void {
         }
       })
       lastKnownSessions = enriched
+      // The chain DELETES settled sessions, so a remembered entry with no row left is
+      // a session that is over — drop it rather than let the store grow forever.
+      // Only on a successful read: an RPC failure returns no rows and must not be
+      // mistaken for "every session ended".
+      if (lastSessionUsage.size > 0) {
+        const live = new Set(sessions.map((s) => s.id))
+        let pruned = false
+        for (const id of lastSessionUsage.keys()) {
+          if (!live.has(id) && id !== activeSessionId) {
+            lastSessionUsage.delete(id)
+            pruned = true
+          }
+        }
+        if (pruned) saveSessionUsage()
+      }
       return enriched
     } catch {
       reportRpcFailure()
@@ -1602,11 +1834,52 @@ export function registerIpcHandlers(): void {
     activeSessionId = saved.sessionId
     // Populate node info from saved config; fall back to cached node list
     const nodeMeta = getNodeMeta(saved.nodeAddress)
+    const nodeType = saved.protocol === 'wireguard' ? 1 : saved.protocol === 'openvpn' ? 3 : saved.protocol === 'xray' ? 4 : saved.protocol === 'hysteria2' ? 6 : saved.protocol === 'amneziawg' ? 5 : 2
     activeNodeInfo = {
       address: saved.nodeAddress,
       moniker: saved.nodeMoniker || nodeMeta.moniker || '',
       country: saved.nodeCountry || nodeMeta.country || '',
-      type: saved.protocol === 'wireguard' ? 1 : saved.protocol === 'openvpn' ? 3 : saved.protocol === 'xray' ? 4 : saved.protocol === 'hysteria2' ? 6 : saved.protocol === 'amneziawg' ? 5 : 2,
+      type: nodeType,
+    }
+
+    // Renew the handshake rather than replaying the saved one. The saved config is
+    // only valid for as long as the NODE keeps the peer it created at handshake
+    // time, and it does not keep it forever: mainnet #53647217 was verified — by
+    // sending a well-formed WireGuard initiation with the saved config's own keys —
+    // to get no answer at all, hours after the node had stopped reporting usage for
+    // it. Replaying that config can only ever rebuild the same dead tunnel.
+    //
+    // This costs nothing: the handshake is one HTTPS call to the node for a session
+    // that is already paid for and still active on chain. No tx, so deliberately NOT
+    // wrapped in establishSessionOrRefund — there is no new session to refund, and
+    // cancelling the user's live session because a node was briefly unreachable
+    // would be the opposite of the intent.
+    const privKey = getPrivKey()
+    if (privKey) {
+      try {
+        const fresh = await performHandshake({
+          sessionId: saved.sessionId,
+          nodeAddress: saved.nodeAddress,
+          nodeType,
+          // '' → resolve from the chain's remoteAddrs, which is where a reconnect's
+          // endpoint has to come from (there is no renderer-supplied apiField here).
+          remoteUrl: await resolveNodeRemoteUrl(saved.nodeAddress, ''),
+          privKey,
+          nodeMoniker: saved.nodeMoniker,
+          nodeCountry: saved.nodeCountry,
+        })
+        applySession(saved.sessionId, saved.nodeAddress, saved.nodeMoniker || '', saved.nodeCountry || '', nodeType, fresh)
+        return {
+          sessionId: saved.sessionId,
+          protocol: fresh.protocol,
+          configString: fresh.configString,
+        }
+      } catch (err) {
+        // A node that won't handshake usually won't tunnel either, but the saved
+        // config is still the best remaining shot (the node's API and its data plane
+        // can fail independently) — and the tunnel check now catches it if it is dead.
+        console.error('[reconnect] handshake renewal failed, falling back to the saved config:', err)
+      }
     }
 
     return {
@@ -1674,6 +1947,7 @@ export function registerIpcHandlers(): void {
 
         // Apply DNS and kill switch if enabled
         await applyPostConnectSettings('wireguard')
+        await assertTunnelCarriesTraffic()
 
         desiredProtocol = 'wireguard'
         desiredMode = 'tunnel'
@@ -1693,6 +1967,7 @@ export function registerIpcHandlers(): void {
         await connectAmneziaWgFromConfig(dnsFallback ? stripDnsLines(awgConfig) : awgConfig)
 
         await applyPostConnectSettings('amneziawg')
+        await assertTunnelCarriesTraffic()
 
         desiredProtocol = 'amneziawg'
         desiredMode = 'tunnel'
@@ -1714,6 +1989,7 @@ export function registerIpcHandlers(): void {
         await connectOpenVpnFromConfig(ovpnConfig)
 
         await applyPostConnectSettings('openvpn')
+        await assertTunnelCarriesTraffic()
 
         desiredProtocol = 'openvpn'
         desiredMode = 'tunnel'
@@ -1769,6 +2045,7 @@ export function registerIpcHandlers(): void {
 
           // Apply DNS and kill switch if enabled
           await applyPostConnectSettings('v2ray')
+          await assertTunnelCarriesTraffic()
         }
 
         desiredProtocol = 'v2ray'
@@ -1815,6 +2092,7 @@ export function registerIpcHandlers(): void {
           }
 
           await applyPostConnectSettings('xray')
+          await assertTunnelCarriesTraffic()
         }
 
         desiredProtocol = 'xray'
@@ -1861,6 +2139,7 @@ export function registerIpcHandlers(): void {
           }
 
           await applyPostConnectSettings('hysteria2')
+          await assertTunnelCarriesTraffic()
         }
 
         desiredProtocol = 'hysteria2'
@@ -1902,7 +2181,7 @@ export function registerIpcHandlers(): void {
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,
       // Why the last session ended, if it ended on its own. No new IPC channel is
-      // needed: handleQuotaExpiry's sendStateChange('idle') already makes
+      // needed: standDownSession's sendStateChange('idle') already makes
       // useConnection re-poll, which picks this up.
       expired: lastExpiry ?? undefined,
     }

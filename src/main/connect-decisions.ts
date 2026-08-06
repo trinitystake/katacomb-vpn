@@ -178,3 +178,27 @@ export function stripDnsLines(config: string): string {
     .filter((line) => !/^\s*DNS\s*=/i.test(line))
     .join('\n')
 }
+
+/**
+ * Bytes the tunnel must have sent with NOTHING coming back before we call it one-way.
+ * Small enough that a handful of DNS retries and TCP SYNs reach it, large enough that
+ * a brief stall doesn't.
+ */
+export const ONE_WAY_TX_FLOOR_BYTES = 64 * 1024
+/** How long the silence has to hold. Longer than any plausible network stall. */
+export const ONE_WAY_SILENCE_MS = 90_000
+
+/**
+ * True when the tunnel is transmitting but nothing is coming back — the signature of
+ * a node that has stopped forwarding, or has dropped our peer, while the interface
+ * stays up. That state is invisible to the interface-presence monitor: wg-quick
+ * reports success whether or not the node ever answers a handshake, so mainnet
+ * #53647217 sat "connected" for hours having moved ~3 KB out and 0 bytes in.
+ *
+ * BOTH conditions are required. An idle tunnel also receives nothing, and silence on
+ * both counters is just a user who isn't browsing — not a fault. Only traffic leaving
+ * with no reply is evidence.
+ */
+export function isTunnelOneWay(txSinceLastRx: number, msSinceLastRx: number): boolean {
+  return txSinceLastRx >= ONE_WAY_TX_FLOOR_BYTES && msSinceLastRx >= ONE_WAY_SILENCE_MS
+}

@@ -61,6 +61,16 @@ function readProcNetDev(iface: string): { rx: number; tx: number } | null {
   }
 }
 
+/**
+ * Absolute rx/tx counters for whichever tunnel interface is up, WITHOUT touching the
+ * speed baseline. getTrafficStats() mutates prevRx/prevTx as a side effect, so the
+ * liveness checks — which sample far more often than the 3s status poll — have to
+ * read the counters through here or they'd corrupt every speed reading.
+ */
+export function readTunnelBytes(): { rx: number; tx: number } | null {
+  return readProcNetDev('sntl0') || readProcNetDev('sntl-tun') || readProcNetDev('sntl-ovpn')
+}
+
 /** Get current traffic stats from the active VPN interface */
 export function getTrafficStats(): TrafficStats {
   const now = Date.now()

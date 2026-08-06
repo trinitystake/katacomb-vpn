@@ -199,7 +199,7 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   session used to sit on a dead tunnel. Every tunnel bring-up calls `startQuotaWatchdog()`
   (all six protocols + proxy mode + the reconnect success path — 7 sites); it scores
   `evaluateQuota` (pure, in `connect-decisions.ts`) every 15 s and hands expiry to
-  `handleQuotaExpiry`, which repeats `performDisconnect`'s epoch-bump-before-the-lock
+  `standDownSession`, which repeats `performDisconnect`'s epoch-bump-before-the-lock
   stand-down so the reconnect timer can't resurrect a session the chain has closed.
   Teardown is unconditional; the **kill-switch setting** decides whether the DROP-all
   chain stays armed afterwards (`trafficBlocked` is read back off `isKillSwitchArmed()`,
@@ -207,6 +207,45 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   That "expired, traffic blocked" state deliberately does NOT survive a restart:
   `healStrandedKillSwitch()` reverts it at next launch and must not be weakened to
   preserve it.
+- **An interface is not a tunnel — prove it carries traffic.** `wg-quick up` reports
+  success whether or not the node ever answers a handshake, so nothing about a live
+  `sntl0` implies a working tunnel. Mainnet #53647217 was verified dead by sending a
+  well-formed WireGuard initiation with its own saved keys and getting silence, hours
+  after the node stopped reporting usage — while the app said "Connected" and the
+  watchdog billed the paid hour against it. Two enforcement points, both required:
+  - `assertTunnelCarriesTraffic()` after **every** bring-up (6 protocol branches +
+    the auto-reconnect body; skipped in proxy mode, which changes no routing). It runs
+    AFTER `applyPostConnectSettings` on purpose — the kill switch is one of the things
+    that can strangle a tunnel — and passes on **either** a successful probe fetch
+    **or** inbound bytes on the interface, because the probe host being down is not
+    the tunnel's fault. Failure tears down and throws, leaving the stashed config
+    intact so "Retry connection" still works.
+  - `checkTunnelStalled()` on the quota loop (all six protocols, unlike the root-only
+    interface monitor), via the pure `isTunnelOneWay`. **Both** a tx floor and a
+    silence window are required: an idle tunnel also receives nothing, and that is
+    not a fault. It stands down through `standDownSession('stalled')` rather than
+    `attemptReconnect` — with auto-reconnect off, that gate returns silently and
+    leaves the dead tunnel up, which is the state being detected.
+- **A saved session config expires with the node's peer, so reconnect RE-HANDSHAKES.**
+  `CONNECTION_RECONNECT` used to replay `SavedSessionConfig.configString` verbatim,
+  which can only rebuild the same dead tunnel once the node has dropped the peer it
+  created at handshake time. It now calls `performHandshake` for the same session
+  first and falls back to the saved config only if that fails. This costs nothing —
+  one HTTPS call for a session already paid for and still active on chain — and is
+  deliberately NOT wrapped in `establishSessionOrRefund`: there is no new session to
+  refund, and cancelling the user's live session over a briefly unreachable node is
+  the opposite of the intent.
+- **Usage time accrues only while the tunnel is alive.** `connectedSecondsAlive()`,
+  not `Date.now() - connectedAtMs`, feeds both the quota watchdog and
+  `rememberSessionUsage` — it clamps at `aliveUntilMs`, the last confirmed sign of
+  life. The chain meters `duration` from node proofs and a stalled node submits none,
+  so counting wall-clock past that point bills the user for time they were never
+  charged for, and (being a floor under the gauge) would end a session with paid time
+  left. `lastSessionUsage` is **persisted** (`session-usage.json`) so the gauge
+  doesn't reset to a not-yet-settled chain figure on relaunch; it is only ever a
+  FLOOR, the chain overtakes it and wins, and entries are pruned once their session
+  leaves `getActiveSessions()` — on a SUCCESSFUL read only, since an RPC failure
+  returns no rows and must not read as "every session ended".
 - **A session row is not necessarily live.** `getActiveSessions()` returns `'active'` AND
   `'inactive_pending'` — the state a session enters on its own when its quota runs out —
   so it can be labelled rather than vanishing mid-error. `decodeSession` maps the real
@@ -228,11 +267,14 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   than hardcoding if it ever matters numerically.
 - **`inactiveAt` means two different things by status.** On an `inactive_pending` row it
   is fixed at `statusAt + statusTimeout` — when the chain settles it. On an `active` row
-  it is a **sliding idle deadline that rolls forward as the node reports**: #53647217 was
-  watched moving 74.5 min in an hour, landing at `startAt + 3.24h`, so it is emphatically
-  NOT `startAt + statusTimeout`. Stop using a session and it is reaped 2h later. Since
-  quota is metered, that is the only clock running on an idle session — the card shows it
-  as "Expires in X if unused".
+  it is an **idle deadline pinned at `lastNodeProof + statusTimeout`**, so it is
+  emphatically NOT `startAt + statusTimeout`. Each `MsgUpdateSession` jumps it back to
+  2h out; between proofs it just ticks down in real time. #53647217 read `inactiveAt`
+  06:24:52Z against a single proof at 04:24:52Z — the earlier "slid 74.5 min" reading was
+  that one jump, not a smooth slide. Since quota is metered, that is the only clock
+  running on an idle session. **It therefore keeps falling while the UI says "connected"
+  if the node isn't seeing the traffic** — which makes it a usable dead-tunnel tell, and
+  is why the card says "unless the node reports usage" rather than "if unused".
 - **The chain DELETES settled sessions.** `sessionsForAccount` returned
   `pagination.total = 2` for an account with a long purchase history, so nothing
   accumulates and `getActiveSessions`' `limit: 20` is in no danger of being crowded out.

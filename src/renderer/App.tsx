@@ -27,11 +27,12 @@ import Spinner from './components/Spinner'
 import AppLogo from './components/AppLogo'
 
 /**
- * The last session ran out of what it was paid for and main took the tunnel down.
- * Two shapes: an ordinary notice when internet still works, and a danger-styled
- * one when the kill switch was deliberately left armed — there the user has no
- * connectivity at all until they press Restore, so it must not read as cosmetic.
- * It is its own component only because dismissing needs local state.
+ * Main took the tunnel down on its own — the session ran out of what it was paid
+ * for, or the tunnel stopped carrying traffic. Two shapes: an ordinary notice when
+ * internet still works, and a danger-styled one when the kill switch was deliberately
+ * left armed — there the user has no connectivity at all until they press Restore, so
+ * it must not read as cosmetic. It is its own component only because dismissing needs
+ * local state.
  */
 function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'] }) {
   const [dismissed, setDismissed] = useState(false)
@@ -50,8 +51,18 @@ function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'
     >
       <span aria-hidden>⚠</span>
       <span className="flex-1">
-        Your session on <span className="font-medium">{node}</span> ran out of {expired.reason} and
-        was disconnected.
+        {expired.reason === 'stalled' ? (
+          <>
+            The tunnel to <span className="font-medium">{node}</span> stopped carrying traffic and
+            was disconnected. Your session is still open — reconnect from the Sessions tab to renew
+            the handshake with the node.
+          </>
+        ) : (
+          <>
+            Your session on <span className="font-medium">{node}</span> ran out of {expired.reason} and
+            was disconnected.
+          </>
+        )}
         {expired.trafficBlocked && ' The kill switch is still blocking all traffic.'}
       </span>
       {expired.trafficBlocked && (

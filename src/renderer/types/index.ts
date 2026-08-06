@@ -156,16 +156,18 @@ export interface ConnectionStatus {
   reconnectAttempt?: number
   reconnectMaxAttempts?: number
   /**
-   * The last session ended on its own — it ran out of the time or data it was paid
-   * for, and main tore the tunnel down. `trafficBlocked` means the kill switch was
-   * left armed on purpose (the user's preference standing in for "no tunnel, no
-   * traffic"), so the internet is down until they restore it. Cleared by the next
-   * connect or disconnect.
+   * Main tore the tunnel down on its own. Either the session ran out of the time or
+   * data it was paid for ('time'/'data'), or the tunnel stopped carrying traffic
+   * ('stalled') — the latter is NOT an expiry: the session is normally still live on
+   * chain and reconnecting renews the handshake. `trafficBlocked` means the kill
+   * switch was left armed on purpose (the user's preference standing in for "no
+   * tunnel, no traffic"), so the internet is down until they restore it. Cleared by
+   * the next connect or disconnect.
    */
   expired?: {
     sessionId: string
     nodeMoniker: string
-    reason: 'time' | 'data'
+    reason: 'time' | 'data' | 'stalled'
     trafficBlocked: boolean
   }
 }

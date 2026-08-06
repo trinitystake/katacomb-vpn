@@ -279,11 +279,13 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             // measured against mainnet, where statusTimeout is 7200s:
             //   ended  (2): fixed at statusAt + 2h — when the chain settles it and
             //               this row disappears of its own accord.
-            //   active (1): a SLIDING idle deadline that rolls forward as the node
-            //               reports (observed moving 74.5 min on #53647217, ending
-            //               up at startAt + 3.24h). Stop using the session and it is
-            //               reaped 2h later. Since quota is proof-metered, this is
-            //               the only clock running on an idle session.
+            //   active (1): an idle deadline pinned at (last node proof + 2h). Each
+            //               MsgUpdateSession jumps it back to two hours out; between
+            //               proofs it just ticks down. #53647217 read inactiveAt
+            //               06:24:52Z = its one and only proof at 04:24:52Z + 7200s,
+            //               which is where the earlier "slid 74.5 min" reading came
+            //               from — one jump, not a smooth slide. Since quota is
+            //               proof-metered, this is the only clock on an idle session.
             const inactiveInSeconds = session.inactiveAt
               ? Math.floor((new Date(session.inactiveAt).getTime() - Date.now()) / 1000)
               : null
@@ -445,12 +447,19 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
 
                 {/* The use-it-or-lose-it clock. Quota is metered from the node's
                     proofs, so an unused session burns none of it — this deadline is
-                    the only thing actually counting down on an idle session. It
-                    slides forward while the session IS being used, hence "if unused":
-                    it is a countdown that only really runs when you stop. */}
+                    the only thing actually counting down on an idle session.
+                    It is NOT a smooth slide: it is pinned at (last node proof +
+                    statusTimeout), so every proof jumps it back to two hours out and
+                    it ticks down in real time in between. That means it keeps falling
+                    while you are "connected" to a tunnel the node is not seeing — the
+                    wording has to hold in that case too, so it names the node's
+                    reports rather than the user's intent. */}
                 {!isEnded && inactiveInSeconds !== null && inactiveInSeconds > 0 && (
-                  <div className="text-text-tertiary text-xs mt-2">
-                    Expires in {formatDuration(inactiveInSeconds)} if unused.
+                  <div
+                    className="text-text-tertiary text-xs mt-2"
+                    title="The chain reaps a session the node stops reporting usage for. Every usage report pushes this deadline back, so it only really counts down when nothing is getting through."
+                  >
+                    Expires in {formatDuration(inactiveInSeconds)} unless the node reports usage.
                   </div>
                 )}
               </div>

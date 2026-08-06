@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota } from './connect-decisions.ts'
+import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
 
 // --- sessionFailureMessage ---
 
@@ -269,4 +269,36 @@ test('evaluateQuota: a node metering slightly past the cap still reads as expire
   // #53634305 recorded 3618s against a 3600s cap.
   const v = evaluateQuota({ ...CAPLESS, maxDurationSeconds: 3600, baselineDurationSeconds: 3618 })
   assert.deepEqual(v, { level: 'expired', reason: 'time' })
+})
+
+// --- isTunnelOneWay ---
+
+test('isTunnelOneWay: traffic leaving with no reply, for long enough, is a dead tunnel', () => {
+  assert.equal(isTunnelOneWay(ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS), true)
+  assert.equal(isTunnelOneWay(5 * 1024 * 1024, 10 * 60_000), true)
+})
+
+test('isTunnelOneWay: an idle tunnel is not a dead one', () => {
+  // The case that makes a naive "no rx" check wrong: nothing is going out either,
+  // so there is no evidence of anything being wrong.
+  assert.equal(isTunnelOneWay(0, ONE_WAY_SILENCE_MS * 10), false)
+  assert.equal(isTunnelOneWay(200, 60 * 60_000), false)
+})
+
+test('isTunnelOneWay: a brief stall is not a dead tunnel', () => {
+  assert.equal(isTunnelOneWay(10 * 1024 * 1024, ONE_WAY_SILENCE_MS - 1), false)
+})
+
+test('isTunnelOneWay: both thresholds are inclusive, and both are required', () => {
+  assert.equal(isTunnelOneWay(ONE_WAY_TX_FLOOR_BYTES - 1, ONE_WAY_SILENCE_MS), false)
+  assert.equal(isTunnelOneWay(ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS - 1), false)
+  assert.equal(isTunnelOneWay(ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS), true)
+})
+
+test('isTunnelOneWay: the #53647217 shape — a node that never answered the handshake', () => {
+  // Measured live: ~3 KB out over minutes, 0 bytes in. Below the tx floor, so the
+  // watchdog abstains and the CONNECT-time probe is what has to catch this one.
+  assert.equal(isTunnelOneWay(3119, 3 * 60_000), false)
+  // Left up longer, the app's own retries push it past the floor and it trips.
+  assert.equal(isTunnelOneWay(80 * 1024, 5 * 60_000), true)
 })

@@ -39,6 +39,19 @@ export function isChainNotFound(message: string): boolean {
   return /Query failed with \(22\)|code = NotFound/.test(message)
 }
 
+/**
+ * Did MsgCancelSession fail because the session had ALREADY stopped being active?
+ *
+ * A session that runs out of its paid quota moves active(1) → inactive_pending(2)
+ * on chain by itself, and x/session only accepts a cancel in status 1 — so the
+ * user clicking "End" a moment too late gets a raw `rawLog` for something that has
+ * in fact already happened. Narrow on purpose: only the status guard, so a real
+ * rejection (bad signature, wrong owner, unknown id) still throws.
+ */
+export function isSessionNotActive(message: string): boolean {
+  return /invalid session status|invalid status \w+ for session/.test(message)
+}
+
 export const FUNDS_MESSAGE =
   `${INSUFFICIENT_FUNDS}: The transaction was rejected — your wallet doesn't have enough P2P ` +
   `to cover it plus the network fee. Nothing was charged. Top up your wallet and try again.`

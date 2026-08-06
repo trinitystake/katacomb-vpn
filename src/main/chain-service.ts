@@ -20,7 +20,7 @@ import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
 import { writeFileAtomic } from './fs-utils'
 import { withTimeout } from './async-utils'
-import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
+import { assertTxSucceeded, broadcastOrTimeout, isSessionNotActive } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { buildXRayConfig } from './xray-config'
 import { buildHysteria2Config } from './hysteria-config'
@@ -276,12 +276,24 @@ export async function endSession(params: {
       id: Long.fromString(sessionId, true),
     })
 
-    const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: end session'),
-      END_SESSION_TX_TIMEOUT_MESSAGE,
-    )
+    try {
+      const tx = await broadcastOrTimeout(
+        client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: end session'),
+        END_SESSION_TX_TIMEOUT_MESSAGE,
+      )
 
-    assertTxSucceeded(tx, 'End session')
+      assertTxSucceeded(tx, 'End session')
+    } catch (err) {
+      // The session had already left 'active' — it ran out of its own quota
+      // between the last list refresh and this click, and x/session only accepts
+      // a cancel in status 1. The user's intent ("end this session") is already
+      // satisfied on chain, so finish quietly instead of surfacing a rawLog for
+      // something that has happened. Caught around the broadcast, not just the
+      // assert: gas: 'auto' simulates first, so the guard usually rejects there.
+      // Anything else still throws.
+      if (!(err instanceof Error) || !isSessionNotActive(err.message)) throw err
+      console.log(`[session] #${sessionId} was already inactive on chain — nothing to cancel`)
+    }
 
     deleteSessionConfig(sessionId)
   } finally {

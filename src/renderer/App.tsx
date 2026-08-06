@@ -3,7 +3,7 @@ import { useWallet } from './hooks/useWallet'
 import { useConnection } from './hooks/useConnection'
 import { useSessions } from './hooks/useSessions'
 import { useReconnect } from './hooks/useReconnect'
-import type { SessionInfo } from './types'
+import type { ConnectionStatus, SessionInfo } from './types'
 import MnemonicInput from './components/MnemonicInput'
 import WalletPicker from './components/WalletPicker'
 import MapView from './components/MapView'
@@ -25,6 +25,61 @@ import { NodesProvider } from './contexts/NodesContext'
 import { NavigationProvider, useNavigation, type MainTab } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
 import AppLogo from './components/AppLogo'
+
+/**
+ * The last session ran out of what it was paid for and main took the tunnel down.
+ * Two shapes: an ordinary notice when internet still works, and a danger-styled
+ * one when the kill switch was deliberately left armed — there the user has no
+ * connectivity at all until they press Restore, so it must not read as cosmetic.
+ * It is its own component only because dismissing needs local state.
+ */
+function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'] }) {
+  const [dismissed, setDismissed] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  if (!expired || dismissed) return null
+
+  const node = expired.nodeMoniker || 'the node'
+
+  return (
+    <div
+      className={`px-5 py-1.5 border-b text-xs flex items-center gap-2 ${
+        expired.trafficBlocked
+          ? 'bg-danger-subtle border-danger text-danger'
+          : 'bg-bg-secondary border-border text-text-secondary'
+      }`}
+    >
+      <span aria-hidden>⚠</span>
+      <span className="flex-1">
+        Your session on <span className="font-medium">{node}</span> ran out of {expired.reason} and
+        was disconnected.
+        {expired.trafficBlocked && ' The kill switch is still blocking all traffic.'}
+      </span>
+      {expired.trafficBlocked && (
+        <button
+          onClick={async () => {
+            setRestoring(true)
+            try {
+              await window.api.connectionDisconnect()
+            } finally {
+              setRestoring(false)
+            }
+          }}
+          disabled={restoring}
+          className="btn btn-danger text-xs px-2 py-0.5 disabled:opacity-40"
+        >
+          {restoring ? <Spinner /> : 'Restore internet'}
+        </button>
+      )}
+      <button
+        onClick={() => setDismissed(true)}
+        className="hover:text-text-primary transition-colors px-1"
+        title="Dismiss"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
 
 function AppInner() {
   const wallet = useWallet()
@@ -153,6 +208,9 @@ function AppInner() {
       </header>
 
       <RpcBanner />
+
+      {/* Keyed by session so a dismissal never hides the NEXT session's expiry. */}
+      <SessionExpiredBanner key={connStatus.expired?.sessionId} expired={connStatus.expired} />
 
       {connStatus.killSwitchTeardownFailed && (
         <div className="px-5 py-1.5 bg-danger-subtle border-b border-danger text-danger text-xs flex items-center gap-2">

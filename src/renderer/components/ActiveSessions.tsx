@@ -215,10 +215,21 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             // derive elapsed from wall-clock since startAt — the same reason bytes
             // use the live interface counter above. Recomputes each render (1s
             // while connected) so the time gauge ticks.
-            const elapsedSeconds = session.startAt
+            const rawElapsedSeconds = session.startAt
               ? Math.max(0, Math.floor((Date.now() - new Date(session.startAt).getTime()) / 1000))
               : (session.durationSeconds ?? 0)
-            const timePct = timePercent(elapsedSeconds, session.maxDurationSeconds)
+            // Wall-clock keeps ticking after the session's time is up, so cap the
+            // READOUT at what was paid for — "4h 0m / 2h 0m" was the headline
+            // symptom of the expiry bug and says nothing true about the session.
+            const elapsedSeconds = hasTimeCap
+              ? Math.min(rawElapsedSeconds, session.maxDurationSeconds!)
+              : rawElapsedSeconds
+            const timePct = timePercent(rawElapsedSeconds, session.maxDurationSeconds)
+            // Anything but 'active' means the chain has already closed this session
+            // (it ran out, or someone cancelled it) and it is settling. It can no
+            // longer be cancelled or connected to — only watched until it drops off
+            // the list.
+            const isEnded = session.status !== 'active'
 
             return (
               <div
@@ -245,23 +256,31 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                     )}
                   </div>
                   <div className="flex items-center gap-2">
-                    {!isConnectedSession && (
-                      <button
-                        onClick={() => handleReconnect(session)}
-                        disabled={isBusy || busy !== null || vpnConnected}
-                        className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
-                        title={vpnConnected ? 'Disconnect current VPN first' : undefined}
-                      >
-                        {isBusy ? <Spinner /> : 'Connect'}
-                      </button>
+                    {isEnded ? (
+                      <span className="text-text-secondary text-xs border border-border px-1.5 py-0.5 rounded-sm font-medium">
+                        Expired
+                      </span>
+                    ) : (
+                      <>
+                        {!isConnectedSession && (
+                          <button
+                            onClick={() => handleReconnect(session)}
+                            disabled={isBusy || busy !== null || vpnConnected}
+                            className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                            title={vpnConnected ? 'Disconnect current VPN first' : undefined}
+                          >
+                            {isBusy ? <Spinner /> : 'Connect'}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleEndSession(session)}
+                          disabled={isBusy || busy !== null}
+                          className="btn btn-danger text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          {isBusy ? <Spinner /> : 'End'}
+                        </button>
+                      </>
                     )}
-                    <button
-                      onClick={() => handleEndSession(session)}
-                      disabled={isBusy || busy !== null}
-                      className="btn btn-danger text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
-                    >
-                      {isBusy ? <Spinner /> : 'End'}
-                    </button>
                   </div>
                 </div>
 
@@ -291,7 +310,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                         {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
                       </span>
                       <span className={`font-mono ${dataPct > 90 ? 'text-danger' : dataPct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
-                        {dataPct.toFixed(1)}%
+                        {dataPct >= 100 ? 'Expired' : `${dataPct.toFixed(1)}%`}
                       </span>
                     </div>
                     <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
@@ -314,7 +333,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                         {isConnectedSession && <span className="text-success text-[10px] ml-1 align-middle">live</span>}
                       </span>
                       <span className={`font-mono ${timePct > 90 ? 'text-danger' : timePct > 70 ? 'text-warning' : 'text-text-secondary'}`}>
-                        {timePct.toFixed(1)}%
+                        {timePct >= 100 ? 'Expired' : `${timePct.toFixed(1)}%`}
                       </span>
                     </div>
                     <div className="h-1.5 bg-bg-hover overflow-hidden rounded-full">
@@ -347,6 +366,12 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                     Up: <span className="font-mono">{formatBytes(uploadBytes)}</span>
                   </span>
                 </div>
+
+                {isEnded && (
+                  <div className="text-text-tertiary text-xs mt-2">
+                    This session is settling on chain — the deposit is returned automatically.
+                  </div>
+                )}
               </div>
             )
           })}

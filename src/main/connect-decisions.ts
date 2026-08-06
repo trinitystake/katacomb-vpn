@@ -53,6 +53,69 @@ export function backoffDelayMs(attempt: number): number {
   return Math.min(2 ** attempt * 1000, 60000)
 }
 
+export interface QuotaInput {
+  /** Chain `startAt` in ms, or the connect time as a fallback. */
+  startAtMs: number | null
+  /** null or <=0 ⇒ not time-metered. */
+  maxDurationSeconds: number | null
+  /** 0 ⇒ not data-metered. */
+  maxBytes: number
+  /** On-chain download settled before this connect. */
+  baselineBytes: number
+  /** Interface rx counter for the current tunnel (getTrafficStats().rxBytes). */
+  liveRxBytes: number
+  nowMs: number
+}
+
+export type QuotaVerdict =
+  | { level: 'ok'; pct: number }
+  /** `remaining` is seconds for reason 'time', bytes for reason 'data'. */
+  | { level: 'warn'; pct: number; reason: 'time' | 'data'; remaining: number }
+  | { level: 'expired'; reason: 'time' | 'data' }
+
+const QUOTA_WARN_PCT = 90
+
+/**
+ * How much of the paid session is used up? Only the caps that actually exist are
+ * evaluated (a per-GB session has no time cap and vice versa — same hasByteCap /
+ * hasTimeCap split the Sessions tab draws its gauges from), and the worst of the
+ * two wins. With NEITHER cap set the verdict is always 'ok': a capless session
+ * must never be torn down.
+ *
+ * Byte accounting deliberately mirrors the UI — `baselineBytes + liveRxBytes`
+ * against `maxBytes`, i.e. DOWNLOAD ONLY, the same number the user is looking at.
+ * The node's own metering may differ slightly, which is what the reconnect
+ * give-up path absorbs. In local-proxy mode there is no interface to count, so
+ * `liveRxBytes` is 0 and only a time cap can expire.
+ */
+export function evaluateQuota(input: QuotaInput): QuotaVerdict {
+  const hasTimeCap = input.maxDurationSeconds !== null && input.maxDurationSeconds > 0
+  const hasByteCap = input.maxBytes > 0
+
+  const timePct = hasTimeCap && input.startAtMs !== null
+    ? (Math.max(0, input.nowMs - input.startAtMs) / 1000) / input.maxDurationSeconds! * 100
+    : null
+  const dataPct = hasByteCap
+    ? (input.baselineBytes + input.liveRxBytes) / input.maxBytes * 100
+    : null
+
+  if (timePct === null && dataPct === null) return { level: 'ok', pct: 0 }
+
+  // Worst of the two decides — whichever cap runs out first ends the session.
+  const reason: 'time' | 'data' =
+    (dataPct ?? -1) > (timePct ?? -1) ? 'data' : 'time'
+  const pct = Math.max(timePct ?? 0, dataPct ?? 0)
+
+  if (pct >= 100) return { level: 'expired', reason }
+  if (pct >= QUOTA_WARN_PCT) {
+    const remaining = reason === 'time'
+      ? Math.max(0, input.maxDurationSeconds! - (input.nowMs - input.startAtMs!) / 1000)
+      : Math.max(0, input.maxBytes - (input.baselineBytes + input.liveRxBytes))
+    return { level: 'warn', pct, reason, remaining }
+  }
+  return { level: 'ok', pct }
+}
+
 /** Node `/info` service_type spellings → our numeric protocol tag. */
 const SERVICE_TYPE_ALIASES: Record<string, number> = {
   wireguard: 1,

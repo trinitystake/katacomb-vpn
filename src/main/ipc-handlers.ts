@@ -1,4 +1,4 @@
-import { ipcMain, net, BrowserWindow, app } from 'electron'
+import { ipcMain, net, BrowserWindow, Notification, app } from 'electron'
 import { is } from '@electron-toolkit/utils'
 import { existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
@@ -23,10 +23,11 @@ import {
   getWallet,
   getPrivKey,
   logout,
+  type SessionInfo,
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
+import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -235,6 +236,234 @@ function stopRootTunnelMonitor(): void {
     clearInterval(wgMonitorTimer)
     wgMonitorTimer = null
   }
+}
+
+// The paid quota of the session we're connected to. Nothing else in the app tracks
+// it: the liveness monitor above watches whether the INTERFACE exists, and a node
+// whose quota is exhausted stops forwarding while the interface stays up — so
+// without this the tunnel sits there dead and the Sessions tab extrapolates a time
+// bar past 100% off a snapshot taken before the connect.
+interface ActiveQuota {
+  // Pinned to the session it was read for, so a stale quota can never be applied
+  // to the next one.
+  sessionId: string
+  startAtMs: number
+  maxDurationSeconds: number | null
+  maxBytes: number
+  baselineBytes: number
+}
+let activeQuota: ActiveQuota | null = null
+let quotaWarned = false
+let quotaTimer: ReturnType<typeof setInterval> | null = null
+// Why the last session ended, kept after teardown so the renderer can explain the
+// disconnect (and offer Restore when the kill switch is still blocking). Cleared by
+// the next connect and by performDisconnect.
+let lastExpiry: { sessionId: string; nodeMoniker: string; reason: 'time' | 'data'; trafficBlocked: boolean } | null = null
+
+// Quota is coarse — the 5s interface poll is not a useful cadence for it.
+const QUOTA_POLL_MS = 15_000
+// A reconnect that exhausted its attempts this close to the cap didn't fail, it ran
+// out: the node cut the tunnel slightly before our own estimate said it would.
+const QUOTA_GIVE_UP_PCT = 95
+
+/** Read the quota off a chain session row, or null when it carries no cap at all. */
+function quotaFromSessionRow(row: SessionInfo): ActiveQuota | null {
+  const maxBytes = parseInt(row.maxBytes, 10) || 0
+  const hasTimeCap = row.maxDurationSeconds !== null && row.maxDurationSeconds > 0
+  if (maxBytes <= 0 && !hasTimeCap) return null
+  return {
+    sessionId: row.id,
+    startAtMs: row.startAt ? new Date(row.startAt).getTime() : Date.now(),
+    maxDurationSeconds: hasTimeCap ? row.maxDurationSeconds : null,
+    maxBytes,
+    // The download already settled on chain before this connect; the watchdog adds
+    // the live interface counter on top (see evaluateQuota).
+    baselineBytes: parseInt(row.downloadBytes, 10) || 0,
+  }
+}
+
+/**
+ * Best-effort capture of the session's quota. Called between session creation and
+ * tunnel bring-up, while RPC is still reachable. FAILING TO CAPTURE MUST NEVER FAIL
+ * A CONNECT — the degradation is "no watchdog", nothing more.
+ */
+async function captureQuota(sessionId: string): Promise<void> {
+  try {
+    const rows = await getActiveSessions()
+    setQuota(rows.find((s) => s.id === sessionId))
+  } catch {
+    console.log(`[quota] could not read the quota for session #${sessionId} — watchdog disabled for it`)
+  }
+}
+
+function setQuota(row: SessionInfo | undefined): void {
+  activeQuota = row ? quotaFromSessionRow(row) : null
+  quotaWarned = false
+  if (!activeQuota) return
+  console.log(
+    `[quota] session #${activeQuota.sessionId}: ` +
+    `${activeQuota.maxDurationSeconds ? `${activeQuota.maxDurationSeconds}s` : 'no time cap'}, ` +
+    `${activeQuota.maxBytes || 'no'} byte cap`,
+  )
+}
+
+function currentQuotaVerdict() {
+  if (!activeQuota) return null
+  return evaluateQuota({
+    startAtMs: activeQuota.startAtMs,
+    maxDurationSeconds: activeQuota.maxDurationSeconds,
+    maxBytes: activeQuota.maxBytes,
+    baselineBytes: activeQuota.baselineBytes,
+    liveRxBytes: getTrafficStats().rxBytes,
+    nowMs: Date.now(),
+  })
+}
+
+/**
+ * Watch the paid quota for as long as the tunnel is up. Unconditional on protocol —
+ * every one of the six burns the same on-chain session — and deliberately NOT
+ * skipped in proxy mode: a proxy-mode session expires exactly the same way, only
+ * the teardown differs. (Proxy mode has no interface, so its rx counter is 0 and
+ * only a time cap can fire; see evaluateQuota.)
+ */
+function startQuotaWatchdog(): void {
+  // A reconnect from the Sessions tab creates no new session, so nothing captured a
+  // quota for it — take it from lastKnownSessions, which is authoritative there.
+  if (activeSessionId && activeQuota?.sessionId !== activeSessionId) {
+    setQuota((lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeSessionId))
+  }
+  if (quotaTimer) return
+  quotaTimer = setInterval(() => {
+    if (isIntentionalDisconnect || reconnectAttempt > 0 || !activeSessionId) return
+    const verdict = currentQuotaVerdict()
+    if (!verdict) return
+    if (verdict.level === 'expired') {
+      void handleQuotaExpiry(verdict.reason)
+      return
+    }
+    if (verdict.level === 'warn' && !quotaWarned) {
+      quotaWarned = true
+      notify('Katacomb VPN', `About ${describeRemaining(verdict.reason, verdict.remaining)} of your session left.`)
+      // Nudge the renderer to re-poll so the Sessions gauges catch up with the warning.
+      sendStateChange('connected')
+    }
+  }, QUOTA_POLL_MS)
+}
+
+function stopQuotaWatchdog(): void {
+  if (quotaTimer) {
+    clearInterval(quotaTimer)
+    quotaTimer = null
+  }
+}
+
+/** "10 minutes" / "1.2 GB" — the remaining-quota phrase for the warning notification. */
+function describeRemaining(reason: 'time' | 'data', remaining: number): string {
+  if (reason === 'time') {
+    const mins = Math.max(1, Math.round(remaining / 60))
+    return mins >= 60 ? `${(mins / 60).toFixed(1)} hours` : `${mins} minutes`
+  }
+  const gb = remaining / 1024 ** 3
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.max(1, Math.round(remaining / 1024 ** 2))} MB`
+}
+
+/**
+ * Desktop notification. The tray-minimised case is the whole point of this feature —
+ * an in-app-only warning reaches nobody — so clicking one brings the window back.
+ * The show logic is repeated rather than imported from index.ts's showWindow (that
+ * would be a circular import); the three lines are enough here because the close
+ * handler only ever HIDES the window, so there is never one to re-create.
+ */
+function notify(title: string, body: string): void {
+  if (!Notification.isSupported()) return
+  try {
+    const n = new Notification({ title, body })
+    n.on('click', () => {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (!win || win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    })
+    n.show()
+  } catch (err) {
+    console.error('[notify] failed:', err)
+  }
+}
+
+/**
+ * The session ran out. Modelled on performDisconnect so it inherits the same
+ * serialization invariants (epoch bumped synchronously before the lock, reconnect
+ * machinery stood down first), because the one thing that must not happen here is
+ * the reconnect timer resurrecting a session the chain has already closed.
+ *
+ * The tunnel ALWAYS comes down; the kill-switch preference decides what happens to
+ * internet access. On → the DROP-all chain stays armed and the user is told traffic
+ * is blocked, with a Restore button. Off → full revert, exactly like a manual
+ * disconnect. Never auto-renew: on-chain spending stays user-initiated.
+ *
+ * KNOWN LIMITATION: the "expired, traffic blocked" state does not survive an app
+ * restart. healStrandedKillSwitch() reverts an armed-but-disconnected kill switch at
+ * next launch, by design — that self-heal is load-bearing (it is what rescues a user
+ * from a chain stranded by a crash) and must NOT be weakened to preserve this state.
+ */
+async function handleQuotaExpiry(reason: 'time' | 'data'): Promise<void> {
+  const sessionId = activeSessionId
+  if (!sessionId) return
+  const nodeMoniker = activeNodeInfo?.moniker || ''
+  console.log(`[quota] session #${sessionId} exhausted its ${reason} quota — disconnecting`)
+
+  // Same synchronous stand-down performDisconnect does, and for the same reason:
+  // an in-flight reconnect must bail at its next epoch check even while another op
+  // still holds the lock.
+  isIntentionalDisconnect = true
+  connectionEpoch++
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  reconnectAttempt = 0
+
+  await withConnectionLock(async () => {
+    rememberSessionUsage()
+    stopRootTunnelMonitor()
+    stopQuotaWatchdog()
+
+    if (loadSettings().killSwitch) {
+      // Leave the kill-switch chain armed — that preference IS the user's stated
+      // intent for "no tunnel". Only DNS goes back, so the machine isn't left
+      // pointing at a resolver that no longer exists.
+      await restoreDnsOverride()
+    } else {
+      await revertPostConnectSettings()
+    }
+    await disconnect()
+
+    activeV2ray = null
+    activeWg = null
+    activeXrayConfig = null
+    activeHysteria2Config = null
+    activeAmneziaWgConfig = null
+    activeOpenVpnConfig = null
+    desiredProtocol = null
+    desiredMode = 'tunnel'
+    activeSessionId = null
+    activeNodeInfo = null
+    activeQuota = null
+    // Report what is ACTUALLY still installed, not what the setting asked for — if
+    // arming had failed at connect time, nothing is blocking and saying otherwise
+    // would send the user hunting for a firewall rule that isn't there.
+    lastExpiry = { sessionId, nodeMoniker, reason, trafficBlocked: isKillSwitchArmed() }
+    isIntentionalDisconnect = false
+    sendStateChange('idle')
+  })
+
+  notify(
+    'Katacomb VPN',
+    lastExpiry?.trafficBlocked
+      ? 'Session ended — VPN disconnected. The kill switch is still blocking all traffic.'
+      : 'Session ended — VPN disconnected.',
+  )
 }
 
 // Main-process listeners (e.g. the tray) for connection-state changes. Mirrors
@@ -583,6 +812,14 @@ async function revertPostConnectSettings(): Promise<void> {
   } else {
     killSwitchTeardownFailed = false
   }
+  await restoreDnsOverride()
+}
+
+/**
+ * The DNS half of the teardown on its own. Split out for the quota-expiry path,
+ * which puts the resolver back but deliberately LEAVES the kill switch armed.
+ */
+async function restoreDnsOverride(): Promise<void> {
   if (isDnsOverridden()) {
     try {
       await runPrivileged(['dns-restore'])
@@ -644,6 +881,7 @@ export async function performDisconnect(): Promise<void> {
     rememberSessionUsage()
 
     stopRootTunnelMonitor()
+    stopQuotaWatchdog()
     await revertPostConnectSettings()
     await disconnect()
     activeV2ray = null
@@ -656,6 +894,10 @@ export async function performDisconnect(): Promise<void> {
     desiredMode = 'tunnel'
     activeSessionId = null
     activeNodeInfo = null
+    activeQuota = null
+    // This is also what the expiry banner's "Restore internet" button calls, so
+    // clearing the notice here is what dismisses it once traffic is back.
+    lastExpiry = null
     isIntentionalDisconnect = false
     sendStateChange('idle')
   })
@@ -673,6 +915,7 @@ async function teardownToIdle(broadcast: boolean): Promise<void> {
   await revertPostConnectSettings()
   await disconnect()
   stopRootTunnelMonitor()
+  stopQuotaWatchdog()
   desiredProtocol = null
   if (broadcast) sendStateChange('idle')
 }
@@ -695,6 +938,15 @@ async function attemptReconnect(): Promise<void> {
   if (decision.action === 'abort') return
   if (decision.action === 'give-up') {
     console.log('[reconnect] Max attempts reached, giving up')
+    // When the node cut the tunnel slightly before our own estimate said it would,
+    // the interface monitor fires first and burns through the attempts — so a
+    // give-up this close to the cap is an expiry, and the user deserves the honest
+    // reason rather than a generic connection failure.
+    const verdict = currentQuotaVerdict()
+    if (verdict && (verdict.level === 'expired' || (verdict.level === 'warn' && verdict.pct >= QUOTA_GIVE_UP_PCT))) {
+      await handleQuotaExpiry(verdict.reason)
+      return
+    }
     await teardownToIdle(true)
     return
   }
@@ -770,6 +1022,7 @@ async function attemptReconnect(): Promise<void> {
 
         desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
         if (isRootTunnelProtocol(desiredProtocol)) startRootTunnelMonitor()
+        startQuotaWatchdog()
 
         console.log('[reconnect] Success')
         reconnectAttempt = 0
@@ -1266,7 +1519,8 @@ export function registerIpcHandlers(): void {
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
 
-    // Pre-cache sessions now (RPC is still reachable before tunnel goes up)
+    // Pre-cache sessions now (RPC is still reachable before tunnel goes up), and
+    // take the quota watchdog's baseline off the same read.
     try {
       const sessions = await getActiveSessions()
       lastKnownSessions = sessions.map((s) => {
@@ -1274,7 +1528,22 @@ export function registerIpcHandlers(): void {
         const nodeMeta = getNodeMeta(s.nodeAddress)
         return { ...s, nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker, nodeCountry: saved?.nodeCountry || nodeMeta.country }
       })
+      setQuota(sessions.find((s) => s.id === sessionId))
     } catch { /* best-effort */ }
+
+    // The chain row was unreadable or hadn't appeared yet — fall back to what the
+    // user just bought. Less exact (it starts the clock now rather than at the
+    // chain's startAt), but a watchdog on approximate numbers beats none.
+    if (!activeQuota) {
+      activeQuota = {
+        sessionId,
+        startAtMs: Date.now(),
+        maxDurationSeconds: params.type === 'hours' ? params.amount * 3600 : null,
+        maxBytes: params.type === 'gigabytes' ? params.amount * 1024 ** 3 : 0,
+        baselineBytes: 0,
+      }
+      quotaWarned = false
+    }
 
     return {
       sessionId,
@@ -1353,6 +1622,8 @@ export function registerIpcHandlers(): void {
     // Serialize tunnel bring-up against disconnect/reconnect so overlapping ops
     // can't orphan a child process (finding M1).
     return withConnectionLock(async () => {
+      // A new connect supersedes whatever the last session ended as.
+      lastExpiry = null
       if (params.protocol === 'wireguard') {
         if (dnsFallback) {
           // Same config, minus DNS. config-guard still validates it (DNS is an
@@ -1374,6 +1645,7 @@ export function registerIpcHandlers(): void {
         desiredProtocol = 'wireguard'
         desiredMode = 'tunnel'
         startRootTunnelMonitor()
+        startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'wireguard' }
       }
@@ -1392,6 +1664,7 @@ export function registerIpcHandlers(): void {
         desiredProtocol = 'amneziawg'
         desiredMode = 'tunnel'
         startRootTunnelMonitor()
+        startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'amneziawg' }
       }
@@ -1412,6 +1685,7 @@ export function registerIpcHandlers(): void {
         desiredProtocol = 'openvpn'
         desiredMode = 'tunnel'
         startRootTunnelMonitor()
+        startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'openvpn' }
       }
@@ -1466,6 +1740,7 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'v2ray'
         desiredMode = proxyOnly ? 'proxy' : 'tunnel'
+        startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'v2ray' }
       }
@@ -1511,6 +1786,7 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'xray'
         desiredMode = proxyOnly ? 'proxy' : 'tunnel'
+        startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'xray' }
       }
@@ -1556,6 +1832,7 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'hysteria2'
         desiredMode = proxyOnly ? 'proxy' : 'tunnel'
+        startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'hysteria2' }
       }
@@ -1587,6 +1864,10 @@ export function registerIpcHandlers(): void {
       socksAddr: vpnStatus.socksAddr,
       reconnectAttempt: reconnectAttempt > 0 ? reconnectAttempt : undefined,
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,
+      // Why the last session ended, if it ended on its own. No new IPC channel is
+      // needed: handleQuotaExpiry's sendStateChange('idle') already makes
+      // useConnection re-poll, which picks this up.
+      expired: lastExpiry ?? undefined,
     }
   })
 
@@ -1797,6 +2078,9 @@ export function registerIpcHandlers(): void {
     })
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
+    // RPC is still reachable here (the tunnel goes up in the follow-up connect call).
+    // A plan session's caps only exist on chain, so there is no local fallback.
+    await captureQuota(sessionId)
 
     return {
       sessionId,
@@ -1852,6 +2136,7 @@ export function registerIpcHandlers(): void {
     })
 
     applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
+    await captureQuota(sessionId)
 
     return {
       sessionId,
@@ -2237,6 +2522,7 @@ export async function cleanupOnQuit(): Promise<void> {
     reconnectTimer = null
   }
   stopRootTunnelMonitor()
+  stopQuotaWatchdog()
   await revertPostConnectSettings()
   await disconnect()
 }

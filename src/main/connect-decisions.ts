@@ -54,17 +54,18 @@ export function backoffDelayMs(attempt: number): number {
 }
 
 export interface QuotaInput {
-  /** Chain `startAt` in ms, or the connect time as a fallback. */
-  startAtMs: number | null
   /** null or <=0 ⇒ not time-metered. */
   maxDurationSeconds: number | null
+  /** On-chain `duration` settled before this connect. */
+  baselineDurationSeconds: number
+  /** How long the CURRENT tunnel has been up. */
+  connectedSeconds: number
   /** 0 ⇒ not data-metered. */
   maxBytes: number
   /** On-chain download settled before this connect. */
   baselineBytes: number
   /** Interface rx counter for the current tunnel (getTrafficStats().rxBytes). */
   liveRxBytes: number
-  nowMs: number
 }
 
 export type QuotaVerdict =
@@ -82,22 +83,30 @@ const QUOTA_WARN_PCT = 90
  * two wins. With NEITHER cap set the verdict is always 'ok': a capless session
  * must never be torn down.
  *
- * Byte accounting deliberately mirrors the UI — `baselineBytes + liveRxBytes`
- * against `maxBytes`, i.e. DOWNLOAD ONLY, the same number the user is looking at.
- * The node's own metering may differ slightly, which is what the reconnect
- * give-up path absorbs. In local-proxy mode there is no interface to count, so
- * `liveRxBytes` is 0 and only a time cap can expire.
+ * BOTH caps are measured the same way: what the chain already settled, plus what
+ * this tunnel has done since it came up. For bytes that is
+ * `baselineBytes + liveRxBytes` (DOWNLOAD ONLY, the same number the user is looking
+ * at); for time it is `baselineDurationSeconds + connectedSeconds`.
+ *
+ * Time deliberately does NOT use wall-clock since the session's `startAt`. The
+ * chain meters `duration` from the node's usage proofs, so an idle session accrues
+ * nothing — verified on mainnet: session #53647217 sat for 53 minutes with
+ * `duration: 0`, which a wall-clock reading would have called 88% spent and torn
+ * down, destroying a full paid hour.
+ *
+ * The node's own metering may still differ slightly from ours, which is what the
+ * reconnect give-up path absorbs. In local-proxy mode there is no interface to
+ * count, so `liveRxBytes` is 0 and only a time cap can expire.
  */
 export function evaluateQuota(input: QuotaInput): QuotaVerdict {
   const hasTimeCap = input.maxDurationSeconds !== null && input.maxDurationSeconds > 0
   const hasByteCap = input.maxBytes > 0
 
-  const timePct = hasTimeCap && input.startAtMs !== null
-    ? (Math.max(0, input.nowMs - input.startAtMs) / 1000) / input.maxDurationSeconds! * 100
-    : null
-  const dataPct = hasByteCap
-    ? (input.baselineBytes + input.liveRxBytes) / input.maxBytes * 100
-    : null
+  const usedSeconds = input.baselineDurationSeconds + input.connectedSeconds
+  const usedBytes = input.baselineBytes + input.liveRxBytes
+
+  const timePct = hasTimeCap ? usedSeconds / input.maxDurationSeconds! * 100 : null
+  const dataPct = hasByteCap ? usedBytes / input.maxBytes * 100 : null
 
   if (timePct === null && dataPct === null) return { level: 'ok', pct: 0 }
 
@@ -109,8 +118,8 @@ export function evaluateQuota(input: QuotaInput): QuotaVerdict {
   if (pct >= 100) return { level: 'expired', reason }
   if (pct >= QUOTA_WARN_PCT) {
     const remaining = reason === 'time'
-      ? Math.max(0, input.maxDurationSeconds! - (input.nowMs - input.startAtMs!) / 1000)
-      : Math.max(0, input.maxBytes - (input.baselineBytes + input.liveRxBytes))
+      ? Math.max(0, input.maxDurationSeconds! - usedSeconds)
+      : Math.max(0, input.maxBytes - usedBytes)
     return { level: 'warn', pct, reason, remaining }
   }
   return { level: 'ok', pct }

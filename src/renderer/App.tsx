@@ -96,7 +96,9 @@ function AppInner() {
     if (wallet.address) setAddingWallet(false)
   }, [wallet.address])
   const sessionsState = useSessions()
-  const sessionCount = sessionsState.sessions.length
+  // Live sessions only. An ended one is still listed while it settles on chain, but
+  // the badge means "this needs you", and a settling row does not.
+  const sessionCount = sessionsState.sessions.filter((s) => s.status === 'active').length
   const reconnect = useReconnect()
   // One instance for the whole app: it decides whether the tab exists AND feeds the
   // console, so a refresh from inside the console also updates the tab. Skipped

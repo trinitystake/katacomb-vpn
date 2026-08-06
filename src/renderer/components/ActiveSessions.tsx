@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useConnection } from '../hooks/useConnection'
 import { usePlans } from '../hooks/usePlans'
 import { useTrafficStats } from '../hooks/useTrafficStats'
@@ -25,7 +25,9 @@ function formatBytes(bytes: string): string {
 }
 
 function formatDuration(seconds: number | null): string {
-  if (seconds === null || seconds <= 0) return '—'
+  // 0 renders as "0m", not "—": an unused session has genuinely used zero time,
+  // and that is exactly the number the time gauge has to be able to show.
+  if (seconds === null || seconds < 0) return '—'
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
   if (h > 0) return `${h}h ${m}m`
@@ -68,6 +70,42 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   // and lag node settlement anyway, so the connected session's usage is driven
   // off this real-time meter instead.
   const liveStats = useTrafficStats(vpnConnected)
+
+  // Active first, then newest first. Sorting by startAt ALONE would not do what it
+  // looks like it does: a session that just expired is newer than one still running,
+  // so it would float to the top. Status has to be the primary key.
+  const ordered = useMemo(
+    () => [...sessions].sort((a, b) => {
+      const rank = (s: SessionInfo) => (s.status === 'active' ? 0 : 1)
+      return rank(a) - rank(b) ||
+        new Date(b.startAt || 0).getTime() - new Date(a.startAt || 0).getTime()
+    }),
+    [sessions],
+  )
+  // Counts the live ones. An ended row is still shown (it is settling on chain) but
+  // it is not an active session, and counting it as one is what produced
+  // "Active Sessions (2)" over a single running session.
+  const activeCount = sessions.filter((s) => s.status === 'active').length
+  const endingCount = sessions.length - activeCount
+  const sessionCountLabel = `${activeCount} active${endingCount > 0 ? ` · ${endingCount} ending` : ''}`
+
+  // Drop an ended row as soon as the chain settles it, rather than leaving it up to
+  // two minutes (the useSessions poll) after it has ceased to exist. One timer for
+  // the soonest deadline; the poll still covers everything else.
+  const nextSettleMs = useMemo(() => {
+    const times = sessions
+      .filter((s) => s.status !== 'active' && s.inactiveAt)
+      .map((s) => new Date(s.inactiveAt!).getTime())
+    return times.length ? Math.min(...times) : null
+  }, [sessions])
+
+  useEffect(() => {
+    if (nextSettleMs === null) return
+    // +5s of slack so the EndBlocker has actually run by the time we re-read.
+    const delay = Math.max(1000, nextSettleMs + 5000 - Date.now())
+    const id = setTimeout(() => { void refresh() }, delay)
+    return () => clearTimeout(id)
+  }, [nextSettleMs, refresh])
 
   async function handleReconnect(session: SessionInfo) {
     setBusy(session.id)
@@ -139,7 +177,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
         <h3 className="text-text-secondary text-xs font-medium uppercase tracking-wide">
-          Active Sessions ({sessions.length})
+          Sessions ({sessionCountLabel})
         </h3>
         <button
           onClick={refresh}
@@ -190,10 +228,10 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
           )}
           {sessions.length > 0 && allocations.length > 0 && (
             <div className="text-text-tertiary text-[10px] font-medium uppercase tracking-wide px-1 pt-2">
-              Sessions ({sessions.length})
+              Sessions ({sessionCountLabel})
             </div>
           )}
-          {sessions.map((session) => {
+          {ordered.map((session) => {
             const isBusy = busy === session.id
             const isConnectedSession = vpnConnected && status.sessionId === session.id
             // For the live session, add the real-time interface counter to the
@@ -211,31 +249,39 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             const maxBytesNum = parseInt(session.maxBytes, 10)
             const hasByteCap = !isNaN(maxBytesNum) && maxBytesNum > 0
             const hasTimeCap = session.maxDurationSeconds !== null && session.maxDurationSeconds > 0
-            // On-chain `duration` (elapsed) isn't settled for a live session, so
-            // derive elapsed from wall-clock since startAt — the same reason bytes
-            // use the live interface counter above. Recomputes each render (1s
-            // while connected) so the time gauge ticks.
-            const rawElapsedSeconds = session.startAt
-              ? Math.max(0, Math.floor((Date.now() - new Date(session.startAt).getTime()) / 1000))
-              : (session.durationSeconds ?? 0)
-            // Wall-clock keeps ticking after the session's time is up, so cap the
-            // READOUT at what was paid for — "4h 0m / 2h 0m" was the headline
-            // symptom of the expiry bug and says nothing true about the session.
+            // Time is measured exactly like bytes above: what the chain has already
+            // metered, plus what THIS tunnel has done since it came up.
+            //
+            // NOT wall-clock since startAt. The chain meters `duration` from the
+            // node's usage proofs, so a session you bought but never connected to
+            // accrues nothing — mainnet #53647217 sat 53 minutes at `duration: 0`
+            // while this card read "47m / 1h 0m, 79.4%", an entire paid hour shown
+            // as spent.
+            const meteredSeconds = (session.durationSeconds ?? 0) +
+              (isConnectedSession && status.connectedAt
+                ? Math.max(0, (Date.now() - status.connectedAt) / 1000)
+                : 0)
+            // A node can meter slightly past the cap (#53634305 recorded 3618s of
+            // 3600s), so clamp the READOUT to what was paid for.
             const elapsedSeconds = hasTimeCap
-              ? Math.min(rawElapsedSeconds, session.maxDurationSeconds!)
-              : rawElapsedSeconds
-            const timePct = timePercent(rawElapsedSeconds, session.maxDurationSeconds)
+              ? Math.min(meteredSeconds, session.maxDurationSeconds!)
+              : meteredSeconds
+            const timePct = timePercent(meteredSeconds, session.maxDurationSeconds)
             // Anything but 'active' means the chain has already closed this session
             // (it ran out, or someone cancelled it) and it is settling. It can no
             // longer be cancelled or connected to — only watched until it drops off
             // the list.
             const isEnded = session.status !== 'active'
-            // Ending a session is two phases on chain, and this is the gap between
-            // them: phase 1 flips it to inactive_pending and stamps `inactiveAt =
-            // now + statusTimeout` (7200s on mainnet, verified live), phase 2 is the
-            // EndBlocker settling it there. `inactiveAt` is therefore exactly "when
-            // this row disappears", which is the one thing the user wants to know.
-            const settlesInSeconds = session.inactiveAt
+            // `inactiveAt` means two different things depending on status — both
+            // measured against mainnet, where statusTimeout is 7200s:
+            //   ended  (2): fixed at statusAt + 2h — when the chain settles it and
+            //               this row disappears of its own accord.
+            //   active (1): a SLIDING idle deadline that rolls forward as the node
+            //               reports (observed moving 74.5 min on #53647217, ending
+            //               up at startAt + 3.24h). Stop using the session and it is
+            //               reaped 2h later. Since quota is proof-metered, this is
+            //               the only clock running on an idle session.
+            const inactiveInSeconds = session.inactiveAt
               ? Math.floor((new Date(session.inactiveAt).getTime() - Date.now()) / 1000)
               : null
 
@@ -381,9 +427,20 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                     is usually nothing to come back. */}
                 {isEnded && (
                   <div className="text-text-tertiary text-xs mt-2">
-                    {settlesInSeconds !== null && settlesInSeconds > 60
-                      ? `Ended — the chain settles this in about ${formatDuration(settlesInSeconds)}, then it leaves this list.`
-                      : 'Ended — settling on chain, then it leaves this list.'}
+                    {inactiveInSeconds !== null && inactiveInSeconds > 60
+                      ? `Ended. The chain settles this in about ${formatDuration(inactiveInSeconds)}, then it leaves this list.`
+                      : 'Ended. Settling on chain, then it leaves this list.'}
+                  </div>
+                )}
+
+                {/* The use-it-or-lose-it clock. Quota is metered from the node's
+                    proofs, so an unused session burns none of it — this deadline is
+                    the only thing actually counting down on an idle session. It
+                    slides forward while the session IS being used, hence "if unused":
+                    it is a countdown that only really runs when you stop. */}
+                {!isEnded && inactiveInSeconds !== null && inactiveInSeconds > 0 && (
+                  <div className="text-text-tertiary text-xs mt-2">
+                    Expires in {formatDuration(inactiveInSeconds)} if unused.
                   </div>
                 )}
               </div>

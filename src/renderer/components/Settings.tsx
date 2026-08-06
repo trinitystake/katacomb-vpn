@@ -558,6 +558,17 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 {rpcHealth.error && <span className="text-danger ml-auto shrink-0 truncate">{rpcHealth.error}</span>}
               </div>
 
+              {/* This pane is where a paused pill sends the user, and the first
+                  thing they reach for is a different endpoint — which cannot
+                  clear it. Say what the pause is and what ends it. */}
+              {rpcHealth.state === 'suspended' && (
+                <p className="text-text-tertiary text-xs">
+                  Paused while the VPN is connected — chain data is served from the cache and nothing is
+                  queried through the tunnel. It resumes when you disconnect; changing endpoints will not
+                  resume it, though a new one is saved and used from then on.
+                </p>
+              )}
+
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -577,8 +588,12 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
 
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
+                  {/* While the tunnel is up these probes travel through it, so
+                      they say nothing about the latency you would get once
+                      disconnected — which is the only time the app uses them. */}
                   <span className="text-text-secondary text-xs">
-                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>, fastest first:
+                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>, fastest first
+                    {rpcHealth.state === 'suspended' ? ' (timed through the VPN tunnel)' : ''}:
                   </span>
                   {rpcsLoading ? (
                     <span className="text-text-tertiary text-xs flex items-center gap-1">

@@ -25,7 +25,7 @@ export default function RpcStatus() {
   const tooltip = [
     `RPC: ${host}`,
     health.state === 'suspended'
-      ? 'Paused while the VPN is connected — the chain is not reachable through the tunnel.'
+      ? 'Paused while the VPN is connected: balances, sessions and plans come from the cache and no query is sent through the tunnel.\nIt resumes on disconnect — switching endpoints will not clear it.'
       : null,
     health.chainId ? `Chain: ${health.chainId}` : null,
     health.height !== null ? `Height: ${health.height.toLocaleString('en')}` : null,

@@ -69,7 +69,9 @@ export function rpcHealthLabel(h: RpcHealth): string {
     case 'down':
       return 'RPC unreachable'
     case 'suspended':
-      return 'RPC paused'
+      // Name the cause in the label. Grey + "paused" alone reads as a fault, and
+      // the natural response — switching endpoints — cannot clear it.
+      return 'RPC paused (VPN)'
     case 'unknown':
       return 'RPC checking'
   }

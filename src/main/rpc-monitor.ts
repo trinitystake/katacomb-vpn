@@ -99,35 +99,47 @@ function setHealth(next: RpcHealth): void {
   if (changed) broadcast()
 }
 
+function publishSuspended(endpoint: string): void {
+  setHealth({
+    state: 'suspended',
+    endpoint,
+    reachable: false,
+    latencyMs: null,
+    chainId: null,
+    height: null,
+    blockAgeSec: null,
+    error: null,
+    checkedAt: Date.now(),
+  })
+}
+
 /**
  * Probe the configured endpoint and publish the result.
  *
- * While our own tunnel is up the chain is unreachable *by design* (traffic
- * routes to the VPN node), which is why every chain handler short-circuits on
- * isVpnActive(). Probing then would report a fault that isn't one, so the state
- * becomes `suspended` and no request is made.
+ * While our own tunnel is up, every chain handler short-circuits on
+ * isVpnActive() and serves its cache instead — no query is sent through the
+ * tunnel. Probing then would grade an endpoint the app isn't using (over a
+ * route it wouldn't use either), so the state becomes `suspended` and no
+ * request is made.
  */
 export async function refreshRpcHealth(): Promise<void> {
   if (probeInFlight) return probeInFlight
   const endpoint = getRpcEndpoint()
 
   if (isVpnActive()) {
-    setHealth({
-      state: 'suspended',
-      endpoint,
-      reachable: false,
-      latencyMs: null,
-      chainId: null,
-      height: null,
-      blockAgeSec: null,
-      error: null,
-      checkedAt: Date.now(),
-    })
+    publishSuspended(endpoint)
     return
   }
 
   probeInFlight = (async () => {
     const probe = await probeRpc(endpoint)
+    // The tunnel can come up during the probe (10s window). Publishing the
+    // result then would show a live endpoint the app has already stopped
+    // querying, until the next poll corrected it.
+    if (isVpnActive()) {
+      publishSuspended(endpoint)
+      return
+    }
     setHealth({ ...probe, state: classifyRpc(probe), endpoint, checkedAt: Date.now() })
   })()
   try {
@@ -152,6 +164,15 @@ export function reportRpcFailure(): void {
 
 /** Re-probe now — used after the endpoint setting changes. */
 export function onRpcEndpointChanged(): void {
+  void refreshRpcHealth()
+}
+
+/**
+ * Re-evaluate now that the tunnel came up or went down. Without this the pill
+ * only caught up on the next 30s poll, so a disconnect left "RPC paused" on
+ * screen long enough to look stuck rather than merely stale.
+ */
+export function onVpnStateChanged(): void {
   void refreshRpcHealth()
 }
 

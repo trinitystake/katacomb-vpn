@@ -69,7 +69,10 @@ test('rpcHealthLabel covers every state', () => {
   assert.equal(rpcHealthLabel(health('degraded', { blockAgeSec: 900 })), 'RPC lagging')
   assert.equal(rpcHealthLabel(health('degraded', { latencyMs: 3000 })), 'RPC slow')
   assert.equal(rpcHealthLabel(health('down', { reachable: false })), 'RPC unreachable')
-  assert.equal(rpcHealthLabel(health('suspended')), 'RPC paused')
+  // The reason is in the label, not only the tooltip: a bare grey "RPC paused"
+  // is indistinguishable from a fault, and the user's first move was to blame
+  // the endpoint and switch it.
+  assert.equal(rpcHealthLabel(health('suspended')), 'RPC paused (VPN)')
   assert.equal(rpcHealthLabel(health('unknown')), 'RPC checking')
 })
 

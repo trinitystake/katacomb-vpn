@@ -7,7 +7,7 @@ import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
 import { checkFunds, insufficientFundsMessage, udvpnOf } from '../shared/funds'
 import { isRpcConnectivityError, rpcHostLabel } from '../shared/rpc-health'
 import { DERIVE_PREVIEW_MAX_COUNT } from '../shared/hd-path'
-import { getRpcHealth, onRpcEndpointChanged, probeAll, reportRpcFailure } from './rpc-monitor'
+import { getRpcHealth, onRpcEndpointChanged, onVpnStateChanged, probeAll, reportRpcFailure } from './rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
   hasStoredWallet,
@@ -493,6 +493,10 @@ function sendStateChange(state: 'connected' | 'idle'): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.CONNECTION_STATE_CHANGE, state)
   }
+  // The chain is queried only while the tunnel is down, so the RPC pill's state
+  // is a function of this transition — publish it now instead of leaving the
+  // old one up for the rest of the 30s poll window.
+  onVpnStateChanged()
   connectionStateListener?.({ state, nodeMoniker: activeNodeInfo?.moniker, nodeCountry: activeNodeInfo?.country })
 }
 

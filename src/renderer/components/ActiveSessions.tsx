@@ -230,6 +230,14 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             // longer be cancelled or connected to — only watched until it drops off
             // the list.
             const isEnded = session.status !== 'active'
+            // Ending a session is two phases on chain, and this is the gap between
+            // them: phase 1 flips it to inactive_pending and stamps `inactiveAt =
+            // now + statusTimeout` (7200s on mainnet, verified live), phase 2 is the
+            // EndBlocker settling it there. `inactiveAt` is therefore exactly "when
+            // this row disappears", which is the one thing the user wants to know.
+            const settlesInSeconds = session.inactiveAt
+              ? Math.floor((new Date(session.inactiveAt).getTime() - Date.now()) / 1000)
+              : null
 
             return (
               <div
@@ -367,9 +375,15 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                   </span>
                 </div>
 
+                {/* Deliberately makes NO refund promise. Settlement pays the node for
+                    what was actually used and returns only the remainder — and a
+                    session that expired used its whole quota by definition, so there
+                    is usually nothing to come back. */}
                 {isEnded && (
                   <div className="text-text-tertiary text-xs mt-2">
-                    This session is settling on chain — the deposit is returned automatically.
+                    {settlesInSeconds !== null && settlesInSeconds > 60
+                      ? `Ended — the chain settles this in about ${formatDuration(settlesInSeconds)}, then it leaves this list.`
+                      : 'Ended — settling on chain, then it leaves this list.'}
                   </div>
                 )}
               </div>

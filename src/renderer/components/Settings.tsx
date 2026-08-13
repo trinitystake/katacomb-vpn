@@ -8,6 +8,7 @@ import { useRpcHealth } from '../hooks/useRpcHealth'
 import { classifyRpc, rpcHealthLabel, rpcHostLabel, STALE_BLOCK_AGE_SEC } from '../../shared/rpc-health'
 import { parseWalletExists } from '../../shared/wallet-errors'
 import { formatHdPath, DERIVE_PREVIEW_MAX_COUNT } from '../../shared/hd-path'
+import { parseSplitTunnelRoutes, MAX_SPLIT_TUNNEL_ROUTES } from '../../shared/split-tunnel'
 import { STATE_DOT } from './RpcStatus'
 
 interface Props {
@@ -50,6 +51,13 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   const [nameInput, setNameInput] = useState('')
   const [tab, setTab] = useState<SettingsTab>(initialTab)
   const [splitTunnelInput, setSplitTunnelInput] = useState('')
+  // The save is all-or-nothing at the IPC boundary, so the pane pre-checks the
+  // same rule and reports the offending lines; `splitTunnelError` carries
+  // whatever SETTINGS_SET still rejects, which used to vanish into an
+  // unhandled rejection and read as a dead button.
+  const [splitTunnelError, setSplitTunnelError] = useState('')
+  const [splitTunnelSaving, setSplitTunnelSaving] = useState(false)
+  const [splitTunnelSaved, setSplitTunnelSaved] = useState(false)
   const [knownRpcs, setKnownRpcs] = useState<RpcCandidateInfo[]>([])
   const [rpcsLoading, setRpcsLoading] = useState(true)
   const [rpcsError, setRpcsError] = useState<string | null>(null)
@@ -147,6 +155,32 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
       await reloadGlobalSettings()
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Same rule SETTINGS_SET enforces, applied as the user types so a bad line is
+  // named here instead of silently rejecting the whole list.
+  const splitTunnel = useMemo(() => parseSplitTunnelRoutes(splitTunnelInput), [splitTunnelInput])
+  const splitTunnelDirty =
+    splitTunnel.routes.join('\n') !== (settings?.splitTunnelRoutes || []).join('\n') ||
+    splitTunnel.invalid.length > 0
+
+  async function saveSplitTunnel() {
+    setSplitTunnelError('')
+    setSplitTunnelSaved(false)
+    if (splitTunnel.invalid.length > 0 || splitTunnel.tooMany) return
+    setSplitTunnelSaving(true)
+    try {
+      const updated = await window.api.settingsSet({ splitTunnelRoutes: splitTunnel.routes })
+      setSettings(updated)
+      setSplitTunnelInput((updated.splitTunnelRoutes || []).join('\n'))
+      setSplitTunnelSaved(true)
+    } catch (err: unknown) {
+      // Anything main still refuses (or an IPC failure) lands here rather than
+      // in an unhandled rejection the user never sees.
+      setSplitTunnelError(err instanceof Error ? err.message : 'Failed to save routes')
+    } finally {
+      setSplitTunnelSaving(false)
     }
   }
 
@@ -525,35 +559,64 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 </label>
                 <textarea
                   value={splitTunnelInput}
-                  onChange={(e) => setSplitTunnelInput(e.target.value)}
-                  className="w-full bg-bg-tertiary border border-border text-text-primary text-sm font-mono px-3 py-2 rounded-sm focus:outline-none focus:border-border-focus h-20 resize-none"
+                  onChange={(e) => {
+                    setSplitTunnelInput(e.target.value)
+                    setSplitTunnelError('')
+                    setSplitTunnelSaved(false)
+                  }}
+                  className={`w-full bg-bg-tertiary border text-text-primary text-sm font-mono px-3 py-2 rounded-sm focus:outline-none h-20 resize-none ${
+                    splitTunnel.invalid.length > 0 || splitTunnel.tooMany
+                      ? 'border-danger focus:border-danger'
+                      : 'border-border focus:border-border-focus'
+                  }`}
                   placeholder="10.0.0.0/8&#10;172.16.0.0/12&#10;192.168.0.0/16"
                 />
+
+                {/* Why the save would be refused, said before it is clicked —
+                    the whole list is rejected if one line is bad. */}
+                {splitTunnel.invalid.length > 0 && (
+                  <p className="text-danger text-xs">
+                    Not a valid IPv4 CIDR: {splitTunnel.invalid.map((r) => `"${r}"`).join(', ')}.
+                    Each line needs an address and a prefix, like 192.168.1.0/24 — hostnames,
+                    IPv6 and 0.0.0.0/x are not accepted.
+                  </p>
+                )}
+                {splitTunnel.tooMany && (
+                  <p className="text-danger text-xs">
+                    Too many routes — {MAX_SPLIT_TUNNEL_ROUTES} is the maximum.
+                  </p>
+                )}
+                {splitTunnelError && <p className="text-danger text-xs">{splitTunnelError}</p>}
+
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={async () => {
-                      const routes = splitTunnelInput.split('\n').map((r) => r.trim()).filter(Boolean)
-                      const updated = await window.api.settingsSet({ splitTunnelRoutes: routes })
-                      setSettings(updated)
-                      setSplitTunnelInput(updated.splitTunnelRoutes.join('\n'))
-                    }}
-                    disabled={splitTunnelInput === (settings.splitTunnelRoutes || []).join('\n')}
+                    onClick={() => void saveSplitTunnel()}
+                    disabled={
+                      splitTunnelSaving ||
+                      splitTunnel.invalid.length > 0 ||
+                      splitTunnel.tooMany ||
+                      !splitTunnelDirty
+                    }
                     className="btn btn-primary text-xs px-3 disabled:opacity-30"
                   >
-                    Save Routes
+                    {splitTunnelSaving ? 'Saving...' : 'Save Routes'}
                   </button>
                   <button
                     onClick={() => {
                       const defaults = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
                       setSplitTunnelInput(defaults.join('\n'))
+                      setSplitTunnelError('')
+                      setSplitTunnelSaved(false)
                     }}
                     className="text-text-secondary text-xs hover:text-accent transition-colors"
                   >
                     Reset
                   </button>
+                  {splitTunnelSaved && <span className="text-success text-xs">Saved</span>}
                 </div>
                 <p className="text-text-tertiary text-xs">
                   CIDR routes (one per line) that bypass the VPN tunnel. Private networks are excluded by default.
+                  Applies to V2Ray, XRAY and Hysteria2 nodes, which route through tun2socks.
                 </p>
               </div>
 

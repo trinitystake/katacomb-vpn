@@ -27,7 +27,7 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage } from './connect-decisions'
+import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -141,6 +141,12 @@ let nodeIssuedFreshPeer = true
 // True when the user enabled the kill switch but arming it failed — surfaced to
 // the renderer so "protected" is never silently a lie.
 let killSwitchFailed = false
+// What the LIVE kill-switch chain was actually built with, recorded at arm time so
+// a mid-session re-arm replays the same endpoint instead of re-deriving the
+// protocol. Deliberately NOT cleared by standDownSession — that leaves the chain
+// armed on purpose, and the user must still be able to toggle LAN sharing (or turn
+// the kill switch off) in that state.
+let armedWith: { iface: string; remoteHost: string; dnsIp?: string; lanSharing: boolean } | null = null
 // True when a kill-switch TEARDOWN failed while it was armed — the DROP-all chain may
 // still be blocking traffic until the next-launch self-heal. Surfaced so the renderer
 // can warn even in the idle state (finding M6).
@@ -940,6 +946,38 @@ function clearDnsOverridden(): void {
   } catch { /* already gone */ }
 }
 
+/**
+ * Arm the kill switch for a live tunnel and remember what it was armed with.
+ * Returns false when there is no endpoint IP to whitelist, so the caller can flag
+ * killSwitchFailed: `-d 0.0.0.0/32 -j ACCEPT` matches nothing, so the DROP-all
+ * rule would swallow the tunnel's OWN outer packets and the connection would die
+ * with the interface still up and reporting "connected".
+ */
+async function armKillSwitch(
+  protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn',
+  dnsIp: string | undefined,
+  lanSharing: boolean,
+): Promise<boolean> {
+  // AmneziaWG rides the WG branch throughout: same sntl0 iface, same Endpoint=
+  // line in its config, and awg-quick owns resolv.conf like wg-quick does.
+  const isWgLike = protocol === 'wireguard' || protocol === 'amneziawg'
+  // OpenVPN has its own interface and its own `remote` line; the kill switch
+  // itself is protocol-agnostic (`-d host -j ACCEPT`), so it needs no changes.
+  const isOpenVpn = protocol === 'openvpn'
+  const iface = isWgLike ? 'sntl0' : isOpenVpn ? 'sntl-ovpn' : 'sntl-tun'
+  // Whitelist the *real* server endpoint so the tunnel can re-handshake while the
+  // kill switch is engaged.
+  const remoteHost =
+    isWgLike ? getWireGuardRemoteHost() : isOpenVpn ? getOpenVpnRemoteHost() : getV2RayRemoteHost()
+  if (!remoteHost) {
+    console.error(`[killswitch] no endpoint IP for ${protocol} — not arming (traffic would be blackholed)`)
+    return false
+  }
+  await enableKillSwitch(iface, remoteHost, { dnsIp, lanSharing })
+  armedWith = { iface, remoteHost, dnsIp, lanSharing }
+  return true
+}
+
 /** Apply DNS and kill switch settings after a successful VPN connection */
 async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'): Promise<void> {
   // New interface/session — clear the speed baseline (finding M10).
@@ -983,32 +1021,8 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v
   // Enable kill switch
   if (settings.killSwitch) {
     try {
-      // AmneziaWG rides the WG branch throughout: same sntl0 iface, same
-      // Endpoint= line in its config, and awg-quick owns resolv.conf like
-      // wg-quick does (no dns-set — v2rayDnsIp above is already null for it).
-      const isWgLike = protocol === 'wireguard' || protocol === 'amneziawg'
-      // OpenVPN has its own interface and its own `remote` line; the kill switch
-      // itself is protocol-agnostic (`-d host -j ACCEPT`), so it needs no changes.
-      const isOpenVpn = protocol === 'openvpn'
-      const vpnIface = isWgLike ? 'sntl0' : isOpenVpn ? 'sntl-ovpn' : 'sntl-tun'
-      // Whitelist the *real* server endpoint so the tunnel can re-handshake
-      // while the kill switch is engaged (was hardcoded to a useless 0.0.0.0
-      // for WireGuard — see finding H2).
-      const remoteHost =
-        isWgLike ? getWireGuardRemoteHost() : isOpenVpn ? getOpenVpnRemoteHost() : getV2RayRemoteHost()
-      // No endpoint IP means there is nothing to whitelist, and arming anyway is
-      // strictly worse than not arming: `-d 0.0.0.0/32 -j ACCEPT` matches nothing,
-      // so the DROP-all rule swallows the tunnel's OWN outer packets and the
-      // connection dies with the interface still up and reporting "connected".
-      // That placeholder is what a hostname Endpoint used to fall back to. Leave
-      // the traffic flowing and tell the user the kill switch is off instead.
-      if (!remoteHost) {
-        console.error(`[killswitch] no endpoint IP for ${protocol} — not arming (traffic would be blackholed)`)
-        killSwitchFailed = true
-        return
-      }
       const dnsIp = v2rayDnsIp ?? undefined
-      await enableKillSwitch(vpnIface, remoteHost, { dnsIp, lanSharing: settings.lanSharing })
+      if (!(await armKillSwitch(protocol, dnsIp, settings.lanSharing))) killSwitchFailed = true
     } catch (err) {
       console.error('Failed to enable kill switch:', err)
       // Don't silently leave the user thinking they're protected — flag it so
@@ -1037,10 +1051,72 @@ async function revertPostConnectSettings(): Promise<void> {
   if (isKillSwitchArmed()) {
     const teardownOk = await disableKillSwitch()
     killSwitchTeardownFailed = !teardownOk
+    if (teardownOk) armedWith = null
   } else {
     killSwitchTeardownFailed = false
+    armedWith = null
   }
   await restoreDnsOverride()
+}
+
+/**
+ * Re-apply the firewall after a mid-session Kill Switch / Local Network Sharing
+ * toggle, so the toggles mean what they say instead of taking effect at the next
+ * connect. `killswitch-on` flushes and rebuilds the chain, so a re-arm is one
+ * idempotent call. Runs under the connection lock: arming reads the endpoint that
+ * connect/disconnect are concurrently setting.
+ */
+async function reapplyFirewall(): Promise<void> {
+  const settings = loadSettings()
+  const action = decideFirewallAction({
+    killSwitch: settings.killSwitch,
+    lanSharing: settings.lanSharing,
+    armed: isKillSwitchArmed(),
+    armedLanSharing: armedWith?.lanSharing ?? false,
+    tunnelActive: isVpnActive(),
+  })
+  if (action === 'none') return
+  try {
+    if (action === 'disarm') {
+      const ok = await disableKillSwitch()
+      killSwitchTeardownFailed = !ok
+      if (ok) armedWith = null
+      return
+    }
+    if (action === 'rearm') {
+      // Needs the endpoint recorded at arm time. A chain stranded across a restart
+      // has none (startup self-heal normally reverts it), so leave it alone —
+      // turning the kill switch off still disarms.
+      if (!armedWith) return
+      await enableKillSwitch(armedWith.iface, armedWith.remoteHost, {
+        dnsIp: armedWith.dnsIp,
+        lanSharing: settings.lanSharing,
+      })
+      armedWith = { ...armedWith, lanSharing: settings.lanSharing }
+      return
+    }
+    // 'arm' — a tunnel is up and the kill switch was just switched on.
+    if (!desiredProtocol) return
+    // Mirror applyPostConnectSettings' DNS decision for the dns-set protocols:
+    // arming without a tunnel-routed resolver leaves DNS pointing at one the
+    // chain now drops. effectiveV2RayResolverIp reads the (now true) killSwitch
+    // setting, so a 'system' resolver becomes the public fallback.
+    const needsDns = desiredProtocol === 'v2ray' || desiredProtocol === 'xray'
+      || desiredProtocol === 'hysteria2' || desiredProtocol === 'openvpn'
+    const dnsIp = needsDns ? effectiveV2RayResolverIp(settings) ?? undefined : undefined
+    if (dnsIp && !isDnsOverridden()) {
+      markDnsOverridden()
+      try {
+        await runPrivileged(['dns-set', dnsIp])
+      } catch (err) {
+        console.error('Failed to set DNS:', err)
+      }
+    }
+    if (!(await armKillSwitch(desiredProtocol, dnsIp, settings.lanSharing))) killSwitchFailed = true
+  } catch (err) {
+    console.error('Failed to re-apply firewall settings:', err)
+    killSwitchFailed = true
+  }
 }
 
 /**
@@ -1723,6 +1799,13 @@ export function registerIpcHandlers(): void {
     // re-probe now so the indicator reflects the new endpoint immediately
     // instead of up to 30s later.
     if (filtered.rpcEndpoint !== undefined) onRpcEndpointChanged()
+    // Apply the firewall change now rather than at the next connect. Fire-and-
+    // forget under the lock so the toggle returns immediately instead of queueing
+    // behind an in-flight connect; failures surface through killSwitchFailed on
+    // the connection status, the same path the connect-time arm uses.
+    if (filtered.killSwitch !== undefined || filtered.lanSharing !== undefined) {
+      void withConnectionLock(reapplyFirewall)
+    }
     return saved
   })
 

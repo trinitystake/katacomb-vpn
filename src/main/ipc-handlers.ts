@@ -605,9 +605,11 @@ async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<vo
     activeSessionId = null
     activeNodeInfo = null
     activeQuota = null
-    // Report what is ACTUALLY still installed, not what the setting asked for — if
-    // arming had failed at connect time, nothing is blocking and saying otherwise
-    // would send the user hunting for a firewall rule that isn't there.
+    // The marker is written BEFORE arming, so a failed arm still reads as "armed".
+    // This is deliberate: we bias toward over-reporting traffic as blocked (one
+    // idempotent click to clear) rather than under-reporting it (user stranded). If
+    // arming truly failed, the Restore button runs killswitch-off (idempotent) and
+    // everything self-corrects.
     lastExpiry = { sessionId, nodeMoniker, reason, trafficBlocked: isKillSwitchArmed() }
     isIntentionalDisconnect = false
     sendStateChange('idle')

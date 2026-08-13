@@ -899,3 +899,47 @@ If steps 6-8 surfaced defects, fix them, re-run `npm run typecheck && npm test`,
 - **The deb daemon is a separate binary.** If you are testing on an installed `.deb`, `src/main/daemon-core.ts` changes only take effect after `npm run build` + reinstall, because the daemon runs from `resources/daemon/index.js` outside the asar. Under `npm run dev` there is no daemon and everything goes through `pkexec`, so each toggle prompts for a password once — that is expected, not a bug.
 - **`${RUN_DIR}/killswitch.state`** is written by `killswitch-on` and never read back anywhere in the tree. Pre-existing dead state — leave it alone; do not extend it with the LAN flag.
 - A stale daemon paired with a new GUI silently ignores `lanSharing` and leaves the LAN blocked. Transient (the deb ships both and the postinst restarts the unit), and not worth a version negotiation.
+
+---
+
+## Outstanding: live verification (not run)
+
+Everything above is implemented, reviewed and committed; unit tests, typecheck and
+build are clean. **The live steps in Task 7 (6-9) have NOT been run** — they need
+root, a paid on-chain session, and a second LAN machine. The final whole-branch
+review sharpened that list; run this version:
+
+1. **The bash actually emitting rules.** No unit test executes the helper.
+   `sudo iptables -S KATACOMB_KILLSWITCH` — check the ACCEPTs sit **above** `-j DROP`,
+   not merely that they exist.
+2. **The routing premise, per protocol.** The ACCEPT is necessary but not sufficient:
+   if a protocol's routing *did* capture the LAN, packets would enter the tunnel and
+   the rule would do nothing. Run the `ssh <lan-box>` check on at least two protocol
+   families — WireGuard/AmneziaWG (the `suppress_prefixlength 0` path) and
+   V2Ray/XRAY/Hysteria2 (the tun2socks `/1` path). OpenVPN (`redirect-gateway def1`)
+   is a third distinct path.
+3. **The daemon half.** `npm run dev` exercises only `pkexec`. The daemon has its own
+   copy of the argv builder and ships outside the asar, so `killswitch_on` +
+   `lanSharing` is only exercised by an installed `.deb`. A daemon that didn't restart
+   on upgrade ignores the field and leaves the LAN blocked **with no error**. Run the
+   toggle once on the installed deb and confirm `systemctl status katacomb-vpn-daemon`
+   is the new build.
+4. **Whether a mid-session arm strangles the tunnel.** `reapplyFirewall`'s `'arm'` has
+   no `assertTunnelCarriesTraffic()` after it, unlike the connect path — which runs one
+   precisely because the kill switch can kill a tunnel. Only `checkTunnelStalled` would
+   catch it, minutes later. After arming mid-session, watch the traffic-stats **rx**
+   counter keep climbing for a minute; one successful `curl` is not enough.
+5. **IPv6 reachability, not ruleset presence.** `ping6 fe80::…%<nic>` to a LAN
+   neighbour. Neighbour discovery needs `ff00::/8` (solicited-node multicast) as much
+   as `fe80::/10`, so a partial v6 arm looks like "rules present, ping still fails".
+6. **A cancelled polkit prompt** (AppImage/dev only). Cancel one deliberately and
+   confirm the warning badge reports the failure, and that the *next* toggle clears it.
+7. **Whether the hardcoded ranges cover your network.** `100.64.0.0/10` (CGNAT,
+   Tailscale) is deliberately absent — a LAN reached through such an address stays
+   blocked. Only your own topology reveals this.
+
+Known, accepted, not fixed: `killswitch-on` rebuilds the chain non-atomically (delete
+jump → flush → re-add), so toggling LAN sharing **in the stand-down state**, where the
+default route is back on the physical NIC, opens a few-millisecond unfiltered window.
+Pre-existing mechanism, newly reachable; an atomic `iptables-restore` swap would be a
+disproportionate rewrite.

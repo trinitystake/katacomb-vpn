@@ -439,3 +439,13 @@ test('decideFirewallAction ignores a LAN change while nothing is armed', () => {
     killSwitch: false, lanSharing: true, armed: false, armedLanSharing: false, tunnelActive: true,
   }), 'none')
 })
+
+test('decideFirewallAction prefers disarm over rearm when both rules match', () => {
+  // The only input class where rule order is observable: the chain is armed,
+  // the kill switch just went off, AND LAN sharing changed in the same write.
+  // Turning the kill switch off means tear the chain down — not rebuild it
+  // with new LAN exceptions.
+  assert.equal(decideFirewallAction({
+    killSwitch: false, lanSharing: true, armed: true, armedLanSharing: false, tunnelActive: true,
+  }), 'disarm')
+})

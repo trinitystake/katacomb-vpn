@@ -1077,11 +1077,15 @@ async function reapplyFirewall(): Promise<void> {
   })
   if (action === 'none') return
   try {
-    killSwitchFailed = false
     if (action === 'disarm') {
       const ok = await disableKillSwitch()
       killSwitchTeardownFailed = !ok
-      if (ok) armedWith = null
+      if (ok) {
+        armedWith = null
+        // The kill switch is intentionally off now, so there is no pending arm
+        // failure left to warn about.
+        killSwitchFailed = false
+      }
       return
     }
     if (action === 'rearm') {
@@ -1094,10 +1098,18 @@ async function reapplyFirewall(): Promise<void> {
         lanSharing: settings.lanSharing,
       })
       armedWith = { ...armedWith, lanSharing: settings.lanSharing }
+      killSwitchFailed = false
       return
     }
     // 'arm' — a tunnel is up and the kill switch was just switched on.
-    if (!desiredProtocol) return
+    if (!desiredProtocol) {
+      // A live tunnel with no known protocol (e.g. adopted from a running interface
+      // after a restart) means there is nothing to derive an endpoint from — the
+      // setting reads ON with no chain installed, so flag it rather than returning
+      // silently.
+      killSwitchFailed = true
+      return
+    }
     // Mirror applyPostConnectSettings' DNS decision for the dns-set protocols:
     // arming without a tunnel-routed resolver leaves DNS pointing at one the
     // chain now drops. effectiveV2RayResolverIp reads the (now true) killSwitch
@@ -1113,7 +1125,7 @@ async function reapplyFirewall(): Promise<void> {
         console.error('Failed to set DNS:', err)
       }
     }
-    if (!(await armKillSwitch(desiredProtocol, dnsIp, settings.lanSharing))) killSwitchFailed = true
+    killSwitchFailed = !(await armKillSwitch(desiredProtocol, dnsIp, settings.lanSharing))
   } catch (err) {
     console.error('Failed to re-apply firewall settings:', err)
     killSwitchFailed = true
@@ -2322,8 +2334,11 @@ export function registerIpcHandlers(): void {
       reconnectMaxAttempts: reconnectAttempt > 0 ? RECONNECT_MAX_ATTEMPTS : undefined,
       // Why the last session ended, if it ended on its own. No new IPC channel is
       // needed: standDownSession's sendStateChange('idle') already makes
-      // useConnection re-poll, which picks this up.
-      expired: lastExpiry ?? undefined,
+      // useConnection re-poll, which picks this up. trafficBlocked is read live
+      // rather than off the captured snapshot — turning the kill switch off from
+      // Settings while in this state (reapplyFirewall's 'disarm') must not leave
+      // the banner claiming traffic is still blocked.
+      expired: lastExpiry ? { ...lastExpiry, trafficBlocked: isKillSwitchArmed() } : undefined,
     }
   })
 

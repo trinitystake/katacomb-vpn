@@ -220,6 +220,7 @@ export interface AppSettings {
   rpcEndpoint: string
   activeWalletId: string | null
   killSwitch: boolean
+  lanSharing: boolean
   dnsResolver: string
   autoReconnect: boolean
   bookmarkedNodes: string[]

@@ -1674,7 +1674,7 @@ export function registerIpcHandlers(): void {
     if (typeof settings !== 'object' || settings === null) throw new Error('Invalid settings')
     // Only allow known setting keys
     const allowed = new Set([
-      'rpcEndpoint', 'activeWalletId', 'killSwitch', 'dnsResolver', 'autoReconnect',
+      'rpcEndpoint', 'activeWalletId', 'killSwitch', 'lanSharing', 'dnsResolver', 'autoReconnect',
       'bookmarkedNodes', 'splitTunnelRoutes',
     ])
     const filtered: Record<string, unknown> = {}
@@ -1690,6 +1690,9 @@ export function registerIpcHandlers(): void {
     }
     if (filtered.killSwitch !== undefined && typeof filtered.killSwitch !== 'boolean') {
       throw new Error('Invalid killSwitch: expected boolean')
+    }
+    if (filtered.lanSharing !== undefined && typeof filtered.lanSharing !== 'boolean') {
+      throw new Error('Invalid lanSharing: expected boolean')
     }
     if (filtered.dnsResolver !== undefined) {
       assertString(filtered.dnsResolver, 'dnsResolver')

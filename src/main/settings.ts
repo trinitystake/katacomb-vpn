@@ -52,6 +52,13 @@ export interface AppSettings {
   rpcEndpoint: string
   activeWalletId: string | null
   killSwitch: boolean
+  /**
+   * Let LAN destinations (SSH, printers, NAS) past the kill switch's DROP-all
+   * chain. Only meaningful while the kill switch is armed — with it off the LAN
+   * is already reachable, since no protocol's routing captures it. The ranges
+   * live in the root helper; this boolean is all that crosses the boundary.
+   */
+  lanSharing: boolean
   dnsResolver: string
   autoReconnect: boolean
   bookmarkedNodes: string[]
@@ -71,6 +78,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   rpcEndpoint: 'https://rpc.sentinel.co:443',
   activeWalletId: null,
   killSwitch: false,
+  lanSharing: false,
   dnsResolver: 'system',
   autoReconnect: false,
   bookmarkedNodes: [],

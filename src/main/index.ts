@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Tray, Menu, nativeImage, dialog } from 'electron'
+import { app, BrowserWindow, shell, Tray, Menu, nativeImage, nativeTheme, dialog } from 'electron'
 import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
@@ -27,6 +27,15 @@ function getIconPath(filename: string): string {
   return is.dev
     ? join(__dirname, '../../build/icons', filename)
     : join(process.resourcesPath, 'icons', filename)
+}
+
+/** Tray art is kept out of build/icons/ because electron-builder's `linux.icon`
+ *  points at that directory and derives the launcher icon set from the PNGs it
+ *  finds there — a badged 32x32 must not be a candidate. */
+function getTrayIconPath(filename: string): string {
+  return is.dev
+    ? join(__dirname, '../../build/tray', filename)
+    : join(process.resourcesPath, 'tray', filename)
 }
 
 function showWindow(): void {
@@ -66,34 +75,88 @@ function showAbout(): void {
   })
 }
 
-/** The tray image (32x32 is the tray size; fall back to 256 if that file is
- *  somehow empty so we never construct a Tray with a blank image — the
- *  broken-image triangle). */
-function trayImage(): Electron.NativeImage {
-  const icon = nativeImage.createFromPath(getIconPath('32x32.png'))
-  return icon.isEmpty() ? nativeImage.createFromPath(getIconPath('256x256.png')) : icon
+/** Which of the badged tray icons (build/tray/, see scripts/build-icons.mjs) a
+ *  connection state shows. The badge SHAPE carries the state — none / hollow
+ *  ring / solid disc — so it survives a greyscale or colour-blind reading; the
+ *  colour only reinforces it. */
+function trayIconName(state: ConnectionInfo['state']): string {
+  if (state === 'connected') return 'connected'
+  return state === 'connecting' ? 'connecting' : 'disconnected'
 }
+
+/** The tray is a flat single-colour silhouette (no background tile), like its
+ *  neighbours in the panel — so unlike the launcher/About icon it needs a
+ *  variant per panel theme. Filenames are keyed by the panel they're FOR, which
+ *  is exactly what this returns, so there's no inversion to get backwards. */
+function trayPanel(): 'dark' | 'light' {
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+}
+
+/** Which tray PNG a state wants right now: state badge + current panel ink. */
+function trayIconKeyFor(state: ConnectionInfo['state']): string {
+  return `${trayIconName(state)}-${trayPanel()}`
+}
+
+/** Load one of the tray PNGs by key (32x32 is the tray size; fall back to 256 if
+ *  that file is somehow empty so we never construct a Tray with a blank image —
+ *  the broken-image triangle). */
+function trayImage(key: string): Electron.NativeImage {
+  const icon = nativeImage.createFromPath(getTrayIconPath(`${key}-32x32.png`))
+  return icon.isEmpty() ? nativeImage.createFromPath(getTrayIconPath(`${key}-256x256.png`)) : icon
+}
+
+// Which tray PNG is currently on the icon, so a repaint that wouldn't change it
+// can be skipped. Every setImage is a visible repaint of the panel item, and
+// nativeTheme fires 'updated' three times per theme toggle (measured on Cinnamon,
+// all three carrying the same value) — painting each one is what made the icon
+// blink before settling. Guarding on the filename collapses the burst to the one
+// repaint that actually changes something, with no delay added.
+let trayIconKey = ''
 
 function createTrayIcon(): void {
-  tray = new Tray(trayImage())
+  const info = getConnectionInfo()
+  trayIconKey = trayIconKeyFor(info.state)
+  tray = new Tray(trayImage(trayIconKey))
   tray.on('click', () => toggleWindow())
-  refreshTray(getConnectionInfo())
+  refreshTray(info)
+  // The user can flip their panel theme without restarting the app; re-pick the
+  // ink variant when that happens rather than leaving a light-panel icon up
+  // against a freshly-dark one. Repaint on the event itself, not on a timer:
+  // shouldUseDarkColors is already updated by the time the event arrives (it
+  // leads the first firing by ~60-80ms), so there is nothing to wait for, and
+  // any debounce here is latency the user reads as the icon lagging its
+  // neighbours. Those neighbours are symbolic icons the panel recolours itself,
+  // which we can't match exactly — Tray takes a bitmap, so a swap is the only
+  // mechanism available — but the event is as early as Electron will tell us.
+  nativeTheme.on('updated', () => refreshTray(getConnectionInfo()))
 }
 
-/** Rebuild the tray tooltip + context menu to reflect the current connection state. */
+/** Rebuild the tray icon, tooltip + context menu to reflect the current connection state. */
 function refreshTray(info: ConnectionInfo): void {
   if (!tray) return
   const connected = info.state === 'connected'
+  const connecting = info.state === 'connecting'
   const where = info.nodeMoniker ? ` (${info.nodeMoniker})` : ''
+  const status = connected ? `Connected${where}` : connecting ? `Connecting…${where}` : 'Disconnected'
 
-  tray.setToolTip(connected ? `Katacomb VPN — Connected${where}` : 'Katacomb VPN — Disconnected')
+  const iconKey = trayIconKeyFor(info.state)
+  if (iconKey !== trayIconKey) {
+    tray.setImage(trayImage(iconKey))
+    trayIconKey = iconKey
+  }
+  tray.setToolTip(`Katacomb VPN — ${status}`)
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: connected ? `Connected${where}` : 'Disconnected', enabled: false },
+    { label: status, enabled: false },
     { type: 'separator' },
-    connected
-      ? { label: 'Disconnect', click: () => { void performDisconnect() } }
-      : { label: 'Connect', click: () => triggerTrayConnect() },
+    // No action while a bring-up is in flight: "Connect" would queue a second
+    // one behind the connection lock (this path spends on-chain funds), and
+    // "Disconnect" would just block until the connect it is racing finishes.
+    ...(connecting
+      ? []
+      : [connected
+        ? { label: 'Disconnect', click: () => { void performDisconnect() } }
+        : { label: 'Connect', click: () => triggerTrayConnect() }]),
     { label: 'Show Window', click: () => showWindow() },
     { label: 'About', click: () => showAbout() },
     { type: 'separator' },

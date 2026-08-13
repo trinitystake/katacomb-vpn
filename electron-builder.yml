@@ -34,12 +34,20 @@ extraResources:
     to: ../LICENSE
   - from: THIRD-PARTY-LICENSES.md
     to: ../THIRD-PARTY-LICENSES.md
-  # App icons → resources/icons/ so the tray (getIconPath in main) can load them
-  # at runtime. `linux.icon` below only sets the launcher/desktop icon; it is NOT
-  # a path readable via nativeImage.createFromPath, so without this copy the tray
-  # icon renders as a broken-image triangle in the packaged app.
+  # App icons → resources/icons/ so main (getIconPath) can load them at runtime.
+  # `linux.icon` below only sets the launcher/desktop icon; it is NOT a path
+  # readable via nativeImage.createFromPath, so without this copy the About
+  # dialog's icon renders as a broken-image triangle in the packaged app.
   - from: build/icons/
     to: icons/
+    filter:
+      - "**/*"
+  # Badged per-state tray icons (getTrayIconPath). Deliberately a sibling of
+  # build/icons/ rather than a subdirectory of it: `linux.icon` derives the
+  # launcher icon set from the PNGs it finds under build/icons, and a badged
+  # 32x32 must not be a candidate for it.
+  - from: build/tray/
+    to: tray/
     filter:
       - "**/*"
 linux:

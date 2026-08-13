@@ -689,7 +689,7 @@ async function assertTunnelCarriesTraffic(): Promise<void> {
 // the onV2RayUnexpectedExit pattern: ipc-handlers owns the state and notifies on
 // change — callers register a listener rather than us reaching into their module.
 export interface ConnectionInfo {
-  state: 'connected' | 'idle'
+  state: 'connected' | 'connecting' | 'idle'
   nodeMoniker?: string
   nodeCountry?: string
 }
@@ -719,10 +719,31 @@ function sendStateChange(state: 'connected' | 'idle'): void {
   connectionStateListener?.({ state, nodeMoniker: activeNodeInfo?.moniker, nodeCountry: activeNodeInfo?.country })
 }
 
+/**
+ * Tray-only: a bring-up is in flight. Deliberately NOT part of sendStateChange —
+ * the renderer drives its own progress UI off the CONNECTION_CONNECT promise and
+ * the CONNECTION_RECONNECTING broadcast, and there is no chain-path change to
+ * publish because no tunnel exists yet.
+ *
+ * Every path that calls this MUST end at notifyTraySettled() (or a
+ * sendStateChange), or the tray sits on a stale "connecting" badge forever.
+ */
+function notifyTrayConnecting(): void {
+  connectionStateListener?.({ state: 'connecting', nodeMoniker: activeNodeInfo?.moniker, nodeCountry: activeNodeInfo?.country })
+}
+
+/** Tray-only: republish whatever is actually true now. Idempotent. */
+function notifyTraySettled(): void {
+  connectionStateListener?.(getConnectionInfo())
+}
+
 function sendReconnecting(attempt: number, maxAttempts: number): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.CONNECTION_RECONNECTING, attempt, maxAttempts)
   }
+  // The tunnel is down but nothing has broadcast 'idle' yet — without this the
+  // tray keeps claiming "Connected" for the whole retry ladder.
+  notifyTrayConnecting()
 }
 
 function applySession(
@@ -1274,7 +1295,11 @@ async function attemptReconnect(): Promise<void> {
     hasSession: !!activeSessionId,
   })
 
-  if (decision.action === 'abort') return
+  // Nothing else broadcasts here, so a ladder that aborts mid-flight (e.g. the
+  // user switched auto-reconnect off between attempts) would strand the tray on
+  // its "connecting" badge. give-up doesn't need this — both its exits below end
+  // in a sendStateChange.
+  if (decision.action === 'abort') { notifyTraySettled(); return }
   if (decision.action === 'give-up') {
     console.log('[reconnect] Max attempts reached, giving up')
     // When the node cut the tunnel slightly before our own estimate said it would,
@@ -2082,6 +2107,10 @@ export function registerIpcHandlers(): void {
     // sets this — auto-reconnect never silently downgrades DNS.
     const dnsFallback = params.dnsFallback === true &&
       (params.protocol === 'wireguard' || params.protocol === 'amneziawg')
+    // Badge the tray before taking the lock: a connect queued behind a disconnect
+    // is still a connect the user asked for, and this is the slow part (on-chain
+    // tx, handshake, possibly a polkit prompt).
+    notifyTrayConnecting()
     // Serialize tunnel bring-up against disconnect/reconnect so overlapping ops
     // can't orphan a child process (finding M1).
     return withConnectionLock(async () => {
@@ -2307,7 +2336,9 @@ export function registerIpcHandlers(): void {
       }
 
       throw new Error('No active VPN instance')
-    })
+      // The success branches already published 'connected'; this is what puts the
+      // tray back to the truth when the bring-up threw instead.
+    }).finally(notifyTraySettled)
   })
 
   // Connection: Disconnect

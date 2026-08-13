@@ -188,6 +188,14 @@ export function pinWireguardEndpoint(
 const MAX_BYPASS_ROUTES = 64
 
 /**
+ * Trailing sentinel appended to the helper's `killswitch-on` argv to request the
+ * local-network ACCEPT rules. A sentinel rather than a fourth positional arg
+ * because the DNS arg before it is optional. **The bash helper hardcodes this
+ * same literal** (LAN_SHARING_ARG) — change both together.
+ */
+export const LAN_SHARING_ARG = 'lan-sharing'
+
+/**
  * True if `cidr` is a well-formed IPv4 CIDR safe to install as a split-tunnel
  * bypass route. Rejects the default-route swallow vectors (`/0`, `0.0.0.0/x`)
  * and out-of-range octets/prefixes.

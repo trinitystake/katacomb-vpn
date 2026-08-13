@@ -21,6 +21,7 @@ import {
   isIPv4,
   isValidInterfaceName,
   isValidSocksAddr,
+  LAN_SHARING_ARG,
 } from './config-guard'
 import { verifyBinaryIntegrity } from './binary-integrity'
 import {
@@ -249,11 +250,17 @@ export function handleRequest(req: DaemonRequest, deps: DaemonDeps): DaemonRespo
         // tunnel the chain is meant to protect. Refuse rather than install a
         // kill switch that can only break the connection.
         if (a.remoteHost === '0.0.0.0') return fail('killswitch_on: remoteHost 0.0.0.0 whitelists nothing')
+        if (a.lanSharing !== undefined && typeof a.lanSharing !== 'boolean') {
+          return fail('killswitch_on: invalid lanSharing')
+        }
         const helperArgs = ['killswitch-on', a.iface, a.remoteHost]
         if (a.dnsIp !== undefined && a.dnsIp !== null) {
           if (typeof a.dnsIp !== 'string' || !isIPv4(a.dnsIp)) return fail('killswitch_on: invalid dnsIp')
           helperArgs.push(a.dnsIp)
         }
+        // Trailing, so the helper's `${!#}` check finds it and the DNS arg keeps
+        // its position.
+        if (a.lanSharing === true) helperArgs.push(LAN_SHARING_ARG)
         deps.runHelper(helperArgs)
         return reply()
       }

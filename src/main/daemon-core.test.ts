@@ -260,3 +260,33 @@ test('killswitch_on refuses the 0.0.0.0 whitelist that blackholes the tunnel', (
   assert.equal(res.ok, false)
   assert.equal(helperCalls.length, 0)
 })
+
+test('killswitch_on appends the LAN sharing token when asked', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('killswitch_on', { iface: 'sntl0', remoteHost: '203.0.113.7', lanSharing: true }), deps)
+  assert.equal(res.ok, true)
+  assert.deepEqual(helperCalls, [['killswitch-on', 'sntl0', '203.0.113.7', 'lan-sharing']])
+})
+
+test('killswitch_on keeps the LAN token trailing, after the DNS arg', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(
+    req('killswitch_on', { iface: 'sntl0', remoteHost: '203.0.113.7', dnsIp: '1.1.1.1', lanSharing: true }),
+    deps,
+  )
+  assert.equal(res.ok, true)
+  assert.deepEqual(helperCalls, [['killswitch-on', 'sntl0', '203.0.113.7', '1.1.1.1', 'lan-sharing']])
+})
+
+test('killswitch_on omits the LAN token when the flag is false or absent', () => {
+  const { deps, helperCalls } = makeDeps()
+  assert.equal(handleRequest(req('killswitch_on', { iface: 'sntl0', remoteHost: '203.0.113.7', lanSharing: false }), deps).ok, true)
+  assert.deepEqual(helperCalls, [['killswitch-on', 'sntl0', '203.0.113.7']])
+})
+
+test('killswitch_on rejects a non-boolean lanSharing rather than coercing it', () => {
+  const { deps, helperCalls } = makeDeps()
+  const res = handleRequest(req('killswitch_on', { iface: 'sntl0', remoteHost: '203.0.113.7', lanSharing: 'yes' }), deps)
+  assert.equal(res.ok, false)
+  assert.deepEqual(helperCalls, [])
+})

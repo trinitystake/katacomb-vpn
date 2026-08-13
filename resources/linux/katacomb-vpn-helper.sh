@@ -28,6 +28,19 @@ OVPN_LOG_FILE="${RUN_DIR}/openvpn.log"
 # helper wrote survives on disk, stranding DNS on the tunnel resolver).
 PERSIST_DIR="/var/lib/katacomb-vpn"
 
+# --- Local network sharing ---
+# Destinations that stay reachable while the kill switch is armed, so the user can
+# still reach their own LAN. Hardcoded HERE on purpose: the app sends one boolean
+# and never a range, so nothing a compromised renderer — or the unauthenticated
+# daemon socket — can say turns this into a hole to a public address.
+# An ACCEPT in OUTPUT only permits; it does not route. A packet reaches the
+# physical NIC only if the routing table already decided the destination was
+# local, so these rules cannot pull tunnel traffic out of the tunnel.
+LAN_SHARING_ARG="lan-sharing"
+LAN_RANGES_V4=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 224.0.0.0/4 255.255.255.255/32)
+# fe80::/10 also unbreaks neighbour discovery, which the v6 chain drops today.
+LAN_RANGES_V6=(fe80::/10 fc00::/7 ff00::/8)
+
 # --- Input validation helpers ---
 
 # Validate an IPv4 address (strict: digits and dots only)
@@ -267,12 +280,18 @@ ipv6_killswitch_off() {
 
 ipv6_killswitch_on() {
   local vpn_iface="$1"
+  local lan_sharing="${2:-0}"
   ipv6_killswitch_off
-  # &&-chained so a partial failure short-circuits and the caller can clean up.
+  # Short-circuited so a partial failure aborts and the caller can clean up.
   ip6tables -w 5 -N "$CHAIN6" &&
   ip6tables -w 5 -A "$CHAIN6" -o lo -j ACCEPT &&
   ip6tables -w 5 -A "$CHAIN6" -o "$vpn_iface" -j ACCEPT &&
-  ip6tables -w 5 -A "$CHAIN6" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT &&
+  ip6tables -w 5 -A "$CHAIN6" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
+  if [[ "$lan_sharing" == "1" ]]; then
+    for range in "${LAN_RANGES_V6[@]}"; do
+      ip6tables -w 5 -A "$CHAIN6" -d "$range" -j ACCEPT || return 1
+    done
+  fi
   ip6tables -w 5 -A "$CHAIN6" -j DROP &&
   ip6tables -w 5 -A OUTPUT -j "$CHAIN6"
 }
@@ -499,6 +518,14 @@ case "${1:-}" in
     VPN_IFACE="${2:-}"
     REMOTE_HOST="${3:-}"
     DNS_IP="${4:-}"
+    # The LAN flag is a TRAILING sentinel token, so `killswitch-on <if> <host>` and
+    # `killswitch-on <if> <host> <dns>` keep their exact meaning. It can collide
+    # with neither $2 (an interface name) nor $3/$4 (IPv4 literals).
+    LAN_SHARING=0
+    if [[ "${!#}" == "$LAN_SHARING_ARG" ]]; then
+      LAN_SHARING=1
+      [[ "$DNS_IP" == "$LAN_SHARING_ARG" ]] && DNS_IP=""
+    fi
 
     validate_iface "$VPN_IFACE"
     validate_ipv4 "$REMOTE_HOST"
@@ -541,6 +568,12 @@ case "${1:-}" in
     fi
     # Allow established/related connections (for the tunnel itself)
     iptables -w 5 -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    # Local network sharing — must precede the DROP below.
+    if [[ "$LAN_SHARING" == "1" ]]; then
+      for range in "${LAN_RANGES_V4[@]}"; do
+        iptables -w 5 -A "$CHAIN" -d "$range" -j ACCEPT
+      done
+    fi
     # Drop everything else
     iptables -w 5 -A "$CHAIN" -j DROP
 
@@ -550,7 +583,7 @@ case "${1:-}" in
     # IPv6: no v6 server/DNS to whitelist, so block all native v6 egress except
     # loopback + the tunnel. Best-effort — must never abort the IPv4 kill switch.
     if ipv6_available; then
-      ipv6_killswitch_on "$VPN_IFACE" || { ipv6_killswitch_off; echo "Warning: IPv6 kill switch setup failed; IPv4 kill switch active" >&2; }
+      ipv6_killswitch_on "$VPN_IFACE" "$LAN_SHARING" || { ipv6_killswitch_off; echo "Warning: IPv6 kill switch setup failed; IPv4 kill switch active" >&2; }
     fi
 
     # Save state
@@ -658,7 +691,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "Usage: katacomb-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|ovpn-up <config>|ovpn-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns]|killswitch-off|dns-set <ip>|dns-restore}" >&2
+    echo "Usage: katacomb-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|ovpn-up <config>|ovpn-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns] [lan-sharing]|killswitch-off|dns-set <ip>|dns-restore}" >&2
     exit 1
     ;;
 esac

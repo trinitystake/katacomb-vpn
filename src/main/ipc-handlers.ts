@@ -1077,6 +1077,7 @@ async function reapplyFirewall(): Promise<void> {
   })
   if (action === 'none') return
   try {
+    killSwitchFailed = false
     if (action === 'disarm') {
       const ok = await disableKillSwitch()
       killSwitchTeardownFailed = !ok

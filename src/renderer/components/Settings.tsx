@@ -433,6 +433,29 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                   />
                 </div>
 
+                {/* Local network sharing — a hole in the kill switch's DROP-all
+                    chain, so it only means anything while that chain is armed.
+                    With the kill switch off the LAN is already reachable: no
+                    protocol's routing captures it. */}
+                <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
+                  <div>
+                    <span className="text-text-primary text-sm">Local Network Sharing</span>
+                    <p className="text-text-tertiary text-xs mt-0.5">
+                      {settings.killSwitch
+                        ? 'Reach other devices on your network — SSH, printers, NAS — while the kill switch is on. This traffic stays on your LAN and is not encrypted by the VPN.'
+                        : 'Only applies while the kill switch is on. Your local network is already reachable without it.'}
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={settings.lanSharing}
+                    disabled={!settings.killSwitch}
+                    onChange={async (checked) => {
+                      const updated = await window.api.settingsSet({ lanSharing: checked })
+                      setSettings(updated)
+                    }}
+                  />
+                </div>
+
                 {/* Auto-Reconnect */}
                 <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
                   <div>

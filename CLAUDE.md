@@ -280,6 +280,18 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   being spent (`ActiveSessions`' `quotaUsedUp`) — otherwise it buys a handshake and a
   password prompt for a tunnel `startQuotaWatchdog` stands down at its next 15 s tick.
   **End** stays enabled there; it is the action that fits.
+- **Local network sharing is a firewall exception, not a routing one.** No protocol's
+  routing captures the LAN (wg-quick/awg-quick use `suppress_prefixlength 0`, OpenVPN
+  emits `redirect-gateway def1`, tun2socks uses the `/1` halves — a LAN route is more
+  specific than all of them), so the only thing that blocks it is the kill switch's
+  DROP-all chain. `lanSharing` therefore adds ACCEPT rules and nothing else. **The
+  ranges are hardcoded in the bash helper** (`LAN_RANGES_V4`/`_V6`) and only a boolean
+  crosses the boundary — never accept a range from the app, and never wire
+  `splitTunnelRoutes` (which is tun2socks-only routing, and accepts public CIDRs) into
+  the firewall. Kill Switch and LAN Sharing now apply **live**: `SETTINGS_SET` runs
+  `reapplyFirewall()` under `withConnectionLock`, and the pure `decideFirewallAction`
+  keys off the **armed marker**, not the connection — which is what lets the user
+  disarm the stand-down ("expired, traffic blocked") chain without a restart.
 
 ### Session lifecycle (verified against live mainnet, not inferred)
 

@@ -7,7 +7,7 @@ import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
 import { checkFunds, insufficientFundsMessage, udvpnOf } from '../shared/funds'
 import { isRpcConnectivityError, rpcHostLabel } from '../shared/rpc-health'
 import { DERIVE_PREVIEW_MAX_COUNT } from '../shared/hd-path'
-import { getRpcHealth, onRpcEndpointChanged, onVpnStateChanged, probeAll, reportRpcFailure } from './rpc-monitor'
+import { getRpcHealth, onRpcEndpointChanged, onChainPathChanged, probeAll, reportRpcFailure } from './rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
   hasStoredWallet,
@@ -713,7 +713,7 @@ function sendStateChange(state: 'connected' | 'idle'): void {
   // The chain is queried only while the tunnel is down, so the RPC pill's state
   // is a function of this transition — publish it now instead of leaving the
   // old one up for the rest of the 30s poll window.
-  onVpnStateChanged()
+  onChainPathChanged()
   connectionStateListener?.({ state, nodeMoniker: activeNodeInfo?.moniker, nodeCountry: activeNodeInfo?.country })
 }
 
@@ -1817,7 +1817,10 @@ export function registerIpcHandlers(): void {
     // behind an in-flight connect; failures surface through killSwitchFailed on
     // the connection status, the same path the connect-time arm uses.
     if (filtered.killSwitch !== undefined || filtered.lanSharing !== undefined) {
-      void withConnectionLock(reapplyFirewall)
+      // Arming/disarming changes whether anything reaches the chain at all, so the
+      // RPC indicator is a function of it — notably when the user turns the kill
+      // switch off to end an "expired, traffic blocked" state.
+      void withConnectionLock(reapplyFirewall).then(onChainPathChanged)
     }
     return saved
   })

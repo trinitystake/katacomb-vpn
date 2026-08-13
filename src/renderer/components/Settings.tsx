@@ -655,6 +655,16 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 </p>
               )}
 
+              {/* Same trap as the pause, one step further along: here the chain
+                  really is unreachable, so the endpoint looks guilty. */}
+              {rpcHealth.state === 'blocked' && (
+                <p className="text-text-tertiary text-xs">
+                  Blocked by the kill switch, which stayed on after your session ended so nothing leaves
+                  the machine untunnelled. Use “Restore internet” in the banner, or turn the kill switch
+                  off under General — changing endpoints will not resume it.
+                </p>
+              )}
+
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -676,10 +686,13 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 <div className="flex items-center justify-between">
                   {/* While the tunnel is up these probes travel through it, so
                       they say nothing about the latency you would get once
-                      disconnected — which is the only time the app uses them. */}
+                      disconnected — which is the only time the app uses them.
+                      Behind an armed kill switch they all fail, which would read
+                      as every endpoint being down rather than as our own firewall. */}
                   <span className="text-text-secondary text-xs">
                     Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>, fastest first
-                    {rpcHealth.state === 'suspended' ? ' (timed through the VPN tunnel)' : ''}:
+                    {rpcHealth.state === 'suspended' ? ' (timed through the VPN tunnel)' : ''}
+                    {rpcHealth.state === 'blocked' ? ' (all unreachable while the kill switch is on)' : ''}:
                   </span>
                   {rpcsLoading ? (
                     <span className="text-text-tertiary text-xs flex items-center gap-1">

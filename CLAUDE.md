@@ -379,6 +379,24 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   only the first meant a rate-limited endpoint (429 from `as-rpc.sentineldao.com`) both
   surfaced raw and never reached `reportRpcFailure()`. Match 429/502/503/504 only — a
   400 is the chain rejecting the request and keeps its own message.
+- **A probe grades the PATH, not the endpoint — so never publish a fault the path
+  explains.** The probe fired the instant a tunnel drops measures routes, resolver and
+  Chromium's socket pool being restored: one dropped SYN costs 1s, two cost 3s, against a
+  2500ms "slow" threshold and an endpoint that answers in ~400ms. That put "RPC slow" on
+  screen for the rest of the 30s poll window every time a session ended, with a banner
+  offering to switch away from a healthy endpoint. Two rules in `rpc-monitor.ts` keep it
+  honest, and both must hold: **`needsConfirmation`** (pure, in `rpc-health.ts`) holds a
+  *new* fault for one re-probe `CONFIRM_DELAY_MS` later — good news is never delayed, and
+  an endpoint already accused is not re-confirmed; **`unprobedState()`** publishes
+  `suspended` / `blocked` and sends NOTHING while our own tunnel or our own kill-switch
+  chain is what stops the traffic (order matters — a connected tunnel with the kill switch
+  on is `suspended`). `blocked` exists because `standDownSession` deliberately leaves the
+  DROP-all chain armed after expiry: reported as `down` it accused the endpoint and offered
+  a switch that changes nothing. Both are `isChainUnreachable` (the query really failed and
+  main returned an empty list) but neither is a fault the RpcBanner may warn about.
+  **Every place that changes that path must call `onChainPathChanged()`** — `sendStateChange`,
+  `reapplyFirewall`'s live kill-switch toggle, and the startup `healStrandedKillSwitch` —
+  or the pill sits a full poll behind reality.
 - BIP-39 validation lives in `src/shared/mnemonic.ts` (`checkMnemonic`, pure + unit-tested):
   word list, word count and **checksum**, re-run on every keystroke so the Import button
   only enables on a phrase that will actually import. It uses `@scure/bip39` — the package

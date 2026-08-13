@@ -7,7 +7,10 @@ export const STATE_DOT: Record<string, string> = {
   ok: 'bg-success',
   degraded: 'bg-warning',
   down: 'bg-danger',
+  // Grey, not red: like `suspended`, this is the app doing what it was told, not
+  // an endpoint failing.
   suspended: 'bg-text-tertiary',
+  blocked: 'bg-text-tertiary',
   unknown: 'bg-text-tertiary',
 }
 
@@ -26,6 +29,9 @@ export default function RpcStatus() {
     `RPC: ${host}`,
     health.state === 'suspended'
       ? 'Paused while the VPN is connected: balances, sessions and plans come from the cache and no query is sent through the tunnel.\nIt resumes on disconnect — switching endpoints will not clear it.'
+      : null,
+    health.state === 'blocked'
+      ? 'The kill switch is still blocking all traffic after the session ended, so nothing reaches the chain.\nRestore internet from the banner, or turn the kill switch off — switching endpoints will not clear it.'
       : null,
     health.chainId ? `Chain: ${health.chainId}` : null,
     health.height !== null ? `Height: ${health.height.toLocaleString('en')}` : null,

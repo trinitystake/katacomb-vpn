@@ -14,7 +14,12 @@ export interface RpcProbe {
   error: string | null
 }
 
-export type RpcState = 'ok' | 'degraded' | 'down' | 'suspended' | 'unknown'
+/**
+ * `suspended` and `blocked` are states of OUR OWN making, not of the endpoint:
+ * the tunnel carries the traffic, or the kill switch is dropping it. Both mean
+ * "not measured", and neither is a fault to be fixed by changing endpoint.
+ */
+export type RpcState = 'ok' | 'degraded' | 'down' | 'suspended' | 'blocked' | 'unknown'
 
 export interface RpcHealth extends RpcProbe {
   state: RpcState
@@ -72,6 +77,12 @@ export function rpcHealthLabel(h: RpcHealth): string {
       // Name the cause in the label. Grey + "paused" alone reads as a fault, and
       // the natural response — switching endpoints — cannot clear it.
       return 'RPC paused (VPN)'
+    case 'blocked':
+      // A session that expired with the kill switch on leaves the DROP-all chain
+      // armed deliberately, so nothing reaches the chain. Reported as `down` it
+      // accused the endpoint and offered a switch that changes nothing; the fix
+      // is the expiry banner's Restore button, or turning the kill switch off.
+      return 'RPC blocked (kill switch)'
     case 'unknown':
       return 'RPC checking'
   }
@@ -79,12 +90,40 @@ export function rpcHealthLabel(h: RpcHealth): string {
 
 /**
  * Should a list that came back empty be presented as "couldn't ask" rather than
- * "nothing there"? Only `down` qualifies: a `degraded` endpoint answered, so its
- * empty list is real (the banner warns about slow/lagging separately), and while
- * `suspended` main returns empty by design and the UI already says so.
+ * "nothing there"? A `degraded` endpoint answered, so its empty list is real (the
+ * banner warns about slow/lagging separately), and while `suspended` main returns
+ * empty by design and the UI already says so. `down` and `blocked` are the two
+ * where the query really was attempted and really did fail.
  */
 export function isChainUnreachable(state: RpcState): boolean {
-  return state === 'down'
+  return state === 'down' || state === 'blocked'
+}
+
+/**
+ * Would publishing this reading be a NEW accusation against the endpoint, made
+ * on a single sample? Then hold it until a second probe agrees.
+ *
+ * A probe measures the whole path, and the path is not the endpoint. The first
+ * probe after a tunnel teardown races the local network being restored — routes,
+ * resolver, Chromium's socket pool — and a single dropped SYN costs a second,
+ * two cost three, against a 2500ms "slow" threshold and an endpoint that answers
+ * in ~400ms. That is what put "RPC slow" on screen for the rest of the 30s poll
+ * window every time a session ended, with a banner offering to switch away from
+ * an endpoint that was never at fault. Same shape at startup, where the first
+ * probe races healStrandedKillSwitch() flushing a leftover DROP-all chain.
+ *
+ * Good news is published immediately: a probe that came back healthy has already
+ * proved the whole path works, so there is nothing left to confirm. And an
+ * endpoint already published as faulty is not re-confirmed — the accusation has
+ * been made, and later readings only refresh its figures.
+ *
+ * The same rule tunnelCarriesTraffic follows ("only both failing, repeatedly, is
+ * a verdict") and the one reportRpcFailure already assumes ("one flaky query
+ * would then strand the indicator on red").
+ */
+export function needsConfirmation(probed: RpcState, published: RpcState): boolean {
+  if (probed === 'ok') return false
+  return published !== 'down' && published !== 'degraded'
 }
 
 /** Strip scheme and default port for display: 'https://rpc.sentinel.co:443' → 'rpc.sentinel.co'. */

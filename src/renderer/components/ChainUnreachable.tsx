@@ -13,6 +13,17 @@ export default function ChainUnreachable({ what }: { what: string }) {
   const { openSettings } = useNavigation()
   if (!isChainUnreachable(state)) return null
 
+  // Both states mean the query failed, but only one of them is the endpoint's
+  // doing — pointing at the RPC settings when our own kill switch is dropping
+  // the traffic sends the user to fix something that isn't broken.
+  if (state === 'blocked') {
+    return (
+      <p className="text-warning text-xs">
+        The kill switch is blocking all traffic, so {what} couldn't be loaded. Restore internet to see it.
+      </p>
+    )
+  }
+
   return (
     <p className="text-warning text-xs">
       Couldn't reach the blockchain, so {what} may be incomplete.{' '}

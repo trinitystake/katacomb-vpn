@@ -5,6 +5,7 @@ import {
   degradedReason,
   isChainUnreachable,
   isRpcConnectivityError,
+  needsConfirmation,
   pickBestRpc,
   rpcHealthLabel,
   rpcHostLabel,
@@ -73,15 +74,44 @@ test('rpcHealthLabel covers every state', () => {
   // is indistinguishable from a fault, and the user's first move was to blame
   // the endpoint and switch it.
   assert.equal(rpcHealthLabel(health('suspended')), 'RPC paused (VPN)')
+  // Same reasoning as the pause: our own firewall is the cause, so name it.
+  // Presented as a fault, the user's move is to switch endpoints, which cannot help.
+  assert.equal(rpcHealthLabel(health('blocked')), 'RPC blocked (kill switch)')
   assert.equal(rpcHealthLabel(health('unknown')), 'RPC checking')
 })
 
-test('isChainUnreachable flags only down — a degraded endpoint still answered', () => {
+test('isChainUnreachable flags the states where the chain was not reached', () => {
   assert.equal(isChainUnreachable('down'), true)
+  // Blocked queries DO fail — main returns empty lists, and "you have no
+  // subscriptions" must not be how that reads. Unlike suspended, the handlers
+  // do not short-circuit to the cache here: no tunnel is up.
+  assert.equal(isChainUnreachable('blocked'), true)
   assert.equal(isChainUnreachable('degraded'), false)
   assert.equal(isChainUnreachable('suspended'), false)
   assert.equal(isChainUnreachable('ok'), false)
   assert.equal(isChainUnreachable('unknown'), false)
+})
+
+test('needsConfirmation holds a NEW fault, publishes a healthy reading immediately', () => {
+  // The reading that started this: the probe fired the instant the tunnel came
+  // down measured the local path being restored, and "RPC slow" was published
+  // about an endpoint that answers in ~400ms.
+  assert.equal(needsConfirmation('degraded', 'suspended'), true)
+  assert.equal(needsConfirmation('down', 'suspended'), true)
+  assert.equal(needsConfirmation('degraded', 'ok'), true)
+  assert.equal(needsConfirmation('down', 'unknown'), true)
+  // Good news is never delayed — there is nothing to be wrong about.
+  assert.equal(needsConfirmation('ok', 'suspended'), false)
+  assert.equal(needsConfirmation('ok', 'down'), false)
+})
+
+test('needsConfirmation does not re-confirm an endpoint already published as faulty', () => {
+  // Already accused: further bad readings just refresh the figures, and holding
+  // them would strand the pill on a stale latency.
+  assert.equal(needsConfirmation('down', 'down'), false)
+  assert.equal(needsConfirmation('degraded', 'degraded'), false)
+  assert.equal(needsConfirmation('down', 'degraded'), false)
+  assert.equal(needsConfirmation('degraded', 'down'), false)
 })
 
 test('rpcHostLabel strips scheme, default port and trailing slash', () => {

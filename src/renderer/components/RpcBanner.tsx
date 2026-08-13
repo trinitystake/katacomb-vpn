@@ -11,8 +11,10 @@ import Spinner from './Spinner'
  *
  * Deliberately never switches on its own: the endpoint that reads your balance
  * is the endpoint that broadcasts your payments, so the swap stays an explicit
- * act. Hidden while the VPN is up ('suspended'), where an unreachable chain is
- * expected rather than broken.
+ * act. Hidden for the two states of our own making — 'suspended' (our tunnel
+ * carries the traffic) and 'blocked' (our kill switch drops it) — where an
+ * unreachable chain is expected rather than broken, and where switching
+ * endpoints is the one thing that cannot help.
  */
 export default function RpcBanner() {
   const health = useRpcHealth()

@@ -9,7 +9,7 @@ import {
   performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
-import { startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
+import { onChainPathChanged, startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
 import { sweepStaleSessionFiles } from './chain-service'
 import { migrateLegacyUserData, dedupeWalletEntries, migrateProviderModeToWallet } from './settings'
 import { listProviders } from './provider-service'
@@ -296,7 +296,13 @@ app.whenReady().then(() => {
   detectExistingConnection()
   // If a previous run left a kill-switch chain stranded (crash/OOM mid-teardown),
   // clear it now that we know we're not connected. Fire-and-forget, best-effort.
-  void healStrandedKillSwitch().catch(() => { /* best-effort self-heal */ })
+  // Re-probe when it lands: until then the monitor reports the chain as blocking
+  // (correctly — nothing gets out), and this is what tells it that stopped being
+  // true. Not awaited before starting the monitor, because on the pkexec path the
+  // heal can sit on a password prompt for as long as the user takes.
+  void healStrandedKillSwitch()
+    .catch(() => { /* best-effort self-heal */ })
+    .finally(() => { onChainPathChanged() })
   // Drop stale session credential files left by non-endSession exit paths (finding L4).
   sweepStaleSessionFiles()
   registerIpcHandlers()

@@ -269,3 +269,24 @@ export function describeNodeApiError(err: unknown): { status: number | null; mes
   if (typeof nodeMessage === 'string' && nodeMessage !== '') return { status, message: nodeMessage }
   return { status, message: typeof e?.message === 'string' ? e.message : String(err) }
 }
+
+/**
+ * What to do to the kill-switch chain after the user toggles Kill Switch or Local
+ * Network Sharing mid-session. The ARMED MARKER decides, not the connection
+ * state: the chain deliberately outlives the tunnel in the stand-down ("expired,
+ * traffic blocked") state, and the user must still be able to change their mind
+ * there. `tunnelActive` is `isVpnActive()`, which is false in proxy mode by
+ * design — so proxy mode can never reach 'arm'.
+ */
+export function decideFirewallAction(input: {
+  killSwitch: boolean
+  lanSharing: boolean
+  armed: boolean
+  armedLanSharing: boolean
+  tunnelActive: boolean
+}): 'arm' | 'disarm' | 'rearm' | 'none' {
+  if (input.armed && !input.killSwitch) return 'disarm'
+  if (input.armed && input.lanSharing !== input.armedLanSharing) return 'rearm'
+  if (!input.armed && input.killSwitch && input.tunnelActive) return 'arm'
+  return 'none'
+}

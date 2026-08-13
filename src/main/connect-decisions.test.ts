@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
 
 // --- sessionFailureMessage ---
 
@@ -379,4 +379,63 @@ test('deadTunnelMessage: neither wording promises money back', () => {
   for (const msg of [deadTunnelMessage(true), deadTunnelMessage(false)]) {
     assert.equal(/refund|reclaim|deposit back/i.test(msg), false)
   }
+})
+
+// --- decideFirewallAction ---
+
+test('decideFirewallAction disarms when the kill switch is switched off', () => {
+  assert.equal(decideFirewallAction({
+    killSwitch: false, lanSharing: false, armed: true, armedLanSharing: false, tunnelActive: true,
+  }), 'disarm')
+})
+
+test('decideFirewallAction disarms an armed chain even with no tunnel up', () => {
+  // The stand-down state ("expired, traffic blocked") — this is the user's way out.
+  assert.equal(decideFirewallAction({
+    killSwitch: false, lanSharing: false, armed: true, armedLanSharing: false, tunnelActive: false,
+  }), 'disarm')
+})
+
+test('decideFirewallAction re-arms when LAN sharing changes under an armed chain', () => {
+  assert.equal(decideFirewallAction({
+    killSwitch: true, lanSharing: true, armed: true, armedLanSharing: false, tunnelActive: true,
+  }), 'rearm')
+  assert.equal(decideFirewallAction({
+    killSwitch: true, lanSharing: false, armed: true, armedLanSharing: true, tunnelActive: true,
+  }), 'rearm')
+})
+
+test('decideFirewallAction re-arms in the stand-down state too', () => {
+  assert.equal(decideFirewallAction({
+    killSwitch: true, lanSharing: true, armed: true, armedLanSharing: false, tunnelActive: false,
+  }), 'rearm')
+})
+
+test('decideFirewallAction arms when the kill switch goes on over a live tunnel', () => {
+  assert.equal(decideFirewallAction({
+    killSwitch: true, lanSharing: false, armed: false, armedLanSharing: false, tunnelActive: true,
+  }), 'arm')
+})
+
+test('decideFirewallAction does nothing with no tunnel to protect', () => {
+  // Also covers proxy mode: isVpnActive() is false there by design, and the kill
+  // switch is deliberately never armed for it.
+  assert.equal(decideFirewallAction({
+    killSwitch: true, lanSharing: true, armed: false, armedLanSharing: false, tunnelActive: false,
+  }), 'none')
+})
+
+test('decideFirewallAction does nothing when the chain already matches the settings', () => {
+  assert.equal(decideFirewallAction({
+    killSwitch: true, lanSharing: true, armed: true, armedLanSharing: true, tunnelActive: true,
+  }), 'none')
+  assert.equal(decideFirewallAction({
+    killSwitch: false, lanSharing: true, armed: false, armedLanSharing: false, tunnelActive: true,
+  }), 'none')
+})
+
+test('decideFirewallAction ignores a LAN change while nothing is armed', () => {
+  assert.equal(decideFirewallAction({
+    killSwitch: false, lanSharing: true, armed: false, armedLanSharing: false, tunnelActive: true,
+  }), 'none')
 })

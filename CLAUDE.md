@@ -351,6 +351,16 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `err.message` directly. It is import-free + unit-tested for the native runner, so its
   markers are inlined and the test asserts they match `shared/error-markers.ts` — the
   same arrangement as `wallet-errors.ts`.
+- **Every async IPC call in a click handler MUST have a try/catch.** An unhandled
+  promise rejection in an event handler goes to `window.onerror` as an uncaught
+  exception, but Electron doesn't wire that for you — it silently vanishes. The
+  user sees a button that does nothing when the main process rejects the call (bad
+  input, validation failure, etc.), with zero feedback about why. Always wrap the
+  IPC call and catch exceptions: show them inline, disable the button, or add a
+  loading state. "Save Routes" had no catch, so invalid bypass routes caused a
+  silent promise rejection and the button stayed lit. Pre-validation in the renderer
+  (e.g. `parseSplitTunnelRoutes()`) prevents most rejections, but the catch is
+  defense-in-depth for edge cases the main process still refuses.
 - **A session's usage gauges must never go backwards.** `ActiveSessions` builds each
   row's usage from two sources that do NOT hand over at the same instant: the live
   half (`useTrafficStats` + `status.connectedAt`) disappears the moment the 3 s status

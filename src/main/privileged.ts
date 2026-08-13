@@ -10,6 +10,7 @@
 import { execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { isDaemonAvailable, daemonRequest, DaemonUnreachableError } from './daemon-client'
+import { LAN_SHARING_ARG } from './config-guard'
 
 const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
 
@@ -86,8 +87,11 @@ async function runViaDaemon(args: string[]): Promise<void> {
       await daemonRequest('tun_down')
       return
     case 'killswitch-on': {
-      const [iface, remoteHost, dnsIp] = rest
-      await daemonRequest('killswitch_on', { iface, remoteHost, dnsIp })
+      // The helper's argv is positional with an optional dns arg, so the LAN flag
+      // rides as a trailing sentinel — strip it before destructuring the rest.
+      const lanSharing = rest[rest.length - 1] === LAN_SHARING_ARG
+      const [iface, remoteHost, dnsIp] = lanSharing ? rest.slice(0, -1) : rest
+      await daemonRequest('killswitch_on', { iface, remoteHost, dnsIp, lanSharing })
       return
     }
     case 'killswitch-off':

@@ -1008,7 +1008,7 @@ async function applyPostConnectSettings(protocol: 'wireguard' | 'amneziawg' | 'v
         return
       }
       const dnsIp = v2rayDnsIp ?? undefined
-      await enableKillSwitch(vpnIface, remoteHost, dnsIp)
+      await enableKillSwitch(vpnIface, remoteHost, { dnsIp, lanSharing: settings.lanSharing })
     } catch (err) {
       console.error('Failed to enable kill switch:', err)
       // Don't silently leave the user thinking they're protected — flag it so

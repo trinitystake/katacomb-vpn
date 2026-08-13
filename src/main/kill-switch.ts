@@ -3,6 +3,7 @@ import { existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { runPrivileged } from './privileged'
 import { writeFileAtomic } from './fs-utils'
+import { LAN_SHARING_ARG } from './config-guard'
 
 // App-owned marker recording that the kill-switch chain may be installed. Reading
 // iptables needs root, so this unprivileged flag is the cheap detector that lets a
@@ -28,7 +29,11 @@ export function clearKillSwitchArmed(): void {
 }
 
 /** Enable kill switch — blocks all traffic except through the VPN interface and to the VPN server */
-export async function enableKillSwitch(vpnInterface: string, remoteHost: string, dnsIp?: string): Promise<void> {
+export async function enableKillSwitch(
+  vpnInterface: string,
+  remoteHost: string,
+  opts: { dnsIp?: string; lanSharing?: boolean } = {},
+): Promise<void> {
   // Mark BEFORE arming, so even a partial/failed arm (e.g. v4 chain added, v6
   // failed) is still covered by startup self-heal.
   markKillSwitchArmed()
@@ -36,7 +41,9 @@ export async function enableKillSwitch(vpnInterface: string, remoteHost: string,
     'killswitch-on',
     vpnInterface,
     remoteHost,
-    ...(dnsIp && dnsIp !== 'system' ? [dnsIp] : []),
+    ...(opts.dnsIp && opts.dnsIp !== 'system' ? [opts.dnsIp] : []),
+    // Trailing — the helper reads it as the last argument.
+    ...(opts.lanSharing ? [LAN_SHARING_ARG] : []),
   ])
 }
 

@@ -86,6 +86,9 @@ Strict Electron security isolation with three process boundaries:
   **Nothing in the renderer should call `nodesFetch()` just to read the list** — that's
   the whole paginated refresh; take `useNodesContext().allNodes`, which is already
   populated from cache + `NODES_UPDATE` pushes. Only a user-driven Refresh should fetch.
+- `multihop-config.ts`: pure builder + grader for two-hop chains (`buildMultihopConfig`,
+  `selectHopEntry`, `classifyHopEligibility`, `normalizeTlsPin`). Electron-free and
+  unit-tested; see the multihop section below for the invariants it enforces.
 - `price-service.ts`: P2P→USD rate from CoinGecko (`ids=sentinel`), 15-min memory cache,
   **display only** — no transaction figure is ever derived from it, and failure returns the
   last value or null so the "≈ $x" hint just disappears.
@@ -397,6 +400,15 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   **Every place that changes that path must call `onChainPathChanged()`** — `sendStateChange`,
   `reapplyFirewall`'s live kill-switch toggle, and the startup `healStrandedKillSwitch` —
   or the pill sits a full poll behind reality.
+- **No em dashes in user-visible strings** (modal copy, buttons, tooltips, error text
+  that reaches a pane) — the maintainer reads them as AI-written. Use commas, colons or
+  full stops. Code comments and commit messages are unaffected. Note this includes
+  strings built in pure helpers (`chain-diversity.ts` labels, `connect-decisions.ts`
+  messages) and `throw new Error(...)` text that surfaces in the UI.
+- `chain-diversity.ts` (pure, unit-tested): advisory operator-diversity checks for a
+  chain — same ASN, same /24, shared endpoint domain, same country. ADVISORY with an
+  explicit override, because each can be true of two genuinely independent operators;
+  each issue states the observation, not a verdict.
 - BIP-39 validation lives in `src/shared/mnemonic.ts` (`checkMnemonic`, pure + unit-tested):
   word list, word count and **checksum**, re-run on every keystroke so the Import button
   only enables on a phrase that will actually import. It uses `@scure/bip39` — the package
@@ -593,6 +605,70 @@ kill-switch setting is deliberately ignored. WG/AWG + `mode:'proxy'` throws. Kee
 mode, because routing is untouched and callers must not fall back to cached chain
 data. The mode is runtime-only (never in `SavedSessionConfig`): auto-reconnect replays
 `desiredMode`, a session-tab reconnect is always full-tunnel.
+
+### Multihop (two-hop chains) — verified live, do not regress
+
+One xray process, two outbounds, the exit dialling **through** the entry via
+v2ray-core's `proxySettings.tag`: `you → entry → exit → internet`. `multihop-config.ts`
+(pure, unit-tested) builds it; a chain ALWAYS runs on the **xray** binary because
+xray-core is a strict superset of what the builder emits, so it lands in
+`activeXrayConfig` and needs no new connect branch. Only v2ray(2)/xray(4) can chain —
+`proxySettings.tag` has no equivalent in the other protocols.
+
+- **Only the ENTRY is dialled directly.** `extractV2RayRemoteHost` picks the outbound
+  **without** `proxySettings`, and that one IP is the only bypass route and the only
+  kill-switch whitelist. Whitelisting the exit strands the tunnel. Verify a live chain
+  with `ip route get <exitIP>` (must be `dev sntl-tun`) — `ss` alone is NOT enough under
+  tun2socks, where app sockets look direct because interception is at the IP layer.
+- **The EXIT must be plain TCP** (`EXIT_TRANSPORTS`). Measured against xray 26.3.27 with
+  two local servers: entry tcp→exit grpc FAILS, →exit ws FAILS, entry grpc→exit tcp
+  WORKS. Both work as a DIRECT hop, so it is chaining: only plain TCP delegates dialing
+  to xray's detour dialer. The ENTRY may use any transport we can emit.
+- **BOTH hops require TLS or Reality** (`isChainGradeSecurity`) — stricter than the
+  single-hop rule, which still accepts VMess-without-TLS. VMess has its own AEAD so it
+  is not cleartext, but VMess/gRPC/none is cleartext HTTP/2 on the wire: the entry hop
+  announces the circuit to the user's own ISP, which is what a chain is bought to
+  prevent. Cost measured: 211 of 241 healthy v9 nodes still qualify as entry, 140 as exit.
+- **Grade BEFORE paying.** `assertChainEligible` reads each node's own `service_metadata`
+  from its ROOT path and applies the rule. `preflightConnect` does NOT cover this — it
+  only checks the node runs the protocol the directory claims. The node list cannot
+  answer it either: it publishes ONE transport per node, reporting tcp for 16 nodes
+  network-wide while 138 of 241 serve one. Pre-9.0.0 nodes publish nothing and are
+  refused rather than bought and refunded.
+- **`establishChainOrRefund` refunds BOTH sessions on any failure**, and the cancels
+  MUST be sequential (`refundEachInTurn`, unit-tested): every cancel is a tx from one
+  account, so parallel broadcasts collide on the account sequence number and the chain
+  rejects the loser. `Promise.all` here cost a live refund — entry cancelled, exit left
+  ACTIVE. Same constraint as the two purchases.
+- **Per-hop wallets** (`exitWalletId`): a Session carries `accAddress`, and
+  `SessionsForAccount` is public, so one wallet lets EITHER node find the other hop.
+  Paying from two accounts removes that. The exit hop's purchase, handshake AND cancel
+  must all sign as the owning account. `loadWalletCredentials` derives a wallet without
+  making it active (`switchWallet` mutates shared state) and its privKey is tracked by
+  nothing — zero it in a `finally`. The app never creates or funds the second wallet: an
+  in-app transfer between them is itself a public link. A subaccount is a normal
+  `WalletEntry`, so it already appears in the picker.
+- **A foreign-owned session is invisible by default.** `sessionsForAccount(active)`
+  cannot see the exit hop, so `SavedSessionConfig.walletId` +
+  `listSessionsOwnedByOtherWallets` + `getSessionsForAddress` exist to merge it back in;
+  without them the exit hop vanishes from the Sessions tab with a live deposit against it.
+- **All THREE writers of `lastKnownSessions` must go through `decorateSessionRow`.**
+  `WALLET_SESSIONS` returns that cache verbatim while a tunnel is up, so a writer that
+  omits `chainPeerSessionId`/`chainRole` makes the tab forget it is a chain for exactly
+  as long as the chain is connected — and then "End" on one hop kills the tunnel and
+  strands the other's deposit.
+- **Ending a chain hop leaves a TOMBSTONE** (`retireSessionConfig`): credentials cleared,
+  pairing kept, so the two rows stay grouped for the ~2h they take to settle. A record
+  with an empty `configString` must never be reconnected.
+- **`nodeType` is the NODE's protocol, never the runtime.** A chain of two V2Ray nodes
+  runs on xray; hardcoding 4 on the reconnect path put "XRAY" in the connected bar.
+- Reconnect replays the SAVED chained config and re-applies **no** policy, deliberately:
+  a chain bought under older rules still reconnects, because the money is already spent.
+- Dual quota: both hops meter the same stream, so **worst verdict wins** — but they
+  settle independently and can land far apart, so the Sessions card scores off the worse
+  hop and the sooner expiry.
+- Measured cost: ~20x latency vs single-hop on a long chain (ES→TR 1.75s), ~0.95s AU→JP,
+  ~2-3 MB/s. Chains are for privacy, not speed.
 
 **DNS fallback.** wg-quick/awg-quick fail the whole bring-up when `resolvconf` is
 missing. Those catch paths rethrow with the `DNS_PROVISION_FAILED` marker

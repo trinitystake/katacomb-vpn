@@ -40,6 +40,11 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 - **Auto-reconnect** — up to 5 attempts with backoff when a tunnel drops.
 - **Proxy mode** — for the SOCKS-capable protocols, run just the local listener at
   `127.0.0.1:1080` without touching system routing or asking for root.
+- **Multi-hop** — chain two V2Ray/XRAY nodes, so the entry node sees your IP but not
+  where you go and the exit sees where you go but not your IP. Candidates are checked
+  against each node's own advertised inbounds *before* anything is paid for, the two
+  ends are filtered by different rules, and the two hops can be paid from two different
+  wallets so neither node can find the other on chain. Read the honest limits below.
 - Live traffic stats, real egress IP/geo check, tray connect.
 
 **Wallet**
@@ -77,6 +82,12 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 | 6 | Hysteria2 | `sntl-tun` | userspace core + tun2socks | QUIC; refuses to connect without a TLS pin |
 
 Type 0 (unknown) is the only kind the client will not connect to.
+
+Multi-hop chains only work on types 2 and 4: the mechanism is v2ray-core's
+`proxySettings.tag`, which the other protocols have no equivalent for. A chain always
+runs on the `xray` binary, since xray-core reads the same config and is a strict
+superset of what the builder emits. The exit hop additionally has to serve plain TCP —
+grpc and websocket bring their own dialer and fail when carried inside another hop.
 
 Bundled binaries live in [resources/linux/v2ray/](resources/linux/v2ray/) and are
 SHA-256 pinned in [binary-integrity.ts](src/main/binary-integrity.ts) — both the app and
@@ -226,6 +237,17 @@ root, and a single `PostUp = …` line in a WireGuard config is a root shell. So
 - Split-tunnel routes are sanitized: a node cannot hand back `0.0.0.0/1` and quietly
   exclude your traffic from the tunnel.
 
+**What multi-hop does and does not do.** It protects against *one* dishonest node: with
+two hops, neither end holds both your identity and your destinations. Both hops are
+required to be wrapped in TLS or Reality, which is stricter than an ordinary connection,
+because the first hop is the one your own ISP can see. It does **not** make you
+anonymous. Two operators working together can still correlate the circuit on traffic
+volume and timing, since the same bytes cross both hops at the same moments — that is a
+hard ceiling, not something this client can close. And a session's paying account is
+public on chain, so paying for both hops from one wallet lets either node look up the
+other; paying each hop from a different wallet removes that, but only if the second
+wallet was funded independently, since a transfer between them is public too.
+
 More detail — including the invariants that must not regress — is in
 [CLAUDE.md](CLAUDE.md).
 
@@ -236,6 +258,10 @@ paid to the node operator, and the wallet needs a balance before you connect (th
 checks first). Failures on the client side are refunded automatically; a session you
 actually used is not. Cancelling a subscription marks it inactive-pending — it is not an
 instant refund.
+
+A multi-hop chain is **two** sessions and two deposits, and it is also considerably
+slower: expect roughly a second of added latency, more when the hops are far apart. If
+any part of building one fails, both sessions are cancelled.
 
 The provider side spends too, and differently: the registration deposit goes to the
 community pool, so it is gone rather than escrowed (a governance parameter — the app reads

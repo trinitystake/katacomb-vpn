@@ -283,9 +283,17 @@ export default function ConnectionModal({ node, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-text-primary text-base font-semibold">
-            {title}
-          </h2>
+          <div>
+            <h2 className="text-text-primary text-base font-semibold">
+              {title}
+            </h2>
+            {/* Names this as one half of a pair. Without it the Multi-hop button in
+                the filter bar reads as an unrelated feature rather than the
+                alternative to what this modal does. */}
+            <p className="text-text-tertiary text-xs mt-0.5">
+              Single hop: your device connects straight to this node.
+            </p>
+          </div>
           {!connecting && (
             <button
               onClick={onClose}

@@ -1,0 +1,801 @@
+import { useEffect, useMemo, useState } from 'react'
+import type { SentNode, TunnelProtocol } from '../types'
+import { useNodesContext } from '../contexts/NodesContext'
+import { useBalance } from '../hooks/useBalance'
+import { useConnection } from '../hooks/useConnection'
+import { useChainEligibility } from '../hooks/useChainEligibility'
+import { chainDiversityIssues, hasOperatorOverlap } from '../utils/chain-diversity'
+import { checkFunds, formatP2p, insufficientFundsMessage } from '../../shared/funds'
+import { protocolMeta } from '../utils/protocols'
+import { COUNTRY_CODES } from '../utils/country-codes'
+import ConnectErrorActions from './ConnectErrorActions'
+import InsufficientFunds from './InsufficientFunds'
+import ProgressSteps from './ProgressSteps'
+import Spinner from './Spinner'
+
+interface Props {
+  onClose: () => void
+}
+
+type Step = 'entry' | 'exit' | 'confirm'
+type BillingType = 'gigabytes' | 'hours'
+
+/**
+ * Rows rendered before the list asks you to narrow the search. Set above the number
+ * of nodes that can actually serve as an exit (138 of 726 healthy V2Ray/XRAY nodes,
+ * measured 2026-08-14) so that every verified exit is reachable by scrolling. At 50
+ * it was not: the list is sorted cheapest-first within each rank, so a verified exit
+ * priced above the 50th row simply did not exist as far as the UI was concerned.
+ */
+const MAX_ROWS = 300
+
+/**
+ * Only v9.0.0 nodes publish the inbound listing the exit check reads, so on the
+ * exit step they sort first. Otherwise the list opens on the cheapest nodes, which
+ * are the oldest — every row reads "unknown" and the check looks broken. Older
+ * nodes stay listed and stay pickable: they may well serve TCP, we just cannot know
+ * before paying, and a chain that can't be built refunds both sessions.
+ */
+function majorVersion(node: SentNode): number {
+  return parseInt((node.version || '').split('.')[0], 10) || 0
+}
+
+function udvpnPrice(node: SentNode, type: BillingType): number | null {
+  const prices = type === 'gigabytes' ? node.gigabytePrices : node.hourlyPrices
+  const p = prices?.find((x) => x.denom === 'udvpn')
+  if (!p) return null
+  const value = parseInt(p.value, 10)
+  return Number.isFinite(value) ? value : null
+}
+
+/**
+ * Buy and connect a two-hop chain: this host -> entry -> exit -> internet.
+ *
+ * Deliberately a separate flow rather than a mode of ConnectionModal, which is
+ * built around one `node` prop throughout (pricing, plan reuse, the already-on-this-
+ * node guard). Chains have none of that: no plans, no allocations, two purchases in
+ * one transaction sequence, and an eligibility rule that differs per END.
+ */
+export default function MultihopModal({ onClose }: Props) {
+  const { allNodes } = useNodesContext()
+  const { status, disconnect: disconnectVpn } = useConnection()
+  const { udvpn, display: balance, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
+  const eligibility = useChainEligibility()
+
+  const [step, setStep] = useState<Step>('entry')
+  const [entry, setEntry] = useState<SentNode | null>(null)
+  const [exit, setExit] = useState<SentNode | null>(null)
+  const [billing, setBilling] = useState<BillingType>('gigabytes')
+  const [amount, setAmount] = useState(1)
+  const [mode, setMode] = useState<'tunnel' | 'proxy'>('tunnel')
+  const [acknowledged, setAcknowledged] = useState(false)
+  const [overrideDiversity, setOverrideDiversity] = useState(false)
+
+  const [connecting, setConnecting] = useState(false)
+  const [currentStep, setCurrentStep] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [paid, setPaid] = useState<{ entrySessionId: string; exitSessionId: string } | null>(null)
+  const [tunnelConnected, setTunnelConnected] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
+
+  useEffect(() => {
+    const unsub = window.api.onConnectionProgress((s) => setCurrentStep(s))
+    return unsub
+  }, [])
+
+  // Only v2ray/xray can be chained at all: proxySettings.tag is a v2ray-core
+  // feature and no other protocol in this client has an equivalent.
+  const chainable = useMemo(
+    () => allNodes.filter((n) => (n.type === 2 || n.type === 4) && n.isActive && n.isHealthy),
+    [allNodes],
+  )
+
+  const entryPrice = entry ? udvpnPrice(entry, billing) : null
+  const exitPrice = exit ? udvpnPrice(exit, billing) : null
+  const costUdvpn = (entryPrice ?? 0) * amount + (exitPrice ?? 0) * amount
+  const priceMissing = (entry !== null && entryPrice === null) || (exit !== null && exitPrice === null)
+  const funds = udvpn === null ? null : checkFunds(udvpn, costUdvpn)
+  const cantAfford = funds !== null && !funds.ok
+
+  const issues = entry && exit ? chainDiversityIssues(entry, exit) : []
+  const operatorOverlap = hasOperatorOverlap(issues)
+  const exitGrade = exit ? eligibility.results.get(exit.address) : undefined
+  // Block only on a definite No. "Couldn't ask" (a pre-9.0.0 node, or an
+  // unreachable one) stays allowed: it may work, and a failed build refunds both
+  // sessions. A definite no is different — it is known before any money moves.
+  const exitRefused = exitGrade !== undefined && exitGrade.reachable && !exitGrade.exit
+
+  async function handleBuild() {
+    if (!entry || !exit || entryPrice === null || exitPrice === null) return
+    setConnecting(true)
+    setError(null)
+    setCurrentStep('1/5')
+    try {
+      const result = await window.api.connectionSubscribeChain({
+        entry: {
+          nodeAddress: entry.address, nodeMoniker: entry.moniker, nodeCountry: entry.country,
+          nodeType: entry.type, apiField: entry.api, quoteValue: String(entryPrice),
+        },
+        exit: {
+          nodeAddress: exit.address, nodeMoniker: exit.moniker, nodeCountry: exit.country,
+          nodeType: exit.type, apiField: exit.api, quoteValue: String(exitPrice),
+        },
+        type: billing,
+        amount,
+        denom: 'udvpn',
+      })
+      setPaid({ entrySessionId: result.sessionId, exitSessionId: result.exitSessionId })
+      await connectTunnelOnly(result.protocol as TunnelProtocol)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to build the chain')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  /** The bring-up alone. Both sessions stay paid, so this never re-buys. */
+  async function connectTunnelOnly(protocol: TunnelProtocol) {
+    setCurrentStep('5/5')
+    await window.api.connectionConnect({
+      protocol,
+      ...(mode === 'proxy' ? { mode: 'proxy' as const } : {}),
+    })
+    setTunnelConnected(true)
+  }
+
+  async function handleRetryTunnel() {
+    if (!paid) return
+    setConnecting(true)
+    setError(null)
+    try {
+      await connectTunnelOnly('xray')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true)
+    try {
+      await disconnectVpn()
+    } finally {
+      setDisconnecting(false)
+      onClose()
+    }
+  }
+
+  const title = tunnelConnected
+    ? 'Chain active'
+    : connecting
+      ? 'Building the chain…'
+      : step === 'entry'
+        ? 'Pick the entry node'
+        : step === 'exit'
+          ? 'Pick the exit node'
+          : 'Confirm the chain'
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting ? undefined : onClose}>
+      {/* Fixed size, not content-sized. The three steps differ enormously in height
+          (a 50-row list vs. a short summary), so a shrink-to-fit box resized under
+          the cursor on every step change and moved the buttons around. Header and
+          rail stay put; only the body scrolls. */}
+      <div
+        className="bg-bg-secondary border border-border w-full max-w-2xl h-[640px] max-h-[88vh] mx-4 flex flex-col rounded-lg shadow-overlay"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
+          <div>
+            <h2 className="text-text-primary text-base font-semibold">{title}</h2>
+            <p className="text-text-tertiary text-xs mt-0.5">
+              Two hops: your device → entry → exit → the internet.
+            </p>
+          </div>
+          {!connecting && (
+            <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-lg transition-colors">
+              ×
+            </button>
+          )}
+        </div>
+
+        {/* Step rail, also the way back to an earlier choice. Stays on screen while
+            the chain is being built — losing it there made the modal look like a
+            different window that had forgotten the two nodes just picked. Every
+            button is disabled mid-build, since going back would strand a purchase. */}
+        {!tunnelConnected && !error && (
+          <div className="flex items-center gap-2 text-xs px-6 pb-4 shrink-0">
+            {(['entry', 'exit', 'confirm'] as const).map((s, i) => {
+              const reachable = s === 'entry' || (s === 'exit' && entry) || (s === 'confirm' && entry && exit)
+              const node = s === 'entry' ? entry : s === 'exit' ? exit : null
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={!reachable || connecting}
+                  onClick={() => setStep(s)}
+                  className={`flex-1 px-2 py-1.5 border rounded-sm text-left transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+                    step === s ? 'border-accent text-accent' : 'border-border text-text-secondary hover:border-border-focus'
+                  }`}
+                >
+                  <span className="font-mono mr-1.5">{i + 1}</span>
+                  {s === 'entry' ? 'Entry' : s === 'exit' ? 'Exit' : 'Confirm'}
+                  {node && <span className="block truncate text-text-tertiary">{node.moniker || node.country}</span>}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6 space-y-4">
+        {alreadyConnected && !connecting && !tunnelConnected && (
+          <div className="bg-warning-subtle border border-warning p-3 rounded-md space-y-2">
+            <p className="text-warning text-sm">A tunnel is already up.</p>
+            <p className="text-text-secondary text-xs">
+              Building a chain replaces it. Disconnect first. The current session stays paid and
+              can be reconnected from the Sessions tab.
+            </p>
+            <button
+              onClick={handleDisconnect}
+              disabled={disconnecting}
+              className="btn btn-danger text-xs px-3 py-1 disabled:opacity-50"
+            >
+              {disconnecting ? 'Disconnecting…' : 'Disconnect'}
+            </button>
+          </div>
+        )}
+
+        {!connecting && !error && !tunnelConnected && (step === 'entry' || step === 'exit') && (
+          <NodePicker
+            role={step}
+            nodes={chainable}
+            exclude={step === 'exit' ? entry : null}
+            billing={billing}
+            onBillingChange={setBilling}
+            eligibility={eligibility}
+            selected={step === 'entry' ? entry : exit}
+            onSelect={(node) => {
+              if (step === 'entry') {
+                setEntry(node)
+                setStep('exit')
+              } else {
+                setExit(node)
+                setOverrideDiversity(false)
+                setStep('confirm')
+              }
+            }}
+          />
+        )}
+
+        {!connecting && !error && !tunnelConnected && step === 'confirm' && entry && exit && (
+          <div className="space-y-4">
+            <div className="space-y-2 text-sm border border-border rounded-md p-3">
+              <HopRow label="Entry" hint="Sees your real IP. Never sees where you go." node={entry} price={entryPrice} billing={billing} />
+              <div className="text-text-tertiary text-center text-xs">↓ tunnelled inside the entry hop</div>
+              <HopRow label="Exit" hint="Sees where you go. Never sees your IP." node={exit} price={exitPrice} billing={billing} />
+            </div>
+
+            {/* Pre-9.0.0 exits are never probed, so they have no grade to report.
+                Say why here too, or the confirm step is silent about the one thing
+                the user most needs to know before paying. */}
+            {!exitGrade && majorVersion(exit) < 9 && (
+              <div className="text-xs text-warning">
+                Exit not checked: this node runs {exit.version || 'a version older than 9.0.0'}, which
+                does not publish its inbound list. Whether it can be chained is only known after the
+                handshake. If it can't, both sessions are cancelled and refunded automatically.
+              </div>
+            )}
+
+            {exitGrade && (
+              <div className={`text-xs ${exitRefused ? 'text-danger' : exitGrade.reachable ? 'text-text-tertiary' : 'text-warning'}`}>
+                {exitRefused ? (
+                  <>
+                    This node serves {exitGrade.transports.join(', ') || 'no usable transport'} and no plain TCP,
+                    so it cannot be the exit. Only TCP survives being carried inside the entry hop.
+                    Pick another exit; this node is still fine as an entry.
+                  </>
+                ) : exitGrade.reachable ? (
+                  <>
+                    Exit checked: this node serves plain TCP, so it can be chained, and the hop will
+                    be wrapped in{' '}
+                    <span className="text-success">
+                      {exitGrade.exitSecurity === 'reality' ? 'Reality' : 'TLS, with the node\'s certificate pinned'}
+                    </span>.
+                    {exitGrade.transports.length > 1 && ` It also offers ${exitGrade.transports.filter((t) => t !== 'tcp').join(', ')}, which cannot be chained.`}
+                  </>
+                ) : (
+                  <>
+                    Exit not checked: {exitGrade.error ?? 'the node did not answer'}. Whether it can be chained
+                    is unknown until the handshake. If it can't, both sessions are cancelled and refunded
+                    automatically.
+                  </>
+                )}
+              </div>
+            )}
+
+            {issues.length > 0 && (
+              <div className={`border p-3 rounded-md space-y-2 ${operatorOverlap ? 'bg-danger-subtle border-danger' : 'bg-warning-subtle border-warning'}`}>
+                <p className={`text-sm font-medium ${operatorOverlap ? 'text-danger' : 'text-warning'}`}>
+                  {operatorOverlap ? 'These two hops may belong to one operator' : 'Both hops are in one country'}
+                </p>
+                <ul className="text-text-secondary text-xs space-y-1 list-disc list-inside">
+                  {issues.map((i) => <li key={i.key}>{i.label}</li>)}
+                </ul>
+                {operatorOverlap && (
+                  <>
+                    <p className="text-text-tertiary text-xs">
+                      One operator holding both hops sees your IP at one end and your destinations at the
+                      other, so the chain protects nothing and you pay twice.
+                    </p>
+                    <label className="flex items-start gap-2 cursor-pointer text-xs text-text-secondary">
+                      <input
+                        type="checkbox"
+                        checked={overrideDiversity}
+                        onChange={(e) => setOverrideDiversity(e.target.checked)}
+                        className="accent-accent mt-0.5"
+                      />
+                      <span>These are different operators. Build it anyway.</span>
+                    </label>
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <div className="flex gap-4">
+                {(['gigabytes', 'hours'] as const).map((t) => (
+                  <label key={t} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="chainBilling"
+                      checked={billing === t}
+                      onChange={() => setBilling(t)}
+                      className="accent-[var(--color-accent)]"
+                    />
+                    <span className={billing === t ? 'text-text-primary' : 'text-text-secondary'}>
+                      Pay by {t === 'gigabytes' ? 'Gigabytes' : 'Hours'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={amount}
+                  onChange={(e) => setAmount(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="bg-bg-tertiary border border-border text-text-primary text-sm font-mono px-3 py-1.5 w-20 rounded-sm focus:outline-none focus:border-border-focus"
+                />
+                <span className="text-text-secondary text-sm">{billing === 'gigabytes' ? 'GB' : 'hours'}</span>
+                <span className="text-text-secondary text-sm">on each hop =</span>
+                <span className="text-accent text-sm font-mono font-semibold">{formatP2p(costUdvpn)} P2P</span>
+              </div>
+              {/* Both hops carry the same bytes and the same wall-clock, so the chain
+                  lasts as long as its SHORTER half — buying different amounts per hop
+                  would just strand the difference. One amount, applied to both. */}
+              <p className="text-text-tertiary text-xs">
+                Bought on both hops. The chain ends when either half runs out.
+              </p>
+              {balance !== null && (
+                <div className="text-sm text-text-secondary">
+                  Wallet balance: <span className="text-success font-mono">{balance} P2P</span>
+                </div>
+              )}
+            </div>
+
+            {priceMissing && (
+              <p className="text-warning text-xs">
+                One of these nodes doesn't quote a price in P2P for {billing === 'gigabytes' ? 'data' : 'time'}.
+                Switch the billing type, or pick a different node.
+              </p>
+            )}
+
+            {cantAfford && (
+              <InsufficientFunds
+                message={insufficientFundsMessage(funds)}
+                onRefresh={refreshBalance}
+                refreshing={refreshingBalance}
+              />
+            )}
+
+            <div className="space-y-1.5">
+              <div className="text-xs text-text-secondary">Connection mode</div>
+              <div className="flex gap-4 text-sm">
+                {(['tunnel', 'proxy'] as const).map((m) => (
+                  <label key={m} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="chain-mode"
+                      checked={mode === m}
+                      onChange={() => setMode(m)}
+                      className="accent-accent"
+                    />
+                    <span className="text-text-primary">{m === 'tunnel' ? 'Full tunnel' : 'Local proxy'}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="text-text-tertiary text-xs">
+                {mode === 'tunnel'
+                  ? 'Routes your whole device through the chain (needs admin rights).'
+                  : 'Runs a SOCKS5 proxy on 127.0.0.1:1080. No admin password, but only apps you point at it use the chain, and there is no kill switch.'}
+              </p>
+            </div>
+
+            {/* The honest part. Every claim here is measured or verified on chain —
+                see the multihop threat model. Do not soften it into "anonymity". */}
+            <div className="border border-border rounded-md p-3 space-y-2 text-xs">
+              <p className="text-text-primary font-medium">Before you pay, what this does and doesn't do</p>
+              <p className="text-text-secondary">
+                <span className="text-success">Protects against one dishonest node.</span> The entry sees your
+                IP but not your destinations; the exit sees your destinations but not your IP. Neither alone
+                has both.
+              </p>
+              <p className="text-text-secondary">
+                <span className="text-danger">Does not make you anonymous.</span> Both sessions are paid from
+                this one wallet, and a session's account is public on chain, so either node can look up the
+                other and pair them. Two operators working together can also match the traffic itself, since
+                the same bytes cross both hops.
+              </p>
+              <p className="text-text-secondary">
+                <span className="text-warning">Costs twice, and it is slow.</span> Two sessions, two deposits.
+                Measured on a live chain: roughly 20× the latency of a single hop.
+              </p>
+              <label className="flex items-start gap-2 cursor-pointer text-text-secondary pt-1">
+                <input
+                  type="checkbox"
+                  checked={acknowledged}
+                  onChange={(e) => setAcknowledged(e.target.checked)}
+                  className="accent-accent mt-0.5"
+                />
+                <span>I've read this.</span>
+              </label>
+            </div>
+
+            <button
+              onClick={handleBuild}
+              disabled={
+                !acknowledged || cantAfford || priceMissing || exitRefused || alreadyConnected ||
+                (operatorOverlap && !overrideDiversity)
+              }
+              className="btn btn-primary w-full disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Buy both hops &amp; connect · {formatP2p(costUdvpn)} P2P
+            </button>
+          </div>
+        )}
+
+        {connecting && entry && exit && (
+          <div className="space-y-4">
+            {/* The same summary the confirm step showed, so the build happens "in
+                place" rather than in what reads as a new, emptier window. */}
+            <div className="space-y-2 text-sm border border-border rounded-md p-3 opacity-70">
+              <HopRow label="Entry" hint="Sees your real IP. Never sees where you go." node={entry} price={entryPrice} billing={billing} />
+              <div className="text-text-tertiary text-center text-xs">↓ tunnelled inside the entry hop</div>
+              <HopRow label="Exit" hint="Sees where you go. Never sees your IP." node={exit} price={exitPrice} billing={billing} />
+            </div>
+            <ProgressSteps currentStep={currentStep} error={error} />
+            <p className="text-text-tertiary text-xs">
+              Buying both hops takes two transactions. Leave this open: if anything fails after a
+              session is paid for, it is cancelled automatically.
+            </p>
+          </div>
+        )}
+        {connecting && !(entry && exit) && <ProgressSteps currentStep={currentStep} error={error} />}
+
+        {error && !connecting && (
+          <ConnectErrorActions
+            error={error}
+            paidSessionId={paid ? paid.entrySessionId : null}
+            onRetryTunnel={handleRetryTunnel}
+            onStartOver={() => { setError(null); setCurrentStep(null); setPaid(null); setStep('confirm') }}
+          />
+        )}
+
+        {tunnelConnected && paid && entry && exit && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm">
+              <span className="status-dot status-dot-active" />
+              <span className="text-success font-medium">
+                {mode === 'proxy' ? 'Chained proxy active' : 'Chained tunnel active'}
+              </span>
+            </div>
+            <div className="space-y-2 text-sm border border-border rounded-md p-3">
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Entry · #{paid.entrySessionId}</span>
+                <span className="text-text-primary">{entry.moniker} · {entry.country}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-secondary">Exit · #{paid.exitSessionId}</span>
+                <span className="text-text-primary">{exit.moniker} · {exit.country}</span>
+              </div>
+            </div>
+            <p className="text-text-tertiary text-xs">
+              Sites will see {exit.country}. Both sessions appear in the Sessions tab and are billed
+              separately. Ending either one ends the chain.
+            </p>
+            {mode === 'proxy' && (
+              <p className="text-text-tertiary text-xs">
+                SOCKS5 at <span className="font-mono text-text-secondary">127.0.0.1:1080</span>. Only apps
+                pointed at it go through the chain.
+              </p>
+            )}
+            <button onClick={onClose} className="btn btn-primary w-full">Done</button>
+          </div>
+        )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function HopRow({ label, hint, node, price, billing }: {
+  label: string
+  hint: string
+  node: SentNode
+  price: number | null
+  billing: BillingType
+}) {
+  const code = COUNTRY_CODES[node.country] || ''
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-text-secondary text-xs uppercase tracking-wide">{label}</span>
+          {code && <span className={`fi fi-${code}`} style={{ fontSize: '12px', lineHeight: 1 }} />}
+          <span className="text-text-primary truncate">{node.moniker || '—'}</span>
+          <span className={`text-xs ${protocolMeta(node.type).color}`}>{protocolMeta(node.type).short}</span>
+        </div>
+        <div className="text-text-tertiary text-xs">
+          {node.country}{node.city ? `, ${node.city}` : ''}
+          {node.asn ? <span className="font-mono ml-2">AS{node.asn}</span> : null}
+          <span className="font-mono ml-2">{node.api}</span>
+        </div>
+        <div className="text-text-tertiary text-xs">{hint}</div>
+      </div>
+      <span className="text-text-secondary font-mono text-xs shrink-0">
+        {price === null ? '—' : `${formatP2p(price)}/${billing === 'gigabytes' ? 'GB' : 'hr'}`}
+      </span>
+    </div>
+  )
+}
+
+function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibility, selected, onSelect }: {
+  role: 'entry' | 'exit'
+  nodes: SentNode[]
+  exclude: SentNode | null
+  billing: BillingType
+  onBillingChange: (t: BillingType) => void
+  eligibility: ReturnType<typeof useChainEligibility>
+  selected: SentNode | null
+  onSelect: (node: SentNode) => void
+}) {
+  const [search, setSearch] = useState('')
+  const [country, setCountry] = useState('')
+  const [verifiedOnly, setVerifiedOnly] = useState(false)
+
+  const countries = useMemo(
+    () => [...new Set(nodes.map((n) => n.country).filter(Boolean))].sort(),
+    [nodes],
+  )
+
+  const matches = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return nodes
+      .filter((n) => n.address !== exclude?.address)
+      .filter((n) => (country ? n.country === country : true))
+      .filter((n) => !q || n.moniker.toLowerCase().includes(q) || n.country.toLowerCase().includes(q) || n.city.toLowerCase().includes(q))
+      .filter((n) => {
+        if (!verifiedOnly) return true
+        const grade = eligibility.results.get(n.address)
+        return grade?.reachable === true && (role === 'exit' ? grade.exit : grade.entry)
+      })
+      // Confirmed exits first, then the rest cheapest-first. Sorting by price alone
+      // buried the usable ones: only 50 rows render, so a verified exit priced above
+      // the 50th cheapest node was unreachable no matter how far you scrolled.
+      .sort((a, b) => {
+        const rank = (n: SentNode) => {
+          const grade = eligibility.results.get(n.address)
+          if (grade?.reachable === true && (role === 'exit' ? grade.exit : grade.entry)) return 0
+          if (majorVersion(n) >= 9) return 1  // checkable, and either pending or refused
+          return 2                            // too old to check at all
+        }
+        const byRank = rank(a) - rank(b)
+        if (byRank !== 0) return byRank
+        return (udvpnPrice(a, billing) ?? Infinity) - (udvpnPrice(b, billing) ?? Infinity)
+      })
+  }, [nodes, exclude, country, search, verifiedOnly, eligibility.results, billing, role])
+
+  const visible = matches.slice(0, MAX_ROWS)
+
+  // Grade every CHECKABLE candidate, not just the rows on screen. Two reasons, both
+  // found the hard way:
+  //   - only MAX_ROWS render, so grading just those made everything past row 50
+  //     permanently ungraded, and the sort above could never lift a verified exit
+  //     into view.
+  //   - "Verified exits only" filters on the grades, so with only the visible rows
+  //     graded it silently hid every verified exit outside them.
+  // Pre-9.0.0 nodes are skipped entirely rather than probed and reported unknown:
+  // they publish no inbound list, so the request can only fail. That is most of the
+  // network (487 of 726 healthy V2Ray/XRAY nodes), so skipping them is also what
+  // keeps this affordable.
+  const { probe } = eligibility
+  const checkable = useMemo(() => matches.filter((n) => majorVersion(n) >= 9), [matches])
+  // Sorted, because grades arriving change the list ORDER and an order-sensitive
+  // key would retrigger this effect on every one of them.
+  const visibleKey = checkable.map((n) => n.address).sort().join(',')
+  useEffect(() => {
+    if (checkable.length === 0) return
+    void probe(checkable)
+    // visibleKey stands in for `visible`, which is a fresh array every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role, visibleKey, probe])
+
+  return (
+    // h-full + a flex-1 list, so the rows fill whatever the fixed-height modal
+    // leaves rather than stopping short of it.
+    <div className="space-y-3 h-full flex flex-col">
+      <p className="text-text-secondary text-xs shrink-0">
+        {role === 'entry' ? (
+          <>
+            The entry node is the one your device dials directly, so it sees your real IP and nothing
+            about where you go. It is also the hop your own network and ISP can see, which is why it
+            has to be wrapped.
+          </>
+        ) : (
+          <>
+            The exit node is reached through the entry, so it never sees your IP. Sites see its
+            location instead. It must also serve plain TCP, because grpc and websocket bring their
+            own dialer and break when chained.
+          </>
+        )}
+      </p>
+      {/* The enforced rule is "not cleartext", which is narrower than "TLS only":
+          VMess carries its own AEAD cipher, so VMess without TLS is accepted while
+          VLess without TLS is refused. Every exit-capable node measured on
+          2026-08-14 (138 of them) served TLS or Reality, but that is a fact about
+          today's network and not something to promise, so the badge reports each
+          node's actual security instead. */}
+      <p className="text-text-tertiary text-xs shrink-0">
+        Both hops of a chain must be wrapped in <span className="text-success">TLS</span> or{' '}
+        <span className="text-success">Reality</span>, which is stricter than an ordinary connection.
+        A VMess hop without TLS is still encrypted, but it is recognisable as a proxy to anyone
+        watching the wire, and that is the thing a chain is bought to avoid. Nodes older than 9.0.0
+        publish nothing to check, so they are shown but will almost certainly be refused and refunded.
+      </p>
+
+      <div className="flex items-center gap-2 flex-wrap shrink-0">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search moniker, country, city…"
+          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus flex-1 min-w-[180px]"
+        />
+        <select
+          value={country}
+          onChange={(e) => setCountry(e.target.value)}
+          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
+        >
+          <option value="">All countries</option>
+          {countries.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select
+          value={billing}
+          onChange={(e) => onBillingChange(e.target.value as BillingType)}
+          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
+        >
+          <option value="gigabytes">P2P / GB</option>
+          <option value="hours">P2P / hour</option>
+        </select>
+        {role === 'exit' && (
+          <label className="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={verifiedOnly}
+              onChange={(e) => setVerifiedOnly(e.target.checked)}
+              className="accent-[var(--color-accent)]"
+            />
+            Verified exits only
+          </label>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between text-xs text-text-tertiary shrink-0">
+        <span>
+          Showing {visible.length} of {matches.length}
+          {matches.length > MAX_ROWS ? ', narrow the search to see more' : ''}
+        </span>
+        {eligibility.progress && (
+          <span className="flex items-center gap-1.5 text-text-secondary">
+            <Spinner className="text-accent" />
+            Checking nodes {eligibility.progress.done}/{eligibility.progress.total}
+          </span>
+        )}
+      </div>
+
+      <div className="border border-border rounded-md divide-y divide-border flex-1 min-h-0 overflow-y-auto">
+        {visible.map((node) => {
+          const grade = eligibility.results.get(node.address)
+          const ok = role === 'exit' ? grade?.exit : grade?.entry
+          const security = role === 'exit' ? grade?.exitSecurity : grade?.entrySecurity
+          // Selectable only on POSITIVE evidence. Under the chain's TLS rule an
+          // unverifiable node is not a maybe, it is a near-certain refund: a node
+          // that publishes no listing is pre-9.0.0, and 485 of 487 of those report
+          // no TLS. Leaving them clickable cost a real pair of sessions, and the
+          // refund of that pair then failed. Ungraded rows stay VISIBLE, so the list
+          // still explains itself rather than silently hiding most of the network.
+          const checking = majorVersion(node) >= 9 && grade === undefined
+          const refused = !checking && ok !== true
+          const price = udvpnPrice(node, billing)
+          const code = COUNTRY_CODES[node.country] || ''
+          return (
+            <button
+              key={node.address}
+              type="button"
+              onClick={() => onSelect(node)}
+              disabled={refused}
+              className={`w-full text-left px-3 py-2 flex items-center gap-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                selected?.address === node.address ? 'bg-success-subtle' : 'hover:bg-bg-hover'
+              }`}
+            >
+              {code && <span className={`fi fi-${code} shrink-0`} style={{ fontSize: '12px', lineHeight: 1 }} />}
+              <span className="flex-1 min-w-0">
+                <span className="block text-sm text-text-primary truncate">{node.moniker || node.address}</span>
+                <span className="block text-xs text-text-tertiary truncate">
+                  {node.country}{node.city ? `, ${node.city}` : ''}
+                  {node.asn ? ` · AS${node.asn}` : ''}
+                </span>
+              </span>
+              {(
+                <span className="shrink-0 text-xs">
+                  {majorVersion(node) < 9 ? (
+                    // Never probed (see `checkable`), so say what is actually known:
+                    // its version. "unknown" made a knowable fact look like a failure.
+                    <span
+                      className="text-text-tertiary"
+                      title={`This node runs ${node.version || 'a pre-9.0.0 version'}, which does not publish its inbound list, so it cannot be checked before you pay. Almost none of them offer TLS, so this will very likely be refused at the handshake and refunded.`}
+                    >
+                      v{node.version || '8.x'}
+                    </span>
+                  ) : grade === undefined ? (
+                    <span className="text-text-tertiary">checking…</span>
+                  ) : !grade.reachable ? (
+                    <span className="text-warning" title={grade.error ?? 'No inbound listing'}>unknown</span>
+                  ) : ok ? (
+                    <span
+                      className="text-success"
+                      title={`Serves ${grade.transports.join(', ')}. This hop would be wrapped in ${security === 'reality' ? 'Reality' : 'TLS'}.`}
+                    >
+                      {role === 'exit' ? 'TCP + ' : ''}{security === 'reality' ? 'Reality' : 'TLS'}
+                    </span>
+                  ) : (
+                    <span
+                      className="text-danger"
+                      title={role === 'exit'
+                        ? `Serves ${grade.transports.join(', ') || 'nothing usable'}. A chain exit needs a plain-TCP inbound wrapped in TLS or Reality.`
+                        : `Serves ${grade.transports.join(', ') || 'nothing usable'}, but none of it is wrapped in TLS or Reality. Still fine for an ordinary single-hop connection.`}
+                    >
+                      {role === 'exit' ? 'no TLS/TCP' : 'no TLS'}
+                    </span>
+                  )}
+                </span>
+              )}
+              <span className={`shrink-0 text-xs ${protocolMeta(node.type).color}`}>{protocolMeta(node.type).short}</span>
+              <span className="shrink-0 text-xs font-mono text-text-secondary w-[70px] text-right">
+                {price === null ? '—' : formatP2p(price)}
+              </span>
+            </button>
+          )
+        })}
+        {visible.length === 0 && (
+          <div className="px-3 py-6 text-center text-text-secondary text-sm">
+            No nodes match. Try clearing the filters.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

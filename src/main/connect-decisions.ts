@@ -18,7 +18,7 @@ export function sessionFailureMessage(opts: {
 }): string {
   const preamble = opts.policyRejected
     ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting`
-    : `Could not establish the tunnel to "${opts.nodeMoniker}": ${opts.reason}`
+    : `Could not establish the tunnel to "${opts.nodeMoniker}": ${trimTrailingStop(opts.reason)}`
   const tail = opts.refunded
     ? `The session was cancelled${opts.isDeposit ? ' and your deposit refunded' : ''}.`
     : `Could not auto-cancel the session — open the Session tab and cancel session #${opts.sessionId} manually.`
@@ -33,6 +33,42 @@ export function sessionFailureMessage(opts: {
  * the user still has to cancel by hand. `failedRole` says which hop broke (null
  * when the failure wasn't hop-specific, e.g. the second purchase never landed).
  */
+/**
+ * Cancel a list of paid sessions ONE AT A TIME, reporting each outcome, and never
+ * letting one failure stop the rest.
+ *
+ * The sequencing is the whole point, and it is why this lives here rather than
+ * inline: every cancel is a transaction signed by the SAME account, so two in
+ * flight at once read the same account sequence number and the chain rejects the
+ * loser. That is not theoretical — cancelling a failed chain with Promise.all
+ * refunded entry #55122441 and had exit #55122449 rejected, leaving a live session
+ * the user had to cancel by hand. `establishChainOrRefund` documents the identical
+ * constraint for the two purchases.
+ *
+ * `cancel` is injected so the ordering can be tested without spending anything;
+ * ipc-handlers binds it to the real endSession.
+ */
+export async function refundEachInTurn(
+  sessionIds: string[],
+  cancel: (sessionId: string) => Promise<void>,
+): Promise<{ sessionId: string; refunded: boolean }[]> {
+  const results: { sessionId: string; refunded: boolean }[] = []
+  for (const sessionId of sessionIds) {
+    try {
+      await cancel(sessionId)
+      results.push({ sessionId, refunded: true })
+    } catch {
+      results.push({ sessionId, refunded: false })
+    }
+  }
+  return results
+}
+
+/** Node and builder errors end in a full stop; the templates below add their own. */
+function trimTrailingStop(reason: string): string {
+  return reason.replace(/\s*\.+\s*$/, '')
+}
+
 export function chainFailureMessage(opts: {
   reason: string
   policyRejected: boolean
@@ -43,7 +79,7 @@ export function chainFailureMessage(opts: {
   const where = opts.failedRole ? ` (${opts.failedRole} hop)` : ''
   const preamble = opts.policyRejected
     ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting${where}`
-    : `Could not establish the two-hop chain${where}: ${opts.reason}`
+    : `Could not establish the two-hop chain${where}: ${trimTrailingStop(opts.reason)}`
 
   if (opts.refunds.length === 0) return `${preamble}. No sessions were created.`
 

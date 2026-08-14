@@ -158,6 +158,35 @@ export interface SessionInfo {
   priceValue: string | null
   nodeMoniker: string
   nodeCountry: string
+  /**
+   * Set on both halves of a multihop chain: the other hop's session id, and which
+   * end this one is. They are two independent on-chain sessions, so without these
+   * the tab shows two unrelated rows and offers to end one — which tears the tunnel
+   * down and leaves the other paid for. Absent on an ordinary single-hop session.
+   */
+  chainPeerSessionId?: string
+  chainRole?: 'entry' | 'exit'
+}
+
+/**
+ * How a node graded for each end of a chain, from the inbounds it publishes at its
+ * root path. `reachable: false` means we could not ask (unreachable, or a pre-9.0.0
+ * node that publishes no listing) — NOT that the node is unusable.
+ */
+export interface ChainEligibility {
+  nodeAddress: string
+  checkedAt: number
+  reachable: boolean
+  transports: string[]
+  /** Dialable directly with TLS or Reality — usable as a chain ENTRY. */
+  entry: boolean
+  /** Serves plain TCP with TLS or Reality — usable as a chain EXIT. */
+  exit: boolean
+  /** How the entry-capable inbound would be wrapped, or null if none qualifies. */
+  entrySecurity: 'reality' | 'tls' | null
+  /** How the exit-capable inbound would be wrapped, or null if none qualifies. */
+  exitSecurity: 'reality' | 'tls' | null
+  error?: string
 }
 
 export type ConnectionState = 'idle' | 'connected' | 'reconnecting'
@@ -554,6 +583,10 @@ export interface ElectronAPI {
   nodeTestSpeed: () => Promise<SpeedTestResult>
   nodeTestCancel: () => Promise<void>
   nodeTestResults: () => Promise<Record<string, NodeProbeResult>>
+  /** Max 60 nodes per call — the picker probes in chunks so it can show progress. */
+  nodeChainEligibility: (
+    nodes: Array<{ nodeAddress: string; remoteUrl: string; nodeType: number }>,
+  ) => Promise<ChainEligibility[]>
   onNodeTestProgress: (callback: (progress: BatchProgress) => void) => () => void
 
   connectionSubscribe: (params: SubscribeParams) => Promise<SubscribeResult>

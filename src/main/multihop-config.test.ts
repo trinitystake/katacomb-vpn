@@ -7,6 +7,7 @@ import {
   isCleartextEntry,
   normalizeTlsPin,
   transportName,
+  classifyHopEligibility,
   ENTRY_TAG,
   EXIT_TAG,
   type HopSpec,
@@ -210,13 +211,22 @@ test('a cleartext-only node is refused on either hop', () => {
   )
 })
 
-test('vmess without transport security is accepted (it carries its own AEAD cipher)', () => {
-  // Matches classifyV2RayInbound: only VLess-none is cleartext. This is the most
-  // common inbound on the live network (26 of 40 probed nodes offer vmess/grpc/none).
+test('vmess without transport security is refused for a chain, though it is not cleartext', () => {
+  // The stricter CHAIN rule: VMess carries its own AEAD cipher, so this inbound is
+  // encrypted and an ordinary single-hop connect still accepts it — but over gRPC
+  // with no TLS it is cleartext HTTP/2 on the wire, which is exactly what a chain
+  // is paid for to avoid. It is also the most common inbound on the live network,
+  // so this rule has a real cost and the message must say the node is still usable.
   const vmessNone: HopMetadataEntry = {
     port: '18407', proxy_protocol: 2, transport_protocol: 7, transport_security: 1,
   }
-  assert.equal(selectHopEntry(v2rayHop([vmessNone]), 'exit'), vmessNone)
+  assert.equal(isCleartextEntry(vmessNone), false, 'not cleartext...')
+  assert.equal(selectHopEntry(v2rayHop([vmessNone]), 'exit'), null, '...but still not chain-grade')
+  assert.equal(selectHopEntry(v2rayHop([vmessNone]), 'entry'), null)
+  assert.throws(
+    () => buildMultihopConfig(v2rayHop([vmessNone]), v2rayHop([V2RAY_TCP_TLS_EXIT])),
+    /no TLS or Reality inbound[\s\S]*single-hop/,
+  )
 })
 
 test('prefers reality, then tls, over an unsecured inbound', () => {
@@ -231,7 +241,8 @@ test('prefers reality, then tls, over an unsecured inbound', () => {
   }
   assert.equal(selectHopEntry(xrayHop([vmessNone, tls, reality]), 'exit'), reality)
   assert.equal(selectHopEntry(xrayHop([vmessNone, tls]), 'exit'), tls)
-  assert.equal(selectHopEntry(xrayHop([vmessNone]), 'exit'), vmessNone)
+  // The unsecured inbound is not a last resort any more — it is not eligible at all.
+  assert.equal(selectHopEntry(xrayHop([vmessNone]), 'exit'), null)
 })
 
 // --- outbound shape -----------------------------------------------------------
@@ -349,13 +360,87 @@ test('a TLS outbound pins the node cert and never sends allowInsecure', () => {
   assert.ok(!('serverName' in tls))
 })
 
-test('a vmess inbound with no transport security needs no pin', () => {
-  // VMess carries its own AEAD cipher, so there is no TLS layer to verify.
-  const vmessNone: HopMetadataEntry = {
-    port: '18407', proxy_protocol: 2, transport_protocol: 7, transport_security: 1,
+test('a Reality inbound needs no tls_pin (Reality authenticates by public key)', () => {
+  const reality: HopMetadataEntry = {
+    port: '37545', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
+    reality_public_key: 'xVP4a6JqZ', reality_short_id: '252f43c7d3719ef6',
   }
-  const picked = selectHopEntry(v2rayHop([vmessNone]), 'exit')
-  assert.equal(picked, vmessNone)
-  const ob = buildHopOutbound(v2rayHop([vmessNone]), vmessNone, 'n', 'x')
-  assert.equal((ob.streamSettings as Record<string, unknown>).security, undefined)
+  assert.equal(selectHopEntry(xrayHop([reality]), 'exit'), reality)
+  const ob = buildHopOutbound(xrayHop([reality]), reality, 'n', 'x')
+  assert.equal((ob.streamSettings as Record<string, unknown>).security, 'reality')
+})
+
+// --- classifyHopEligibility: the PRE-PURCHASE grade -------------------------
+//
+// The metadata below is shaped like the real thing: nodes publish this array at
+// their root path with `port` and `tls_pin` blank (verified on 241/241 healthy
+// v9.0.0 nodes), because both are minted per session at handshake time.
+
+const listed = (
+  proxy: number, transport: number, security: number,
+): HopMetadataEntry => ({ port: '', proxy_protocol: proxy, transport_protocol: transport, transport_security: security })
+
+test('classifyHopEligibility grades a node with no TCP inbound as entry-only', () => {
+  // grpc+TLS and mkcp+TLS: dialable directly, but neither survives being chained.
+  const e = classifyHopEligibility('v2ray', [listed(2, 3, 2), listed(2, 5, 2)])
+  assert.deepEqual(e.transports, ['grpc', 'mkcp'])
+  assert.equal(e.entry, true, 'grpc is dialable directly, so it can be an entry')
+  assert.equal(e.entrySecurity, 'tls')
+  assert.equal(e.exit, false, 'only plain TCP survives the detour dialer')
+  assert.equal(e.exitSecurity, null)
+})
+
+test('classifyHopEligibility applies the chain TLS rule, not the single-hop one', () => {
+  // The most common v9 shape is vmess/grpc with no TLS. Usable single-hop, and
+  // refused at both ends of a chain.
+  const e = classifyHopEligibility('v2ray', [listed(2, 3, 1), listed(2, 7, 1)])
+  assert.equal(e.entry, false)
+  assert.equal(e.exit, false)
+  assert.equal(e.entrySecurity, null)
+  assert.deepEqual(e.transports, ['grpc', 'tcp'], 'still reported, so the UI can say why')
+})
+
+test('classifyHopEligibility reports the security the exit would actually be built with', () => {
+  // Prefers reality, then TLS, then whatever is left — the same order selectHopEntry
+  // picks in, so the badge cannot promise more than the config delivers.
+  assert.equal(classifyHopEligibility('v2ray', [listed(1, 7, 2)]).exitSecurity, 'tls')
+  assert.equal(classifyHopEligibility('xray', [listed(1, 1, 3)]).exitSecurity, 'reality')
+  assert.equal(classifyHopEligibility('xray', [listed(1, 1, 2), listed(1, 1, 3)]).exitSecurity, 'reality')
+  // VMess with no transport security no longer qualifies at all, so there is no
+  // security to report for it.
+  assert.equal(classifyHopEligibility('v2ray', [listed(2, 7, 1)]).exitSecurity, null)
+})
+
+test('classifyHopEligibility grades a node with a TCP inbound as usable at both ends', () => {
+  const e = classifyHopEligibility('v2ray', [listed(2, 3, 2), listed(1, 7, 2)])
+  assert.equal(e.entry, true)
+  assert.equal(e.exit, true)
+})
+
+test('classifyHopEligibility decodes the transport with the hop\'s OWN protocol table', () => {
+  // transport_protocol 1 is domainsocket on v2ray and TCP on xray. Reading it with
+  // the wrong table would advertise a UNIX socket as a usable exit.
+  assert.equal(classifyHopEligibility('v2ray', [listed(1, 1, 2)]).exit, false)
+  assert.equal(classifyHopEligibility('xray', [listed(1, 1, 3)]).exit, true)
+})
+
+test('classifyHopEligibility refuses a cleartext-only node at both ends', () => {
+  // vless with no transport security — the one combination that is cleartext.
+  const e = classifyHopEligibility('v2ray', [listed(1, 7, 1)])
+  assert.equal(e.entry, false)
+  assert.equal(e.exit, false)
+  assert.deepEqual(e.transports, ['tcp'], 'still reported, so the UI can say why')
+})
+
+test('classifyHopEligibility ignores the blank port and pin the root path reports', () => {
+  // selectHopEntry rejects both (it builds the real config); this must not, or every
+  // node on the network would grade as unusable and the picker would show an empty list.
+  const listing = listed(1, 7, 2)
+  assert.equal(selectHopEntry(v2rayHop([listing]), 'exit'), null)
+  assert.equal(classifyHopEligibility('v2ray', [listing]).exit, true)
+})
+
+test('classifyHopEligibility survives a node that sends no metadata array', () => {
+  const e = classifyHopEligibility('v2ray', undefined as unknown as HopMetadataEntry[])
+  assert.deepEqual(e, { transports: [], entry: false, exit: false, entrySecurity: null, exitSecurity: null })
 })

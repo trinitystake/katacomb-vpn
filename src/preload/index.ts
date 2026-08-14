@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('api', {
   nodeTestSpeed: () => ipcRenderer.invoke(IPC.NODE_TEST_SPEED),
   nodeTestCancel: () => ipcRenderer.invoke(IPC.NODE_TEST_CANCEL),
   nodeTestResults: () => ipcRenderer.invoke(IPC.NODE_TEST_RESULTS),
+  nodeChainEligibility: (nodes: Array<{ nodeAddress: string; remoteUrl: string; nodeType: number }>) =>
+    ipcRenderer.invoke(IPC.NODE_CHAIN_ELIGIBILITY, nodes),
 
   onNodeTestProgress: (callback: (progress: { done: number; total: number; result: unknown }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: { done: number; total: number; result: unknown }) => {

@@ -6,6 +6,7 @@ import { useNodeTest } from '../hooks/useNodeTest'
 import { useNavigation } from '../contexts/NavigationContext'
 import NodeFilters from './NodeFilters'
 import ConnectionModal from './ConnectionModal'
+import MultihopModal from './MultihopModal'
 import Spinner from './Spinner'
 import type { SentNode } from '../types'
 import { COUNTRY_CODES } from '../utils/country-codes'
@@ -80,6 +81,7 @@ export default function NodeTable() {
   }, [nodesCountryFilter, updateFilter, clearNodesCountryFilter])
 
   const [selectedNode, setSelectedNode] = useState<SentNode | null>(null)
+  const [buildingChain, setBuildingChain] = useState(false)
   const parentRef = useRef<HTMLDivElement>(null)
 
   const virtualizer = useVirtualizer({
@@ -107,6 +109,7 @@ export default function NodeTable() {
           testBatch(batch)
         }}
         onCancelBatch={cancelBatch}
+        onBuildChain={() => setBuildingChain(true)}
       />
 
       {/* With a list in hand a failed refresh only makes it stale — the filter
@@ -275,6 +278,8 @@ export default function NodeTable() {
           onClose={() => setSelectedNode(null)}
         />
       )}
+
+      {buildingChain && <MultihopModal onClose={() => setBuildingChain(false)} />}
     </div>
   )
 }

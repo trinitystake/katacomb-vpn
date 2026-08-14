@@ -51,6 +51,7 @@ export const IPC = {
   NODE_TEST_SPEED: 'node-test:speed',
   NODE_TEST_CANCEL: 'node-test:cancel',
   NODE_TEST_RESULTS: 'node-test:results',
+  NODE_CHAIN_ELIGIBILITY: 'node-test:chain-eligibility',
 
   // RPC health
   RPC_HEALTH_GET: 'rpc:health-get',

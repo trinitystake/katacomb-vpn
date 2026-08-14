@@ -27,7 +27,7 @@ import {
 } from './wallet'
 import { subscribeToNode, performHandshake, performChainHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -83,7 +83,8 @@ import { runPrivileged, canEscalatePrivileges } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './traffic-stats'
-import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType } from './node-tester'
+import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './node-tester'
+import { classifyHopEligibility, type HopMetadataEntry } from './multihop-config'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
@@ -96,10 +97,35 @@ const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
 const PUBLIC_RPC_TTL_MS = 60_000
 const RECONNECT_MAX_ATTEMPTS = 5
 // Bound the refund (endSession) so a slow RPC during the failure path can't itself
-// hang the connect flow — see establishSessionOrRefund (finding H1).
-const REFUND_TIMEOUT_MS = 10_000
+// hang the connect flow — see establishSessionOrRefund (finding H1). Generous on
+// purpose: one cancel is an RPC connect (up to RPC_CONNECT_TIMEOUT_MS on its own),
+// a gas simulation, a broadcast and a wait for inclusion at ~6s per block, so the
+// old 10s could expire on a cancel that was going to succeed — and this is the path
+// that protects money the user has already spent. Refunds run sequentially, so a
+// two-hop chain can spend up to twice this before giving up.
+const REFUND_TIMEOUT_MS = 30_000
 // Bound the pre-payment protocol check — it blocks the connect button.
 const NODE_PROTOCOL_CHECK_TIMEOUT_MS = 10_000
+// A node's advertised inbounds change only when its operator reconfigures it, so a
+// long TTL is safe and keeps the multihop picker from re-probing on every render.
+const CHAIN_ELIGIBILITY_TTL_MS = 10 * 60 * 1000
+// The picker probes in chunks; this bounds one IPC call, not the whole list.
+const CHAIN_ELIGIBILITY_MAX_BATCH = 60
+const CHAIN_ELIGIBILITY_CONCURRENCY = 8
+
+/** How a node graded for each end of a chain. `reachable: false` means unknown. */
+interface ChainEligibilityResult {
+  nodeAddress: string
+  checkedAt: number
+  reachable: boolean
+  transports: string[]
+  entry: boolean
+  exit: boolean
+  entrySecurity: 'reality' | 'tls' | null
+  exitSecurity: 'reality' | 'tls' | null
+  error?: string
+}
+const chainEligibilityCache = new Map<string, ChainEligibilityResult>()
 // The kill switch drops any DNS that isn't tunnel-routed, so when it's on we
 // need a resolver reachable through the tunnel. A 'system' resolver is usually a
 // LAN/systemd-resolved address that won't route through the tunnel — fall back to
@@ -165,7 +191,35 @@ let killSwitchTeardownFailed = false
 // unreachable RPC as 0 would grey out the pay buttons of a funded wallet.
 let lastKnownBalance: { denom: string; amount: string }[] | null = null
 let lastKnownSessions: unknown[] = []
-let cachedNodes: { address: string; moniker: string; country: string }[] = []
+let cachedNodes: { address: string; moniker: string; country: string; type: number }[] = []
+
+/**
+ * Everything a session row carries that the chain itself doesn't: the node's name,
+ * and — for a multihop chain — which end this hop is and what its partner's id is.
+ *
+ * All THREE writers of `lastKnownSessions` must go through this. WALLET_SESSIONS
+ * returns that cache verbatim while a tunnel is up, so a writer that skips the
+ * chain fields makes the Sessions tab forget it is looking at a chain for exactly
+ * as long as the chain is connected — it offers "End" on one hop, which tears the
+ * tunnel down and leaves the other hop paid for. Verified against a live chain
+ * (#55112370 -> #55112373) after the connect handlers were missed the first time.
+ */
+function decorateSessionRow<T extends { id: string; nodeAddress: string }>(session: T): T & {
+  nodeMoniker: string
+  nodeCountry: string
+  chainPeerSessionId?: string
+  chainRole?: 'entry' | 'exit'
+} {
+  const saved = loadSessionConfig(session.id)
+  const nodeMeta = getNodeMeta(session.nodeAddress)
+  return {
+    ...session,
+    nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker,
+    nodeCountry: saved?.nodeCountry || nodeMeta.country,
+    chainPeerSessionId: saved?.chainPeerSessionId,
+    chainRole: saved?.chainRole,
+  }
+}
 
 interface RememberedUsage {
   downloadBytes: string
@@ -915,6 +969,52 @@ async function preflightConnect(nodeType: number, apiField: string): Promise<voi
 }
 
 /**
+ * The multihop counterpart to preflightConnect, run BEFORE either purchase.
+ *
+ * preflightConnect answers "does this node run the protocol the directory claims";
+ * this answers "can this node be THIS END of a chain", which is a different and
+ * stricter question: TLS or Reality on both ends, plus a plain-TCP inbound on the
+ * exit. The picker already greys out nodes that fail it, but the picker works from
+ * a cache and cannot be the guarantee — this is the gate that runs against the
+ * node's own listing at the moment the money would move.
+ *
+ * A node too old to publish a listing is refused here rather than bought and
+ * refunded: pre-9.0.0 nodes publish nothing to check and almost none of them offer
+ * TLS, so buying one is a near-certain refund.
+ */
+async function assertChainEligible(
+  hop: { nodeAddress: string; nodeMoniker: string; nodeType: number; apiField: string },
+  role: 'entry' | 'exit',
+): Promise<void> {
+  const name = hop.nodeMoniker || hop.nodeAddress
+  let metadata: HopMetadataEntry[]
+  try {
+    metadata = (await withTimeout(
+      fetchNodeServiceMetadata(hop.apiField),
+      NODE_PROTOCOL_CHECK_TIMEOUT_MS,
+      'node inbound listing',
+    )) as HopMetadataEntry[]
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'unknown error'
+    throw new Error(
+      `Can't build the chain — not charged. The ${role} node "${name}" did not publish the ` +
+      `inbound list needed to check it (${reason}), so there is no way to confirm it can be ` +
+      'wrapped in TLS before paying for it. Pick a node running 9.0.0 or later.',
+    )
+  }
+  const graded = classifyHopEligibility(hop.nodeType === 4 ? 'xray' : 'v2ray', metadata)
+  if (role === 'exit' ? graded.exit : graded.entry) return
+  throw new Error(
+    `Can't build the chain — not charged. The ${role} node "${name}" serves ` +
+    `${graded.transports.join(', ') || 'nothing usable'}, which does not meet the rule for a ` +
+    `chain ${role}: ${role === 'exit'
+      ? 'a plain-TCP inbound wrapped in TLS or Reality'
+      : 'an inbound wrapped in TLS or Reality'}. This node is still fine for an ordinary ` +
+    'single-hop connection. Pick a different one.',
+  )
+}
+
+/**
  * Refuse to broadcast when the wallet can't cover `costUdvpn` plus gas. Pass 0 for
  * a gas-only tx. The renderer runs the same check to disable its pay buttons, but
  * its balance is polled and can be minutes stale — this one reads it fresh.
@@ -1027,26 +1127,31 @@ interface ChainHopInput {
 
 /**
  * Cancel every session in `sessionIds`, independently and best-effort, reporting
- * which ones actually came back. Each cancel is its own transaction: one failing
- * must never stop the others from being attempted, or a single flaky broadcast
- * strands the user's other deposit too.
+ * which ones actually came back. Each cancel is its own transaction, and one
+ * failing must never stop the others from being attempted — a single flaky
+ * broadcast must not strand the user's other deposit too.
+ *
+ * SEQUENTIAL, not Promise.all. Every cancel is a tx signed by the SAME account, so
+ * broadcasting two at once makes them read the same account sequence number and the
+ * chain rejects the loser — which is the identical constraint establishChainOrRefund
+ * documents for the two purchases. Racing them here cost a live refund: cancelling a
+ * failed chain, entry #55122441 landed and exit #55122449 was rejected, leaving a
+ * paid session the user had to cancel by hand. Awaiting each in turn is what makes
+ * the second cancel see the sequence the first consumed.
  */
 async function refundSessions(
   sessionIds: string[],
   wallet: NonNullable<ReturnType<typeof getWallet>>,
   address: string,
 ): Promise<{ sessionId: string; refunded: boolean }[]> {
-  return Promise.all(
-    sessionIds.map(async (sessionId) => {
-      try {
-        await withTimeout(endSession({ wallet, address, sessionId }), REFUND_TIMEOUT_MS, 'refund')
-        return { sessionId, refunded: true }
-      } catch (err) {
-        console.error(`[connect] auto-cancel of session ${sessionId} failed:`, err)
-        return { sessionId, refunded: false }
-      }
-    }),
-  )
+  return refundEachInTurn(sessionIds, async (sessionId) => {
+    try {
+      await withTimeout(endSession({ wallet, address, sessionId }), REFUND_TIMEOUT_MS, 'refund')
+    } catch (err) {
+      console.error(`[connect] auto-cancel of session ${sessionId} failed:`, err)
+      throw err
+    }
+  })
 }
 
 /**
@@ -1614,9 +1719,9 @@ async function fetchNodes(): Promise<unknown[]> {
   )
   const nodes = normalizeNodes([first, ...rest].flatMap((p) => p.nodes))
   // Cache node metadata for session enrichment
-  cachedNodes = (nodes as { address?: string; moniker?: string; country?: string }[])
+  cachedNodes = (nodes as { address?: string; moniker?: string; country?: string; type?: number }[])
     .filter((n) => n.address)
-    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '' }))
+    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '', type: n.type ?? 0 }))
   // Update shared cache: in-memory, disk, and broadcast to all renderer windows
   nodesMemoryCache = { nodes, fetchedAt: Date.now() }
   saveNodesCache(nodes)
@@ -1638,9 +1743,9 @@ export function bootstrapNodesCache(): void {
   // still has the nulls.
   disk.nodes = normalizeNodes(disk.nodes)
   nodesMemoryCache = disk
-  cachedNodes = (disk.nodes as { address?: string; moniker?: string; country?: string }[])
+  cachedNodes = (disk.nodes as { address?: string; moniker?: string; country?: string; type?: number }[])
     .filter((n) => n.address)
-    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '' }))
+    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '', type: n.type ?? 0 }))
 }
 
 /**
@@ -1675,11 +1780,13 @@ async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
   return publicRpcCache.list
 }
 
-function getNodeMeta(nodeAddress: string): { moniker: string; country: string } {
+function getNodeMeta(nodeAddress: string): { moniker: string; country: string; type: number } {
   // First check saved session config
   // Then fall back to cached node list from API
   const node = cachedNodes.find((n) => n.address === nodeAddress)
-  return { moniker: node?.moniker || '', country: node?.country || '' }
+  // type 0 = unknown, the same tag the feed uses for a node whose protocol it
+  // doesn't know. Callers must treat it as "no answer", not as a protocol.
+  return { moniker: node?.moniker || '', country: node?.country || '', type: node?.type ?? 0 }
 }
 
 // --- IPC input validation helpers ---
@@ -1811,18 +1918,14 @@ export function registerIpcHandlers(): void {
       // bridge the post-disconnect gap: show max(onChain, last-measured) so usage
       // doesn't collapse to ~0 while the chain settles (see lastSessionUsage).
       const enriched = sessions.map((s) => {
-        const saved = loadSessionConfig(s.id)
-        const nodeMeta = getNodeMeta(s.nodeAddress)
         const remembered = lastSessionUsage.get(s.id)
         return {
-          ...s,
+          ...decorateSessionRow(s),
           downloadBytes: remembered ? maxUsageBytes(s.downloadBytes, remembered.downloadBytes) : s.downloadBytes,
           uploadBytes: remembered ? maxUsageBytes(s.uploadBytes, remembered.uploadBytes) : s.uploadBytes,
           durationSeconds: remembered
             ? Math.max(s.durationSeconds ?? 0, remembered.durationSeconds)
             : s.durationSeconds,
-          nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker,
-          nodeCountry: saved?.nodeCountry || nodeMeta.country,
         }
       })
       lastKnownSessions = enriched
@@ -2120,9 +2223,7 @@ export function registerIpcHandlers(): void {
     try {
       const sessions = await getActiveSessions()
       lastKnownSessions = sessions.map((s) => {
-        const saved = loadSessionConfig(s.id)
-        const nodeMeta = getNodeMeta(s.nodeAddress)
-        return { ...s, nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker, nodeCountry: saved?.nodeCountry || nodeMeta.country }
+        return decorateSessionRow(s)
       })
       setQuota(sessions.find((s) => s.id === sessionId))
     } catch { /* best-effort */ }
@@ -2193,6 +2294,14 @@ export function registerIpcHandlers(): void {
     // means a bad exit node costs nothing, rather than costing the entry deposit.
     await preflightConnect(params.entry.nodeType, params.entry.apiField)
     await preflightConnect(params.exit.nodeType, params.exit.apiField)
+    // ...and verify the CHAIN policy too, which preflightConnect knows nothing about:
+    // it checks that a node runs the protocol the directory claims, not that the node
+    // can be an end of a chain. Without this a node that cannot be wrapped in TLS is
+    // bought first and refused at the handshake, which is a refund the user should
+    // never have needed. That is not hypothetical — a v8.3.1 entry did exactly this,
+    // and the refund of the pair then failed on its own bug.
+    await assertChainEligible(params.entry, 'entry')
+    await assertChainEligible(params.exit, 'exit')
 
     const hopCost = (quoteValue: string): number =>
       params.denom === 'udvpn' ? parseInt(quoteValue, 10) * params.amount : 0
@@ -2224,9 +2333,7 @@ export function registerIpcHandlers(): void {
     try {
       const sessions = await getActiveSessions()
       lastKnownSessions = sessions.map((s) => {
-        const saved = loadSessionConfig(s.id)
-        const nodeMeta = getNodeMeta(s.nodeAddress)
-        return { ...s, nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker, nodeCountry: saved?.nodeCountry || nodeMeta.country }
+        return decorateSessionRow(s)
       })
       setQuota(sessions.find((s) => s.id === result.entrySessionId))
       const exitRow = sessions.find((s) => s.id === result.exitSessionId)
@@ -2268,6 +2375,17 @@ export function registerIpcHandlers(): void {
         'this session cannot be reconnected. You will need to create a new subscription.'
       )
     }
+    // A record with no config string is a TOMBSTONE left by retireSessionConfig: the
+    // session was ended and its credentials cleared, keeping only the chain pairing
+    // so the Sessions tab can still draw the two hops as one card while they settle.
+    // The UI hides the action on an ended session, so reaching here means something
+    // raced the chain — say what happened rather than bringing up an empty config.
+    if (!saved.configString) {
+      throw new Error(
+        'This session has ended and its credentials were cleared, so it cannot be ' +
+        'reconnected. Buy a new session to connect again.'
+      )
+    }
 
     activeSessionId = saved.sessionId
     // Populate node info from saved config; fall back to cached node list
@@ -2300,19 +2418,27 @@ export function registerIpcHandlers(): void {
       // user clicked, entry must stay entry — take that from the recorded role.
       const entrySaved = saved.chainRole === 'exit' ? peer : saved
       const exitSaved = saved.chainRole === 'exit' ? saved : peer
+      // `type` here is the NODE's own protocol, which is not the same thing as the
+      // binary the chain runs on. A chain is always executed by xray (it is a strict
+      // superset of what we emit), but both hops are usually plain V2Ray nodes —
+      // hardcoding 4 here put "XRAY" in the connected bar for a chain of two V2Ray
+      // nodes. The saved record carries the real tag; a record written before it did
+      // falls back to the node directory, and only then to V2Ray.
+      const hopType = (saved: { nodeAddress: string; nodeType?: number }): number =>
+        saved.nodeType ?? (getNodeMeta(saved.nodeAddress).type || 2)
       activeSessionId = entrySaved.sessionId
       activeNodeInfo = {
         address: entrySaved.nodeAddress,
         moniker: entrySaved.nodeMoniker || getNodeMeta(entrySaved.nodeAddress).moniker || '',
         country: entrySaved.nodeCountry || getNodeMeta(entrySaved.nodeAddress).country || '',
-        type: 4,
+        type: hopType(entrySaved),
       }
       activeExitSessionId = exitSaved.sessionId
       activeExitNodeInfo = {
         address: exitSaved.nodeAddress,
         moniker: exitSaved.nodeMoniker || getNodeMeta(exitSaved.nodeAddress).moniker || '',
         country: exitSaved.nodeCountry || getNodeMeta(exitSaved.nodeAddress).country || '',
-        type: 4,
+        type: hopType(exitSaved),
       }
       activeXrayConfig = saved.configString
       // Same reasoning as the fallback return below: this config was minted earlier and
@@ -2827,6 +2953,84 @@ export function registerIpcHandlers(): void {
   // Node Testing: Get cached results
   handle(IPC.NODE_TEST_RESULTS, async () => {
     return getAllCachedResults()
+  })
+
+  // Multihop: grade nodes for each end of a chain, BEFORE anything is paid for.
+  //
+  // The exit hop of a chain must serve plain TCP (only TCP delegates dialing to
+  // xray's detour dialer — see EXIT_TRANSPORTS), and that fact is not in the node
+  // list: the aggregator publishes one transport per node, which reports tcp for 16
+  // nodes network-wide while 138 of 241 healthy v9 nodes actually serve one. So it
+  // has to come from each node's own listing. Cheap and unauthenticated — the same
+  // root-path request the protocol preflight already makes.
+  handle(IPC.NODE_CHAIN_ELIGIBILITY, async (_event, nodes: Array<{
+    nodeAddress: string; remoteUrl: string; nodeType: number
+  }>) => {
+    if (!Array.isArray(nodes) || nodes.length === 0) throw new Error('Invalid nodes array')
+    if (nodes.length > CHAIN_ELIGIBILITY_MAX_BATCH) {
+      throw new Error(`Too many nodes in one batch (max ${CHAIN_ELIGIBILITY_MAX_BATCH})`)
+    }
+    for (const n of nodes) {
+      assertString(n.nodeAddress, 'nodeAddress')
+      if (typeof n.remoteUrl === 'string' && n.remoteUrl !== '' && !isSafeNodeApiUrl(n.remoteUrl)) {
+        throw new Error('Invalid node probe URL')
+      }
+      if (n.nodeType !== 2 && n.nodeType !== 4) {
+        throw new Error('Only V2Ray (2) and XRAY (4) nodes can be chained')
+      }
+    }
+
+    const now = Date.now()
+    const out: ChainEligibilityResult[] = new Array(nodes.length)
+    let index = 0
+    async function worker(): Promise<void> {
+      while (index < nodes.length) {
+        const slot = index++
+        const node = nodes[slot]
+        const cached = chainEligibilityCache.get(node.nodeAddress)
+        if (cached && now - cached.checkedAt < CHAIN_ELIGIBILITY_TTL_MS) {
+          out[slot] = cached
+          continue
+        }
+        let result: ChainEligibilityResult
+        try {
+          // Same reason preflightConnect wraps its own call: nodeFetch's timeout
+          // covers socket inactivity, not the TCP connect, so a blackholed node
+          // hangs past it.
+          const metadata = await withTimeout(
+            fetchNodeServiceMetadata(node.remoteUrl),
+            NODE_PROTOCOL_CHECK_TIMEOUT_MS,
+            'node inbound listing',
+          )
+          const graded = classifyHopEligibility(
+            node.nodeType === 4 ? 'xray' : 'v2ray',
+            metadata as HopMetadataEntry[],
+          )
+          result = { nodeAddress: node.nodeAddress, checkedAt: Date.now(), reachable: true, ...graded }
+        } catch (err) {
+          // Unreachable and "too old to say" are both reported as unknown rather
+          // than as a refusal: a v8.3.1 node may well work, we just cannot tell
+          // without paying, and the picker says so instead of hiding it.
+          result = {
+            nodeAddress: node.nodeAddress,
+            checkedAt: Date.now(),
+            reachable: false,
+            transports: [],
+            entry: false,
+            exit: false,
+            entrySecurity: null,
+            exitSecurity: null,
+            error: err instanceof Error ? err.message : 'Probe failed',
+          }
+        }
+        chainEligibilityCache.set(node.nodeAddress, result)
+        out[slot] = result
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(CHAIN_ELIGIBILITY_CONCURRENCY, nodes.length) }, worker),
+    )
+    return out
   })
 
   // Network: public IP lookup. includeGeo=true (default) hits ipapi.co for

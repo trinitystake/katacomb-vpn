@@ -75,6 +75,16 @@ interface SavedSessionConfig {
    * reconnect must keep entry as entry whichever hop the user clicked on.
    */
   chainRole?: 'entry' | 'exit'
+  /**
+   * The NODE's own protocol tag (2 = V2Ray, 4 = XRAY), which is deliberately not the
+   * same thing as `protocol` above. `protocol` is the runtime that replays this
+   * config, and a chain is always replayed by xray because xray-core is a strict
+   * superset of what the builder emits — so a chain of two plain V2Ray nodes is
+   * saved with `protocol: 'xray'`. Recording the real tag keeps the reconnect path
+   * from reporting the runtime as the node's protocol, which put "XRAY" in the
+   * connected bar for a V2Ray chain.
+   */
+  nodeType?: number
 }
 
 function getSessionsDir(): string {
@@ -125,6 +135,31 @@ export function loadSessionConfig(sessionId: string): SavedSessionConfig | null 
 function deleteSessionConfig(sessionId: string): void {
   const path = sessionConfigPath(sessionId)
   if (existsSync(path)) unlinkSync(path)
+}
+
+/**
+ * Retire a finished session's stored config. A CHAIN hop leaves a tombstone rather
+ * than vanishing: the credentials go, but `chainPeerSessionId`/`chainRole` stay.
+ *
+ * They have to. That pairing is the only record that two sessions were one tunnel,
+ * and an ended session keeps its row for the two hours the chain takes to settle —
+ * so deleting it outright split a finished chain back into two unrelated "Ended"
+ * cards, exactly the confusion the grouped card exists to prevent. The pairing is
+ * two session ids and a role; nothing about it is secret. The config string is the
+ * secret, and that is what gets cleared.
+ *
+ * Stale tombstones are swept with everything else by sweepStaleSessionFiles.
+ */
+function retireSessionConfig(sessionId: string): void {
+  const saved = loadSessionConfig(sessionId)
+  // Only tombstone when the write can actually happen: without the OS keyring
+  // saveSessionConfig writes nothing, which would leave the ORIGINAL file and its
+  // credentials sitting there. Deleting is the safe outcome in that case.
+  if (saved?.chainPeerSessionId && isSecureStorageAvailable()) {
+    saveSessionConfig({ ...saved, configString: '' })
+    return
+  }
+  deleteSessionConfig(sessionId)
 }
 
 /**
@@ -315,7 +350,7 @@ export async function endSession(params: {
       console.log(`[session] #${sessionId} was already inactive on chain — nothing to cancel`)
     }
 
-    deleteSessionConfig(sessionId)
+    retireSessionConfig(sessionId)
   } finally {
     client.disconnect()
   }
@@ -662,6 +697,7 @@ export async function performChainHandshake(params: {
       nodeAddress: hop.nodeAddress,
       nodeMoniker: hop.nodeMoniker,
       nodeCountry: hop.nodeCountry,
+      nodeType: hop.nodeType,
       chainPeerSessionId: peer.sessionId,
       chainRole: role,
     })

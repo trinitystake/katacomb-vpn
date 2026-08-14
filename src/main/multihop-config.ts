@@ -122,6 +122,27 @@ const NETWORK_BY_TRANSPORT: Record<string, string> = {
  */
 const EXIT_TRANSPORTS = new Set(['tcp'])
 
+/**
+ * BOTH hops of a chain must be wrapped in TLS or Reality. This is stricter than the
+ * single-hop rule, which also accepts VMess with no transport security — VMess
+ * carries its own AEAD cipher, so that is encrypted, just not disguised.
+ *
+ * The difference matters here and only here. A chain is opt-in, costs two sessions
+ * and roughly 20x the latency, and is chosen for exactly one reason: to stop any
+ * single party correlating who you are with where you go. The entry hop is the one
+ * your own network sees, and VMess over gRPC without TLS is cleartext HTTP/2 on an
+ * unusual port — the payload is safe, but the connection is trivially recognisable
+ * as "not the web". Paying double for privacy and then announcing the circuit to
+ * the nearest observer is not a trade worth offering.
+ *
+ * Cost measured 2026-08-14: 211 of 241 healthy v9.0.0 nodes still qualify as an
+ * entry (30 lost) and 140 as an exit. Single-hop connects are untouched — this
+ * function is only reachable through buildMultihopConfig.
+ */
+function isChainGradeSecurity(entry: HopMetadataEntry): boolean {
+  return entry.transport_security === SECURITY_TLS || entry.transport_security === SECURITY_REALITY
+}
+
 /** Decode a hop's transport enum with ITS OWN protocol's table. */
 export function transportName(protocol: HopProtocol, value: number): string | null {
   const table = protocol === 'xray' ? XRAY_TRANSPORT : V2RAY_TRANSPORT
@@ -193,12 +214,15 @@ export function selectHopEntry(spec: HopSpec, role: HopRole): HopMetadataEntry |
     if (role === 'exit' && !EXIT_TRANSPORTS.has(name)) return false
     if (NETWORK_BY_TRANSPORT[name] === undefined) return false
     if (parsePort(m.port) === null) return false
+    if (!isChainGradeSecurity(m)) return false
     // A TLS inbound is only usable if the node sent a pin we can verify it against.
     // Without one there is no way to authenticate a self-signed cert, and xray no
     // longer offers an "accept anything" mode — the go-sdk's own client config makes
     // the same check (client_config.go: TransportSecurityTLS && TLSPin == "" → error).
     if (m.transport_security === SECURITY_TLS && normalizeTlsPin(m.tls_pin) === null) return false
-    return !isCleartextEntry(m)
+    // No cleartext check is needed here: TLS/Reality already excludes it, since the
+    // only cleartext combination is VLess with no transport security.
+    return true
   })
   if (usable.length === 0) return null
   return (
@@ -206,6 +230,72 @@ export function selectHopEntry(spec: HopSpec, role: HopRole): HopMetadataEntry |
     usable.find((m) => m.transport_security === SECURITY_TLS) ??
     usable[0]
   )
+}
+
+/** What a node can serve as, judged from the inbounds it advertises publicly. */
+export interface HopEligibility {
+  /** Transport names this node advertises, decoded with its own protocol's table. */
+  transports: string[]
+  /** Has an emittable TLS/Reality inbound — usable as the ENTRY hop of a chain. */
+  entry: boolean
+  /** Has a TLS/Reality PLAIN-TCP inbound — usable as the EXIT hop of a chain. */
+  exit: boolean
+  /** How the entry-capable inbound would be wrapped, or null if none qualifies. */
+  entrySecurity: 'reality' | 'tls' | null
+  /**
+   * How the exit-capable inbound would be wrapped, best first, or null when none
+   * qualifies. Only ever 'reality' or 'tls' now that both ends require one of them
+   * (see isChainGradeSecurity); it is still reported so the picker can show which,
+   * rather than making the user take "usable" on trust.
+   */
+  exitSecurity: 'reality' | 'tls' | null
+}
+
+/**
+ * Grade a node for each end of a chain from the `service_metadata` it publishes at
+ * its ROOT path — the pre-purchase counterpart to `selectHopEntry`. This is what
+ * lets the picker refuse an unusable exit BEFORE two sessions are paid for, rather
+ * than discovering it in the handshake and refunding.
+ *
+ * It deliberately checks LESS than selectHopEntry, because the public listing
+ * carries less: `port` is reported as `""` and `tls_pin` as `""` on every node
+ * measured (241/241 healthy v9 nodes) — both are minted per session and only
+ * arrive in the paid handshake response. So this answers "is this node the right
+ * SHAPE for this role", and selectHopEntry still has the final say. Anything it
+ * passes that the builder then rejects is refunded by establishChainOrRefund.
+ *
+ * Do NOT be tempted to grade from the node list's `connection` field instead: the
+ * aggregator publishes only ONE triple per node (its first inbound), which reports
+ * tcp for 16 nodes network-wide while 138 of 241 actually serve a TCP inbound.
+ */
+export function classifyHopEligibility(
+  protocol: HopProtocol,
+  metadata: HopMetadataEntry[],
+): HopEligibility {
+  if (!Array.isArray(metadata)) {
+    return { transports: [], entry: false, exit: false, entrySecurity: null, exitSecurity: null }
+  }
+  const named = metadata.map((m) => ({ entry: m, name: transportName(protocol, m.transport_protocol) }))
+  // Chain policy, not the single-hop one: TLS or Reality on both ends.
+  const usable = named.filter(
+    (n) => n.name !== null && NETWORK_BY_TRANSPORT[n.name] !== undefined && isChainGradeSecurity(n.entry),
+  )
+  const exits = usable.filter((n) => EXIT_TRANSPORTS.has(n.name as string))
+  // Same "prefer encrypted" ordering selectHopEntry uses, so what is shown is what
+  // would be built.
+  const pick = (from: typeof usable) =>
+    from.find((n) => n.entry.transport_security === SECURITY_REALITY)
+    ?? from.find((n) => n.entry.transport_security === SECURITY_TLS)
+    ?? from[0]
+  const label = (n: typeof usable[number] | undefined): 'reality' | 'tls' | null =>
+    n === undefined ? null : n.entry.transport_security === SECURITY_REALITY ? 'reality' : 'tls'
+  return {
+    transports: [...new Set(named.map((n) => n.name).filter((n): n is string => n !== null))],
+    entry: usable.length > 0,
+    exit: exits.length > 0,
+    entrySecurity: label(pick(usable)),
+    exitSecurity: label(pick(exits)),
+  }
 }
 
 /**
@@ -285,9 +375,17 @@ function requireEntry(spec: HopSpec, role: HopRole): HopMetadataEntry {
   if (picked) return picked
   // Distinguish the two failure causes — the exit-only one is actionable ("pick a
   // different exit"), the cleartext one is a policy refusal.
-  const anyEncrypted = spec.metadata.some((m) => !isCleartextEntry(m))
-  if (!anyEncrypted) {
-    throw new Error(`Multihop ${role} node offers only cleartext (VLess without TLS) inbounds`)
+  if (!spec.metadata.some((m) => isChainGradeSecurity(m))) {
+    // Two different faults, and the distinction is worth keeping: a cleartext-only
+    // node is unsafe at any hop, while a VMess-without-TLS node is fine single-hop
+    // and refused only by the stricter chain rule.
+    throw new Error(
+      spec.metadata.every((m) => isCleartextEntry(m))
+        ? `Multihop ${role} node offers only cleartext (VLess without TLS) inbounds`
+        : `Multihop ${role} node offers no TLS or Reality inbound. Both hops of a chain must be ` +
+          'wrapped, so neither the connection to the entry nor the one to the exit is recognisable ' +
+          'as a proxy. This node is still usable for an ordinary single-hop connection.',
+    )
   }
   // Distinguish "TLS but unpinnable" from "wrong transport": the node's cert is
   // self-signed, so without its pin there is nothing to verify it against.

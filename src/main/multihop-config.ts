@@ -43,6 +43,13 @@ export interface HopMetadataEntry {
   proxy_protocol: number
   transport_protocol: number
   transport_security: number
+  /**
+   * SHA-256 of the node's self-signed TLS certificate, issued per session and sent
+   * in the handshake response (go-sdk `ServerMetadata.TLSPin`). REQUIRED for a TLS
+   * inbound — see buildHopOutbound. Encoding differs by SDK: v2ray/server.go
+   * base64-encodes it, xray/server.go hex-encodes it, so it is normalised on read.
+   */
+  tls_pin?: string
   flow?: number
   reality_server_name?: string
   reality_short_id?: string
@@ -122,6 +129,35 @@ export function isCleartextEntry(entry: HopMetadataEntry): boolean {
   return entry.proxy_protocol === PROXY_VLESS && entry.transport_security === SECURITY_NONE
 }
 
+/**
+ * Normalise a node's TLS pin to the lower-case hex SHA-256 that xray-core's
+ * `pinnedPeerCertSha256` requires, or null when it isn't a usable 32-byte digest.
+ *
+ * Both encodings are accepted regardless of which SDK the hop came from — v2ray
+ * base64-encodes the pin and xray hex-encodes it (v2ray/server.go vs
+ * xray/server.go, same `sha256.Sum256(cert.Raw)`), and detecting by shape rather
+ * than by protocol means a node that switches encoding can't silently break the
+ * connect path. Anything that doesn't decode to exactly 32 bytes is rejected: a
+ * malformed pin must fail the build, never fall through to an unverified TLS
+ * session.
+ */
+export function normalizeTlsPin(pin: string | undefined): string | null {
+  if (typeof pin !== 'string' || pin.length === 0) return null
+  const trimmed = pin.trim()
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return trimmed.toLowerCase()
+  if (!/^[A-Za-z0-9+/]{42,44}={0,2}$/.test(trimmed)) return null
+  try {
+    const buf = Buffer.from(trimmed, 'base64')
+    // Buffer.from is lenient, so verify the round-trip rather than trusting length.
+    if (buf.length !== 32 || buf.toString('base64').replace(/=+$/, '') !== trimmed.replace(/=+$/, '')) {
+      return null
+    }
+    return buf.toString('hex')
+  } catch {
+    return null
+  }
+}
+
 function parsePort(raw: string | number): number | null {
   const port = typeof raw === 'string' ? parseInt(raw, 10) : raw
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return null
@@ -144,6 +180,11 @@ export function selectHopEntry(spec: HopSpec, role: HopRole): HopMetadataEntry |
     if (role === 'exit' && UDP_TRANSPORTS.has(name)) return false
     if (NETWORK_BY_TRANSPORT[name] === undefined) return false
     if (parsePort(m.port) === null) return false
+    // A TLS inbound is only usable if the node sent a pin we can verify it against.
+    // Without one there is no way to authenticate a self-signed cert, and xray no
+    // longer offers an "accept anything" mode — the go-sdk's own client config makes
+    // the same check (client_config.go: TransportSecurityTLS && TLSPin == "" → error).
+    if (m.transport_security === SECURITY_TLS && normalizeTlsPin(m.tls_pin) === null) return false
     return !isCleartextEntry(m)
   })
   if (usable.length === 0) return null
@@ -183,10 +224,20 @@ export function buildHopOutbound(
     }
   } else if (entry.transport_security === SECURITY_TLS) {
     streamSettings.security = 'tls'
-    // Sentinel nodes use self-signed certs — the chain-side signature authenticates
-    // the node, not the certificate. SNI stays the advertised host so vhost routing
-    // still matches after pinV2RayNodeAddresses rewrites the dial address to an IP.
-    streamSettings.tlsSettings = { serverName: address, allowInsecure: true }
+    // Sentinel nodes use self-signed certs, so the certificate is authenticated by
+    // PINNING the digest the node sent in its own handshake — NOT by name, and not
+    // by trusting anything (`allowInsecure` was removed outright in xray 26.x and is
+    // now a hard config error). This mirrors upstream's own xray client template,
+    // which likewise sends fingerprint + pin and no serverName: once the exact
+    // certificate is pinned, hostname verification adds nothing, and the dial
+    // address is an IP by then anyway (pinV2RayNodeAddresses).
+    //
+    // selectHopEntry guarantees a usable pin exists for any TLS entry it returns, so
+    // this cannot silently degrade to an unverified session.
+    streamSettings.tlsSettings = {
+      fingerprint: entry.reality_fingerprint || 'chrome',
+      pinnedPeerCertSha256: normalizeTlsPin(entry.tls_pin),
+    }
   }
   if (network === 'grpc') streamSettings.grpcSettings = {}
   if (network === 'ws') streamSettings.wsSettings = {}
@@ -224,6 +275,17 @@ function requireEntry(spec: HopSpec, role: HopRole): HopMetadataEntry {
   const anyEncrypted = spec.metadata.some((m) => !isCleartextEntry(m))
   if (!anyEncrypted) {
     throw new Error(`Multihop ${role} node offers only cleartext (VLess without TLS) inbounds`)
+  }
+  // Distinguish "TLS but unpinnable" from "wrong transport": the node's cert is
+  // self-signed, so without its pin there is nothing to verify it against.
+  const pinnableBlocked = spec.metadata.some(
+    (m) => m.transport_security === SECURITY_TLS && normalizeTlsPin(m.tls_pin) === null,
+  )
+  if (pinnableBlocked && !spec.metadata.some((m) => normalizeTlsPin(m.tls_pin) !== null)) {
+    throw new Error(
+      `Multihop ${role} node offered a TLS inbound but no usable certificate pin ` +
+      '(tls_pin), so its self-signed certificate cannot be verified. Pick a different node.',
+    )
   }
   throw new Error(
     role === 'exit'

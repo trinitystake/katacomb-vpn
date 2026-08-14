@@ -5,6 +5,7 @@ import {
   buildHopOutbound,
   selectHopEntry,
   isCleartextEntry,
+  normalizeTlsPin,
   transportName,
   ENTRY_TAG,
   EXIT_TAG,
@@ -37,15 +38,15 @@ const xrayHop = (metadata: HopMetadataEntry[], addrs = ['exit.example.net']): Ho
 
 // vmess/grpc/tls — the single most common buildable v2ray inbound.
 const V2RAY_GRPC_TLS: HopMetadataEntry = {
-  port: '20491', proxy_protocol: 2, transport_protocol: 3, transport_security: 2,
+  port: '20491', proxy_protocol: 2, transport_protocol: 3, transport_security: 2, tls_pin: 'c'.repeat(64),
 }
 // vless/websocket/tls
 const V2RAY_WS_TLS: HopMetadataEntry = {
-  port: '23457', proxy_protocol: 1, transport_protocol: 8, transport_security: 2,
+  port: '23457', proxy_protocol: 1, transport_protocol: 8, transport_security: 2, tls_pin: 'd'.repeat(64),
 }
 // vless/tcp/tls
 const V2RAY_TCP_TLS: HopMetadataEntry = {
-  port: '18407', proxy_protocol: 1, transport_protocol: 7, transport_security: 2,
+  port: '18407', proxy_protocol: 1, transport_protocol: 7, transport_security: 2, tls_pin: 'b'.repeat(64),
 }
 
 test('chains exit through entry: exit is default egress and dials via the entry tag', () => {
@@ -117,10 +118,10 @@ test('transport_protocol 1 builds tcp for an xray hop and is rejected for a v2ra
 
 test('a UDP transport is refused as the exit hop', () => {
   const quic: HopMetadataEntry = {
-    port: '20000', proxy_protocol: 2, transport_protocol: 6, transport_security: 2,
+    port: '20000', proxy_protocol: 2, transport_protocol: 6, transport_security: 2, tls_pin: 'e'.repeat(64),
   }
   const mkcp: HopMetadataEntry = {
-    port: '20001', proxy_protocol: 2, transport_protocol: 5, transport_security: 2,
+    port: '20001', proxy_protocol: 2, transport_protocol: 5, transport_security: 2, tls_pin: 'f'.repeat(64),
   }
   assert.equal(selectHopEntry(v2rayHop([quic]), 'exit'), null)
   assert.equal(selectHopEntry(v2rayHop([mkcp]), 'exit'), null)
@@ -133,7 +134,7 @@ test('a UDP transport is refused as the exit hop', () => {
 
 test('a node offering both a UDP and a TCP-based transport is usable as the exit', () => {
   const quic: HopMetadataEntry = {
-    port: '20000', proxy_protocol: 2, transport_protocol: 6, transport_security: 2,
+    port: '20000', proxy_protocol: 2, transport_protocol: 6, transport_security: 2, tls_pin: 'e'.repeat(64),
   }
   const picked = selectHopEntry(v2rayHop([quic, V2RAY_GRPC_TLS]), 'exit')
   assert.equal(picked, V2RAY_GRPC_TLS)
@@ -189,7 +190,7 @@ test('prefers reality, then tls, over an unsecured inbound', () => {
     port: '3', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
   }
   const tls: HopMetadataEntry = {
-    port: '2', proxy_protocol: 1, transport_protocol: 1, transport_security: 2,
+    port: '2', proxy_protocol: 1, transport_protocol: 1, transport_security: 2, tls_pin: 'a'.repeat(64),
   }
   assert.equal(selectHopEntry(xrayHop([vmessNone, tls, reality]), 'exit'), reality)
   assert.equal(selectHopEntry(xrayHop([vmessNone, tls]), 'exit'), tls)
@@ -198,13 +199,15 @@ test('prefers reality, then tls, over an unsecured inbound', () => {
 
 // --- outbound shape -----------------------------------------------------------
 
-test('grpc and websocket get their stream sub-blocks; tls keeps the host as SNI', () => {
+test('grpc and websocket get their stream sub-blocks', () => {
   const grpc = buildHopOutbound(v2rayHop([V2RAY_GRPC_TLS]), V2RAY_GRPC_TLS, 'node.example.net', 'x')
   const grpcStream = grpc.streamSettings as Record<string, unknown>
   assert.equal(grpcStream.network, 'grpc')
   assert.deepEqual(grpcStream.grpcSettings, {})
-  // SNI must survive pinV2RayNodeAddresses rewriting the dial address to an IP.
-  assert.deepEqual(grpcStream.tlsSettings, { serverName: 'node.example.net', allowInsecure: true })
+  assert.deepEqual(grpcStream.tlsSettings, {
+    fingerprint: 'chrome',
+    pinnedPeerCertSha256: 'c'.repeat(64),
+  })
 
   const ws = buildHopOutbound(v2rayHop([V2RAY_WS_TLS]), V2RAY_WS_TLS, 'node.example.net', 'x')
   const wsStream = ws.streamSettings as Record<string, unknown>
@@ -264,4 +267,58 @@ test('missing metadata, missing address and an unusable port all throw', () => {
     port: '', proxy_protocol: 2, transport_protocol: 3, transport_security: 2,
   }
   assert.equal(selectHopEntry(v2rayHop([noPort]), 'exit'), null)
+})
+
+// --- TLS pinning (xray 26.x removed `allowInsecure`; the pin is now mandatory) ---
+
+test('normalizeTlsPin accepts hex (xray SDK) and base64 (v2ray SDK), both to hex', () => {
+  const hex = 'a'.repeat(64)
+  assert.equal(normalizeTlsPin(hex), hex)
+  assert.equal(normalizeTlsPin(hex.toUpperCase()), hex)
+  // Same 32 bytes, base64 — this is what a v2ray node sends (v2ray/server.go
+  // base64-encodes the digest where xray/server.go hex-encodes it).
+  const b64 = Buffer.from(hex, 'hex').toString('base64')
+  assert.equal(normalizeTlsPin(b64), hex)
+})
+
+test('normalizeTlsPin rejects anything that is not a 32-byte digest', () => {
+  for (const bad of [undefined, '', '   ', 'not-a-pin', 'a'.repeat(63), 'a'.repeat(65),
+                     Buffer.alloc(16).toString('base64'), Buffer.alloc(33).toString('base64')]) {
+    assert.equal(normalizeTlsPin(bad as string | undefined), null, JSON.stringify(bad))
+  }
+})
+
+test('a TLS inbound without a usable pin is not selectable', () => {
+  // Its self-signed cert could not be verified against anything, and xray no longer
+  // has an "accept anything" mode, so this must never be built.
+  const noPin: HopMetadataEntry = {
+    port: '443', proxy_protocol: 1, transport_protocol: 7, transport_security: 2,
+  }
+  assert.equal(selectHopEntry(v2rayHop([noPin]), 'exit'), null)
+  assert.throws(
+    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([noPin])),
+    /no usable certificate pin/,
+  )
+})
+
+test('a TLS outbound pins the node cert and never sends allowInsecure', () => {
+  const ob = buildHopOutbound(v2rayHop([V2RAY_TCP_TLS]), V2RAY_TCP_TLS, 'node.example.net', 'x')
+  const tls = (ob.streamSettings as Record<string, unknown>).tlsSettings as Record<string, unknown>
+  assert.equal(tls.pinnedPeerCertSha256, 'b'.repeat(64))
+  assert.equal(tls.fingerprint, 'chrome')
+  // `allowInsecure` is a hard config error in xray 26.x, and serverName is redundant
+  // once the exact certificate is pinned (upstream's own template omits it too).
+  assert.ok(!('allowInsecure' in tls))
+  assert.ok(!('serverName' in tls))
+})
+
+test('a vmess inbound with no transport security needs no pin', () => {
+  // VMess carries its own AEAD cipher, so there is no TLS layer to verify.
+  const vmessNone: HopMetadataEntry = {
+    port: '18407', proxy_protocol: 2, transport_protocol: 3, transport_security: 1,
+  }
+  const picked = selectHopEntry(v2rayHop([vmessNone]), 'exit')
+  assert.equal(picked, vmessNone)
+  const ob = buildHopOutbound(v2rayHop([vmessNone]), vmessNone, 'n', 'x')
+  assert.equal((ob.streamSettings as Record<string, unknown>).security, undefined)
 })

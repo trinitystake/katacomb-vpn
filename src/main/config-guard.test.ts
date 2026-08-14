@@ -397,6 +397,29 @@ test('withV2RayDoH prepends the port-53 intercept BEFORE the proxy catch-all', (
   assert.deepEqual(out.routing.rules.slice(2), SDK_V2RAY.routing.rules)
 })
 
+test('withV2RayDoH keys the intercept on the config own socks inbound tag', () => {
+  // Regression: the intercept used to be hardcoded to inboundTag:['proxy'], which is
+  // only what the SDK's v2ray config uses. buildXRayConfig and buildMultihopConfig tag
+  // their socks inbound 'socks', so the rule matched nothing and DoH was silently inert.
+  const xrayShaped = {
+    log: { loglevel: 'warning' },
+    inbounds: [{ tag: 'socks', listen: '127.0.0.1', port: 1080, protocol: 'socks', settings: { udp: true } }],
+    outbounds: [{ tag: 'proxy', protocol: 'vless', settings: { vnext: [{ address: '203.0.113.9', port: 443 }] } }],
+  }
+  const out = withV2RayDoH(xrayShaped, '9.9.9.9') as any
+  assert.deepEqual(out.routing.rules[0], { type: 'field', inboundTag: ['socks'], port: 53, outboundTag: 'dns-out' })
+  // With no balancer, DNS egresses via the first outbound — for a chain that is the exit hop.
+  assert.deepEqual(out.routing.rules[1], { type: 'field', inboundTag: ['dns-module'], outboundTag: 'proxy' })
+})
+
+test('withV2RayDoH never intercepts the SDK dokodemo-door api inbound', () => {
+  // The intercept is prepended, so pulling in the 'api' tag would hijack v2ray's own
+  // API port ahead of the rule that routes it to outboundTag 'api'.
+  const out = withV2RayDoH(SDK_V2RAY, '9.9.9.9') as any
+  assert.deepEqual(out.routing.rules[0].inboundTag, ['proxy'])
+  assert.ok(!out.routing.rules[0].inboundTag.includes('api'))
+})
+
 test('withV2RayDoH maps both Cloudflare IPs to the same DoH host', () => {
   const out = withV2RayDoH(SDK_V2RAY, '1.0.0.1') as any
   assert.deepEqual(out.dns.servers, ['https://cloudflare-dns.com/dns-query'])

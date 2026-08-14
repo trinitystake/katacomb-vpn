@@ -283,9 +283,17 @@ export default function ConnectionModal({ node, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-text-primary text-base font-semibold">
-            {title}
-          </h2>
+          <div>
+            <h2 className="text-text-primary text-base font-semibold">
+              {title}
+            </h2>
+            {/* Names this as one half of a pair. Without it the Multi-hop button in
+                the filter bar reads as an unrelated feature rather than the
+                alternative to what this modal does. */}
+            <p className="text-text-tertiary text-xs mt-0.5">
+              Single hop: your device connects straight to this node.
+            </p>
+          </div>
           {!connecting && (
             <button
               onClick={onClose}
@@ -302,13 +310,24 @@ export default function ConnectionModal({ node, onClose }: Props) {
             <span className="text-text-secondary">Moniker</span>
             <span className="text-text-primary">{node.moniker}</span>
           </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Address</span>
-            <span className="text-text-primary truncate ml-4 max-w-[280px] font-mono text-xs">{node.address}</span>
+          <div className="flex justify-between gap-4">
+            <span className="text-text-secondary shrink-0">Address</span>
+            {/* Full address, not truncated: it is the node's on-chain identity and the
+                only way to tell two nodes of the same operator apart. */}
+            <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.address}</span>
+          </div>
+          <div className="flex justify-between gap-4">
+            <span className="text-text-secondary shrink-0">Endpoint</span>
+            {/* host:port the node advertises. Usually already an IPv4 literal; when it
+                is a hostname the tunnel pins it to an IP at connect time. */}
+            <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.api}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Location</span>
-            <span className="text-text-primary">{node.country}{node.city ? `, ${node.city}` : ''}</span>
+            <span className="text-text-primary">
+              {node.country}{node.city ? `, ${node.city}` : ''}
+              {node.asn ? <span className="text-text-tertiary font-mono text-xs ml-2">AS{node.asn}</span> : null}
+            </span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Type</span>

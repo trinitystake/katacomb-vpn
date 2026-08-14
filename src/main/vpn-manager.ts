@@ -318,6 +318,15 @@ function resolveHostToIPv4(host: string): string | null {
  * hostnames to IPs. Handles both the v2ray/xray shape (`outbounds[].settings.vnext`)
  * and the hysteria2 shape (a single `server: "host:port"`). Used by bringUpTun for
  * the tun2socks bypass route AND by the kill-switch whitelist, so both see the same IP.
+ *
+ * It must return the endpoint this host dials DIRECTLY — the only one whose packets
+ * reach the physical NIC, and therefore the only one the bypass route and the
+ * `-d host -j ACCEPT` rule may name. An outbound carrying `proxySettings` is reached
+ * *through* another outbound (a multihop exit hop), so its address never leaves the
+ * tunnel and whitelisting it would strand the real connection behind the DROP-all
+ * chain — bytes out, ~zero bytes in, UI still "connected". Direct-dial outbounds are
+ * therefore preferred; the fallback keeps single-hop behaviour identical, since those
+ * configs have no proxySettings at all.
  */
 function extractV2RayRemoteHost(): string | null {
   try {
@@ -331,9 +340,16 @@ function extractV2RayRemoteHost(): string | null {
         : config.server.slice(0, config.server.lastIndexOf(':'))
       if (host && host !== '127.0.0.1') return resolveHostToIPv4(host)
     }
-    for (const ob of config.outbounds || []) {
-      const addr = ob?.settings?.vnext?.[0]?.address
-      if (addr && addr !== '127.0.0.1') {
+    const outbounds = (config.outbounds || []) as Record<string, unknown>[]
+    const addressOf = (ob: unknown): string | null => {
+      const addr = (ob as { settings?: { vnext?: { address?: string }[] } })?.settings?.vnext?.[0]?.address
+      return addr && addr !== '127.0.0.1' ? addr : null
+    }
+    // Direct-dial first (no proxySettings), then any outbound at all.
+    const direct = outbounds.filter((ob) => !ob?.proxySettings)
+    for (const ob of [...direct, ...outbounds]) {
+      const addr = addressOf(ob)
+      if (addr) {
         // After pinV2RayNodeAddresses this is already an IP; resolve handles the
         // hostname fall-through case (pinning failed) too.
         return resolveHostToIPv4(addr)

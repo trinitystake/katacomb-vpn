@@ -688,6 +688,10 @@ export const DOH_ENDPOINTS: Record<string, { url: string; host: string; ips: str
  * through the node's balancer so it's tunnelled. Two rules are *prepended* — the
  * port-53 intercept MUST precede the SDK's `inboundTag:["proxy"]` catch-all or DNS
  * would be proxied raw (plaintext) instead of re-resolved over DoH.
+ *
+ * The intercept is keyed on the config's OWN inbound tags, not the literal "proxy":
+ * only the SDK's v2ray config uses that name, so assuming it left xray (inbound tag
+ * "socks") with a rule that matched nothing and no DoH at all.
  */
 export function withV2RayDoH(config: unknown, resolverIp: string): unknown {
   if (config === null || typeof config !== 'object') return config
@@ -709,11 +713,27 @@ export function withV2RayDoH(config: unknown, resolverIp: string): unknown {
     o !== null && typeof o === 'object' && typeof (o as Record<string, unknown>).tag === 'string'
       ? ((o as Record<string, unknown>).tag as string)
       : null
+  // The inbound(s) carrying user traffic, read off the config rather than assumed.
+  // The SDK's v2ray config tags its socks inbound "proxy", but buildXRayConfig and
+  // buildMultihopConfig tag theirs "socks" — hardcoding "proxy" made the port-53
+  // intercept below match nothing for those, silently leaving DoH inert.
+  // Only `socks` inbounds qualify: the SDK also ships a dokodemo-door "api" inbound
+  // with its own routing rule, and the intercept is prepended, so including it would
+  // hijack v2ray's own API port.
+  const inboundTags = (Array.isArray(cfg.inbounds) ? cfg.inbounds : [])
+    .filter((i) =>
+      i !== null && typeof i === 'object' &&
+      (i as Record<string, unknown>).protocol === 'socks',
+    )
+    .map(tagOf)
+    .filter((t): t is string => t !== null)
+  const interceptTags = inboundTags.length > 0 ? inboundTags : ['proxy']
+
   let egress: Record<string, unknown> | null = null
   const proxyRule = rules.find((r) =>
     r !== null && typeof r === 'object' &&
     Array.isArray((r as Record<string, unknown>).inboundTag) &&
-    ((r as Record<string, unknown>).inboundTag as unknown[]).includes('proxy') &&
+    ((r as Record<string, unknown>).inboundTag as unknown[]).some((t) => interceptTags.includes(t as string)) &&
     typeof (r as Record<string, unknown>).balancerTag === 'string',
   ) as Record<string, unknown> | undefined
   if (proxyRule) {
@@ -738,7 +758,7 @@ export function withV2RayDoH(config: unknown, resolverIp: string): unknown {
   cfg.outbounds = [...outbounds, { protocol: 'dns', tag: 'dns-out' }]
 
   const newRules: unknown[] = [
-    { type: 'field', inboundTag: ['proxy'], port: 53, outboundTag: 'dns-out' },
+    { type: 'field', inboundTag: interceptTags, port: 53, outboundTag: 'dns-out' },
   ]
   if (egress) newRules.push({ type: 'field', inboundTag: ['dns-module'], ...egress })
   routing.rules = [...newRules, ...rules]

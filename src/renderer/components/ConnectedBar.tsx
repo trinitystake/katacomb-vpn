@@ -43,6 +43,20 @@ export default function ConnectedBar() {
           {status.sessionId && (
             <span className="text-text-secondary font-mono">#{status.sessionId}</span>
           )}
+          {/* On a chain, nodeMoniker above is the ENTRY — the node this device
+              dials. What the internet sees is the exit, so name it: otherwise the
+              bar says Spain while every site reports Turkey. */}
+          {status.chainExit && (
+            <span
+              className="text-accent"
+              title={`Two-hop chain. Your device dials ${status.nodeMoniker || 'the entry node'}; traffic leaves from ${status.chainExit.moniker || status.chainExit.address} in ${status.chainExit.country}.`}
+            >
+              → {status.chainExit.moniker || status.chainExit.country}
+              {status.chainExit.sessionId && (
+                <span className="text-text-secondary font-mono ml-1.5">#{status.chainExit.sessionId}</span>
+              )}
+            </span>
+          )}
         </>
       )}
     </div>

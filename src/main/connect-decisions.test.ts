@@ -1,6 +1,86 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+
+// --- chainFailureMessage (multihop: TWO deposits can be in flight) ---
+
+test('chainFailureMessage: both refunded says so and names no session', () => {
+  const msg = chainFailureMessage({
+    reason: 'handshake timed out',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'EXIT-NODE',
+    refunds: [{ sessionId: '111', refunded: true }, { sessionId: '222', refunded: true }],
+  })
+  assert.match(msg, /exit hop/)
+  assert.match(msg, /Both sessions were cancelled/)
+  // Nothing for the user to do, so no session id should be dangled at them.
+  assert.ok(!msg.includes('#111'))
+})
+
+test('chainFailureMessage: a stranded deposit is named so it can be cancelled by hand', () => {
+  const msg = chainFailureMessage({
+    reason: 'handshake timed out',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'EXIT-NODE',
+    refunds: [{ sessionId: '111', refunded: false }, { sessionId: '222', refunded: true }],
+  })
+  // Only the one that actually failed to cancel — naming the refunded one would
+  // send the user to cancel a session that no longer exists.
+  assert.match(msg, /#111/)
+  assert.ok(!msg.includes('#222'))
+  assert.match(msg, /cancel it manually/)
+})
+
+test('chainFailureMessage: both stranded names both', () => {
+  const msg = chainFailureMessage({
+    reason: 'rpc unreachable',
+    policyRejected: false,
+    failedRole: null,
+    nodeMoniker: '',
+    refunds: [{ sessionId: '111', refunded: false }, { sessionId: '222', refunded: false }],
+  })
+  assert.match(msg, /#111 and #222/)
+  assert.match(msg, /cancel them manually/)
+})
+
+test('chainFailureMessage: failing on the entry purchase leaves nothing paid', () => {
+  const msg = chainFailureMessage({
+    reason: 'insufficient funds',
+    policyRejected: false,
+    failedRole: 'entry',
+    nodeMoniker: 'ENTRY-NODE',
+    refunds: [],
+  })
+  assert.match(msg, /No sessions were created/)
+})
+
+test('chainFailureMessage: one paid session refunded is singular, not "both"', () => {
+  // The exit purchase failed, so only the entry deposit existed.
+  const msg = chainFailureMessage({
+    reason: 'tx timed out',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'EXIT-NODE',
+    refunds: [{ sessionId: '111', refunded: true }],
+  })
+  assert.match(msg, /The session was cancelled/)
+  assert.ok(!msg.includes('Both sessions'))
+})
+
+test('chainFailureMessage: the cleartext policy refusal names the offending node', () => {
+  const msg = chainFailureMessage({
+    reason: 'ignored when policyRejected',
+    policyRejected: true,
+    failedRole: 'entry',
+    nodeMoniker: 'BAD-NODE',
+    refunds: [{ sessionId: '111', refunded: true }, { sessionId: '222', refunded: true }],
+  })
+  assert.match(msg, /"BAD-NODE" only offers unencrypted/)
+  assert.match(msg, /entry hop/)
+  assert.ok(!msg.includes('ignored when policyRejected'))
+})
 
 // --- sessionFailureMessage ---
 
@@ -448,4 +528,80 @@ test('decideFirewallAction prefers disarm over rearm when both rules match', () 
   assert.equal(decideFirewallAction({
     killSwitch: false, lanSharing: true, armed: true, armedLanSharing: false, tunnelActive: true,
   }), 'disarm')
+})
+
+test('a reason that already ends in a full stop does not produce ".." ', () => {
+  // The builder's own messages are sentences, and the templates append "." before
+  // the refund tail — live output read "...single-hop connection.. Could not".
+  const msg = chainFailureMessage({
+    reason: 'Multihop entry node offers no TLS or Reality inbound. Pick a different node.',
+    policyRejected: false,
+    failedRole: 'entry',
+    nodeMoniker: 'Traplice-vpn13',
+    refunds: [{ sessionId: '55122449', refunded: false }],
+  })
+  assert.ok(!msg.includes('..'), msg)
+  assert.match(msg, /cancel session #55122449|cancel sessions? #55122449/)
+})
+
+test('a stranded chain session is named individually, a refunded one is not', () => {
+  const msg = chainFailureMessage({
+    reason: 'handshake failed',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'X',
+    refunds: [{ sessionId: '1', refunded: true }, { sessionId: '2', refunded: false }],
+  })
+  assert.ok(msg.includes('#2'), msg)
+  assert.ok(!msg.includes('#1'), 'a session that came back must not be listed as stranded')
+})
+
+// --- refundEachInTurn: the money path's ordering guarantee -------------------
+//
+// Cancels are transactions from ONE account. Two in flight read the same account
+// sequence number and the chain rejects the loser — which is exactly what happened
+// live: entry #55122441 came back, exit #55122449 did not, leaving a paid session
+// stranded. These tests pin the property that prevents it.
+
+test('refundEachInTurn never has two cancels in flight at once', async () => {
+  let inFlight = 0
+  let maxInFlight = 0
+  const order: string[] = []
+  const cancel = async (id: string) => {
+    inFlight++
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    order.push(id)
+    await new Promise((r) => setTimeout(r, 5))
+    inFlight--
+  }
+  const results = await refundEachInTurn(['1', '2', '3'], cancel)
+  assert.equal(maxInFlight, 1, 'a second cancel must not start before the first settles')
+  assert.deepEqual(order, ['1', '2', '3'], 'and they must go in the order they were paid')
+  assert.deepEqual(results, [
+    { sessionId: '1', refunded: true },
+    { sessionId: '2', refunded: true },
+    { sessionId: '3', refunded: true },
+  ])
+})
+
+test('refundEachInTurn keeps going after one cancel fails', async () => {
+  // The failure that matters: hop A is unrefundable, and hop B's deposit must not
+  // be stranded as collateral damage.
+  const attempted: string[] = []
+  const results = await refundEachInTurn(['A', 'B'], async (id) => {
+    attempted.push(id)
+    if (id === 'A') throw new Error('broadcast rejected')
+  })
+  assert.deepEqual(attempted, ['A', 'B'], 'B must still be attempted')
+  assert.deepEqual(results, [
+    { sessionId: 'A', refunded: false },
+    { sessionId: 'B', refunded: true },
+  ])
+})
+
+test('refundEachInTurn reports a total failure without throwing', async () => {
+  // The caller turns this into "cancel these by hand"; it must never reject, or the
+  // connect flow loses the message naming the stranded sessions.
+  const results = await refundEachInTurn(['9'], async () => { throw new Error('rpc down') })
+  assert.deepEqual(results, [{ sessionId: '9', refunded: false }])
 })

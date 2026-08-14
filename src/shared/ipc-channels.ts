@@ -28,6 +28,7 @@ export const IPC = {
 
   // Connection
   CONNECTION_SUBSCRIBE: 'connection:subscribe',
+  CONNECTION_SUBSCRIBE_CHAIN: 'connection:subscribe-chain',
   CONNECTION_RECONNECT: 'connection:reconnect',
   CONNECTION_CONNECT: 'connection:connect',
   CONNECTION_CHECK_VPN: 'connection:check-vpn',
@@ -50,6 +51,7 @@ export const IPC = {
   NODE_TEST_SPEED: 'node-test:speed',
   NODE_TEST_CANCEL: 'node-test:cancel',
   NODE_TEST_RESULTS: 'node-test:results',
+  NODE_CHAIN_ELIGIBILITY: 'node-test:chain-eligibility',
 
   // RPC health
   RPC_HEALTH_GET: 'rpc:health-get',

@@ -58,6 +58,12 @@ function timePercent(elapsedSeconds: number, maxSeconds: number | null): number 
   return Math.min(100, (elapsedSeconds / maxSeconds) * 100)
 }
 
+/** One session's row: the chain's record plus what its gauges should read. */
+interface Row {
+  session: SessionInfo
+  usage: SessionUsage
+}
+
 /** What a session's gauges show: on-chain baseline plus this tunnel's live meter. */
 interface SessionUsage {
   downloadBytes: number
@@ -102,7 +108,12 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   // gauge visibly dropped from 8m to 3m and then jumped back to 8m. The bytes gauge
   // had the identical flicker. Both close by never letting a reading go backwards.
   const rows = ordered.map((session) => {
-    const live = vpnConnected && status.sessionId === session.id
+    // Both halves of a chain carry the SAME byte stream and the same wall-clock,
+    // and both nodes meter it — which is why main scores both quotas off one
+    // counter. Attributing the live meter to both rows is therefore the truth, not
+    // double-counting; giving it only to the entry would show the exit frozen.
+    const live = vpnConnected &&
+      (status.sessionId === session.id || status.chainExit?.sessionId === session.id)
     const reading: SessionUsage = {
       downloadBytes: (parseInt(session.downloadBytes || '0', 10) || 0) + (live ? liveStats.rxBytes : 0),
       uploadBytes: (parseInt(session.uploadBytes || '0', 10) || 0) + (live ? liveStats.txBytes : 0),
@@ -131,6 +142,29 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   // effect is safe: Math.max is idempotent, so a re-invoked render produces exactly
   // the same map.
   shownUsage.current = new Map(rows.map((r) => [r.session.id, r.usage]))
+
+  // A chain is two paid sessions carrying ONE tunnel, so it is drawn as ONE card:
+  // entry on top, exit below, one pair of actions. As two cards it read as two
+  // unrelated VPNs and offered "End" on each — and ending either kills the tunnel
+  // and strands the other hop's deposit. The pair is joined on chainPeerSessionId,
+  // and the ROLE decides the order, not the order the chain returned them in.
+  const byId = new Map(rows.map((r) => [r.session.id, r]))
+  const claimed = new Set<string>()
+  const groups: { entry: Row; exit: Row | null }[] = []
+  for (const row of rows) {
+    if (claimed.has(row.session.id)) continue
+    claimed.add(row.session.id)
+    const peer = row.session.chainPeerSessionId ? byId.get(row.session.chainPeerSessionId) : undefined
+    // A peer that has already settled off the list leaves a lone hop; it still says
+    // it is part of a chain, so the card can explain why it carries no traffic.
+    if (!peer || claimed.has(peer.session.id)) {
+      groups.push({ entry: row, exit: null })
+      continue
+    }
+    claimed.add(peer.session.id)
+    const rowIsEntry = row.session.chainRole !== 'exit'
+    groups.push({ entry: rowIsEntry ? row : peer, exit: rowIsEntry ? peer : row })
+  }
 
   // Counts the live ones. An ended row is still shown (it is settling on chain) but
   // it is not an active session, and counting it as one is what produced
@@ -170,7 +204,14 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   }
 
   async function handleEndSession(session: SessionInfo) {
-    const isThisSessionConnected = vpnConnected && status.sessionId === session.id
+    // A chain is two paid sessions carrying one tunnel: ending either half kills
+    // it, and leaving the other half open just strands its deposit until the chain
+    // reaps it. So End on a chain row ends BOTH, and says so before it does.
+    const peer = session.chainPeerSessionId
+      ? sessions.find((s) => s.id === session.chainPeerSessionId) ?? null
+      : null
+    const isThisSessionConnected = vpnConnected &&
+      (status.sessionId === session.id || status.chainExit?.sessionId === session.id)
     // When ending a *different* session than the one we're on, the tunnel is only
     // torn down to reach the chain — capture the live session so we can restore it.
     const reconnectTarget = vpnConnected && !isThisSessionConnected
@@ -179,7 +220,10 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
     const vpnWarning = reconnectTarget
       ? '\n\nNote: Your current VPN connection will be temporarily interrupted to reach the blockchain, then reconnected.'
       : ''
-    if (!confirm(`End session #${session.id}? This will close the session on-chain. Remaining data/time will be forfeited.${vpnWarning}`)) {
+    const chainWarning = peer
+      ? `\n\nThis is the ${session.chainRole ?? 'first'} hop of a two-hop chain, so #${peer.id} will be ended too. One hop alone carries no traffic.`
+      : ''
+    if (!confirm(`End session #${session.id}? This will close the session on-chain. Remaining data/time will be forfeited.${chainWarning}${vpnWarning}`)) {
       return
     }
 
@@ -195,6 +239,9 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
       }
 
       await window.api.walletEndSession(session.id)
+      // Sequential, not parallel: both are txs from one account and would collide
+      // on the sequence number. A failure here still leaves the first one ended.
+      if (peer && peer.status === 'active') await window.api.walletEndSession(peer.id)
       await refresh()
     } catch (err) {
       endError = err instanceof Error ? err.message : 'Failed to end session'
@@ -284,9 +331,24 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
               Sessions ({sessionCountLabel})
             </div>
           )}
-          {rows.map(({ session, usage }) => {
+          {groups.map(({ entry: entryRow, exit: exitRow }) => {
+            const session = entryRow.session
+            const isChain = exitRow !== null
+            // Both hops carry the same stream, so their meters should agree — but
+            // they settle independently, and the chain ends when EITHER runs out.
+            // Score the card off whichever hop is further along, which is the same
+            // "worst verdict wins" rule the main process applies to the quotas.
+            const usage: SessionUsage = exitRow
+              ? {
+                  downloadBytes: Math.max(entryRow.usage.downloadBytes, exitRow.usage.downloadBytes),
+                  uploadBytes: Math.max(entryRow.usage.uploadBytes, exitRow.usage.uploadBytes),
+                  seconds: Math.max(entryRow.usage.seconds, exitRow.usage.seconds),
+                }
+              : entryRow.usage
             const isBusy = busy === session.id
-            const isConnectedSession = vpnConnected && status.sessionId === session.id
+            const isConnectedSession = vpnConnected &&
+              (status.sessionId === session.id || status.chainExit?.sessionId === session.id ||
+                (exitRow !== null && status.chainExit?.sessionId === exitRow.session.id))
             const downloadBytes = String(Math.round(usage.downloadBytes))
             const uploadBytes = String(Math.round(usage.uploadBytes))
             const dataPct = usagePercent(downloadBytes, session.maxBytes)
@@ -307,7 +369,10 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             // (it ran out, or someone cancelled it) and it is settling. It can no
             // longer be cancelled or connected to — only watched until it drops off
             // the list.
-            const isEnded = session.status !== 'active'
+            // For a chain, EITHER hop ending finishes it: one hop alone carries no
+            // traffic, so offering Connect on the survivor would sell a dead tunnel.
+            const isEnded = session.status !== 'active' ||
+              (exitRow !== null && exitRow.session.status !== 'active')
             // 'active' does NOT mean 'usable'. The chain keeps metering a session
             // past what it was paid for and leaves the row active until someone
             // cancels it or the EndBlocker reaps it — #53647217 read duration
@@ -327,8 +392,13 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
             //               which is where the earlier "slid 74.5 min" reading came
             //               from — one jump, not a smooth slide. Since quota is
             //               proof-metered, this is the only clock on an idle session.
-            const inactiveInSeconds = session.inactiveAt
-              ? Math.floor((new Date(session.inactiveAt).getTime() - Date.now()) / 1000)
+            // For a chain, the sooner of the two: the tunnel stops when EITHER hop
+            // is reaped, so the later deadline would promise time that isn't there.
+            const inactiveAtMs = [session.inactiveAt, exitRow?.session.inactiveAt]
+              .filter((v): v is string => typeof v === 'string')
+              .map((v) => new Date(v).getTime())
+            const inactiveInSeconds = inactiveAtMs.length
+              ? Math.floor((Math.min(...inactiveAtMs) - Date.now()) / 1000)
               : null
 
             return (
@@ -341,12 +411,26 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                 {/* Row 1: Session ID + Status + Actions */}
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-3">
-                    <span className={`text-sm font-semibold font-mono ${isConnectedSession ? 'text-success' : 'text-accent'}`}>
-                      #{session.id}
-                    </span>
+                    {isChain ? (
+                      <span className={`text-sm font-semibold ${isConnectedSession ? 'text-success' : 'text-accent'}`}>
+                        Multi-hop chain
+                      </span>
+                    ) : (
+                      <span className={`text-sm font-semibold font-mono ${isConnectedSession ? 'text-success' : 'text-accent'}`}>
+                        #{session.id}
+                      </span>
+                    )}
                     {isConnectedSession && (
                       <span className="text-success text-xs border border-success px-1.5 py-0.5 rounded-sm font-medium">
                         Connected
+                      </span>
+                    )}
+                    {!isChain && session.chainPeerSessionId && (
+                      <span
+                        className="text-warning text-xs border border-warning px-1.5 py-0.5 rounded-sm font-medium"
+                        title={`This was the ${session.chainRole ?? 'first'} hop of a chain with #${session.chainPeerSessionId}, which is no longer listed. One hop alone carries no traffic.`}
+                      >
+                        Chain {session.chainRole ?? 'hop'} · partner gone
                       </span>
                     )}
                     {session.subscriptionId && (
@@ -372,40 +456,54 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                                 ? 'This session has used everything it was paid for — end it and start a new one'
                                 : vpnConnected
                                   ? 'Disconnect current VPN first'
-                                  : undefined
+                                  : isChain
+                                    ? 'Rebuilds both hops of the chain'
+                                    : undefined
                             }
                           >
-                            {isBusy ? <Spinner /> : 'Connect'}
+                            {isBusy ? <Spinner /> : isChain ? 'Connect chain' : 'Connect'}
                           </button>
                         )}
                         <button
                           onClick={() => handleEndSession(session)}
                           disabled={isBusy || busy !== null}
                           className="btn btn-danger text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title={isChain ? 'Ends both hops. One hop alone carries no traffic.' : undefined}
                         >
-                          {isBusy ? <Spinner /> : 'End'}
+                          {isBusy ? <Spinner /> : isChain ? 'End both' : 'End'}
                         </button>
                       </>
                     )}
                   </div>
                 </div>
 
-                {/* Row 2: Node info */}
-                <div className="flex items-center gap-3 mb-2 text-sm">
-                  {session.nodeMoniker && (
-                    <span className="text-text-primary font-medium">{session.nodeMoniker}</span>
-                  )}
-                  {session.nodeCountry && (
-                    <span className="text-text-secondary">{session.nodeCountry}</span>
-                  )}
-                  <span
-                    className="text-text-tertiary truncate cursor-pointer hover:text-accent transition-colors font-mono text-xs"
-                    title={`Click to copy: ${session.nodeAddress}`}
-                    onClick={() => navigator.clipboard.writeText(session.nodeAddress)}
-                  >
-                    {session.nodeAddress.slice(0, 16)}...{session.nodeAddress.slice(-6)}
-                  </span>
-                </div>
+                {/* Row 2: the hop(s). Order is fixed — entry above exit — because
+                    that is the order the traffic travels, and it is the only cue
+                    that says which node sees the user's IP and which sees the
+                    destinations. */}
+                {isChain ? (
+                  <div className="mb-2 space-y-1">
+                    <HopLine role="entry" session={entryRow.session} usage={entryRow.usage} />
+                    <div className="text-text-tertiary text-xs pl-[52px]">↓ tunnelled inside the entry hop</div>
+                    <HopLine role="exit" session={exitRow!.session} usage={exitRow!.usage} />
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-3 mb-2 text-sm">
+                    {session.nodeMoniker && (
+                      <span className="text-text-primary font-medium">{session.nodeMoniker}</span>
+                    )}
+                    {session.nodeCountry && (
+                      <span className="text-text-secondary">{session.nodeCountry}</span>
+                    )}
+                    <span
+                      className="text-text-tertiary truncate cursor-pointer hover:text-accent transition-colors font-mono text-xs"
+                      title={`Click to copy: ${session.nodeAddress}`}
+                      onClick={() => navigator.clipboard.writeText(session.nodeAddress)}
+                    >
+                      {session.nodeAddress.slice(0, 16)}...{session.nodeAddress.slice(-6)}
+                    </span>
+                  </div>
+                )}
 
                 {/* Row 3: Data usage bar — only when the session is byte-metered (per-GB) */}
                 {hasByteCap && (
@@ -467,7 +565,13 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                   )}
                   {session.priceDenom && session.priceValue && (
                     <span>
-                      Price: <span className="font-mono">{(parseInt(session.priceValue, 10) / 1e6).toFixed(2)}</span> P2P
+                      {/* A chain costs the sum of its hops; showing one hop's price
+                          understates what was actually spent by half. */}
+                      {isChain ? 'Price (both hops): ' : 'Price: '}
+                      <span className="font-mono">
+                        {((parseInt(session.priceValue, 10) +
+                          (exitRow ? parseInt(exitRow.session.priceValue || '0', 10) : 0)) / 1e6).toFixed(2)}
+                      </span> P2P
                     </span>
                   )}
                   {!hasByteCap && (
@@ -487,8 +591,12 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                 {isEnded && (
                   <div className="text-text-tertiary text-xs mt-2">
                     {inactiveInSeconds !== null && inactiveInSeconds > 60
-                      ? `Ended. The chain settles this in about ${formatDuration(inactiveInSeconds)}, then it leaves this list.`
-                      : 'Ended. Settling on chain, then it leaves this list.'}
+                      ? isChain
+                        ? `Ended. Both hops settle on chain in about ${formatDuration(inactiveInSeconds)}, then they leave this list.`
+                        : `Ended. The chain settles this in about ${formatDuration(inactiveInSeconds)}, then it leaves this list.`
+                      : isChain
+                        ? 'Ended. Both hops are settling on chain, then they leave this list.'
+                        : 'Ended. Settling on chain, then it leaves this list.'}
                   </div>
                 )}
 
@@ -506,7 +614,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                     className="text-text-tertiary text-xs mt-2"
                     title="The chain reaps a session the node stops reporting usage for. Every usage report pushes this deadline back, so it only really counts down when nothing is getting through."
                   >
-                    Expires in {formatDuration(inactiveInSeconds)} unless the node reports usage.
+                    Expires in {formatDuration(inactiveInSeconds)} unless the {isChain ? 'nodes report' : 'node reports'} usage.
                   </div>
                 )}
               </div>
@@ -514,6 +622,46 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
           })}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * One hop of a chain. The role label is the point of the whole row: "entry" is the
+ * node that sees the user's IP, "exit" is the one that sees where they go, and the
+ * card is unreadable without knowing which is which.
+ */
+function HopLine({ role, session, usage }: {
+  role: 'entry' | 'exit'
+  session: SessionInfo
+  usage: SessionUsage
+}) {
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <span className="text-text-tertiary text-[10px] uppercase tracking-wide w-[44px] shrink-0">
+        {role}
+      </span>
+      <span className="text-accent font-mono text-xs shrink-0">#{session.id}</span>
+      {session.nodeMoniker && (
+        <span className="text-text-primary font-medium truncate">{session.nodeMoniker}</span>
+      )}
+      {session.nodeCountry && (
+        <span className="text-text-secondary shrink-0">{session.nodeCountry}</span>
+      )}
+      <span
+        className="text-text-tertiary truncate cursor-pointer hover:text-accent transition-colors font-mono text-xs"
+        title={`Click to copy: ${session.nodeAddress}`}
+        onClick={() => navigator.clipboard.writeText(session.nodeAddress)}
+      >
+        {session.nodeAddress.slice(0, 16)}...{session.nodeAddress.slice(-6)}
+      </span>
+      {/* Each hop's OWN metered figure. The card's gauge shows the worse of the two,
+          which is what governs the chain — but the hops settle independently and can
+          land well apart (a live chain finished on 29.1 MB against 4.5 MB), so a
+          single number with no breakdown looks like an error rather than a fact. */}
+      <span className="ml-auto shrink-0 text-text-tertiary font-mono text-xs">
+        {formatBytes(String(Math.round(usage.downloadBytes)))}
+      </span>
     </div>
   )
 }

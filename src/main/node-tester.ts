@@ -136,6 +136,41 @@ export async function probeNode(remoteUrl: string, nodeAddress: string): Promise
  * so the caller can tell "mismatch" apart from "couldn't ask".
  */
 export async function fetchNodeServiceType(remoteUrl: string): Promise<string | number> {
+  const serviceType = (await fetchNodeRoot(remoteUrl)).service_type
+  if (serviceType === undefined) throw new Error('Node did not report a service type')
+  return serviceType
+}
+
+/**
+ * The inbounds a node advertises publicly (`service_metadata`), used to grade it
+ * for each end of a multihop chain BEFORE any session is paid for. Present on
+ * v9.0.0 nodes only — an older node throws, and the caller reports it as unknown
+ * rather than guessing.
+ *
+ * Note what this listing does NOT carry: every node measured reports `port: ""`
+ * and `tls_pin: ""` here, because both are minted per session and only appear in
+ * the handshake response. `classifyHopEligibility` is written to that shape.
+ */
+export async function fetchNodeServiceMetadata(remoteUrl: string): Promise<NodeInboundListing[]> {
+  const metadata = (await fetchNodeRoot(remoteUrl)).service_metadata
+  if (!Array.isArray(metadata)) throw new Error('this node runs a version older than 9.0.0, which publishes no inbound list')
+  return metadata
+}
+
+/** One entry of a node's advertised `service_metadata`. */
+export interface NodeInboundListing {
+  port: string | number
+  proxy_protocol: number
+  transport_protocol: number
+  transport_security: number
+}
+
+interface NodeRootInfo {
+  service_type?: string | number
+  service_metadata?: NodeInboundListing[]
+}
+
+async function fetchNodeRoot(remoteUrl: string): Promise<NodeRootInfo> {
   if (typeof remoteUrl !== 'string' || remoteUrl.trim() === '') {
     throw new Error('Node has no API endpoint')
   }
@@ -144,10 +179,8 @@ export async function fetchNodeServiceType(remoteUrl: string): Promise<string | 
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`Node returned HTTP ${response.status}`)
   }
-  const json = JSON.parse(response.body) as { result?: { service_type?: string | number } }
-  const serviceType = json.result?.service_type
-  if (serviceType === undefined) throw new Error('Node did not report a service type')
-  return serviceType
+  const json = JSON.parse(response.body) as { result?: NodeRootInfo }
+  return json.result ?? {}
 }
 
 export async function probeBatch(

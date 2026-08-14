@@ -23,6 +23,7 @@ import { withTimeout } from './async-utils'
 import { assertTxSucceeded, broadcastOrTimeout, isSessionNotActive } from './tx-utils'
 import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
 import { buildXRayConfig } from './xray-config'
+import { buildMultihopConfig, type HopSpec } from './multihop-config'
 import { buildHysteria2Config } from './hysteria-config'
 import { buildAmneziaWgConfig } from './amneziawg-config'
 import { buildOpenVpnConfig } from './openvpn-config'
@@ -55,6 +56,35 @@ interface SavedSessionConfig {
   nodeAddress: string
   nodeMoniker?: string
   nodeCountry?: string
+  /**
+   * MULTIHOP only: the OTHER hop's session id. Its presence is what marks this record
+   * as half of a chain, and `configString` then holds the whole chained config (the
+   * same string is saved under both ids), not this node's own single-hop config.
+   *
+   * Load-bearing for correctness, not just bookkeeping: without it the Sessions-tab
+   * reconnect would re-handshake this one node, build a SINGLE-hop config and connect
+   * with it while both sessions were still paid — silently dropping a hop. On the exit
+   * hop's record that would connect the user straight to the exit node, handing it the
+   * real IP the chain existed to hide.
+   */
+  chainPeerSessionId?: string
+  /**
+   * MULTIHOP only: which end of the chain THIS record is. Stored rather than inferred
+   * from the config — the outbounds identify hops by hostname, while these records are
+   * keyed by `sentnode…` address, so there is no reliable mapping between them. A
+   * reconnect must keep entry as entry whichever hop the user clicked on.
+   */
+  chainRole?: 'entry' | 'exit'
+  /**
+   * The NODE's own protocol tag (2 = V2Ray, 4 = XRAY), which is deliberately not the
+   * same thing as `protocol` above. `protocol` is the runtime that replays this
+   * config, and a chain is always replayed by xray because xray-core is a strict
+   * superset of what the builder emits — so a chain of two plain V2Ray nodes is
+   * saved with `protocol: 'xray'`. Recording the real tag keeps the reconnect path
+   * from reporting the runtime as the node's protocol, which put "XRAY" in the
+   * connected bar for a V2Ray chain.
+   */
+  nodeType?: number
 }
 
 function getSessionsDir(): string {
@@ -105,6 +135,31 @@ export function loadSessionConfig(sessionId: string): SavedSessionConfig | null 
 function deleteSessionConfig(sessionId: string): void {
   const path = sessionConfigPath(sessionId)
   if (existsSync(path)) unlinkSync(path)
+}
+
+/**
+ * Retire a finished session's stored config. A CHAIN hop leaves a tombstone rather
+ * than vanishing: the credentials go, but `chainPeerSessionId`/`chainRole` stay.
+ *
+ * They have to. That pairing is the only record that two sessions were one tunnel,
+ * and an ended session keeps its row for the two hours the chain takes to settle —
+ * so deleting it outright split a finished chain back into two unrelated "Ended"
+ * cards, exactly the confusion the grouped card exists to prevent. The pairing is
+ * two session ids and a role; nothing about it is secret. The config string is the
+ * secret, and that is what gets cleared.
+ *
+ * Stale tombstones are swept with everything else by sweepStaleSessionFiles.
+ */
+function retireSessionConfig(sessionId: string): void {
+  const saved = loadSessionConfig(sessionId)
+  // Only tombstone when the write can actually happen: without the OS keyring
+  // saveSessionConfig writes nothing, which would leave the ORIGINAL file and its
+  // credentials sitting there. Deleting is the safe outcome in that case.
+  if (saved?.chainPeerSessionId && isSecureStorageAvailable()) {
+    saveSessionConfig({ ...saved, configString: '' })
+    return
+  }
+  deleteSessionConfig(sessionId)
 }
 
 /**
@@ -295,7 +350,7 @@ export async function endSession(params: {
       console.log(`[session] #${sessionId} was already inactive on chain — nothing to cancel`)
     }
 
-    deleteSessionConfig(sessionId)
+    retireSessionConfig(sessionId)
   } finally {
     client.disconnect()
   }
@@ -553,4 +608,100 @@ export async function performHandshake(params: {
 
     return { protocol: 'v2ray', configString, wgInstance: null, v2rayInstance: v2ray, v2raySummary }
   }
+}
+
+/** One hop of a multihop chain. `nodeType` must be 2 (V2Ray) or 4 (XRAY). */
+export interface ChainHopParams {
+  sessionId: string
+  nodeAddress: string
+  nodeType: number
+  remoteUrl: string
+  nodeMoniker?: string
+  nodeCountry?: string
+}
+
+/**
+ * Handshake ONE hop and return what buildMultihopConfig needs. VLESS/VMess peer
+ * material is a UUID for both protocols, so an SDK `V2Ray` instance is used purely
+ * as a keygen — `getKey()` (the 16-byte array form) goes on the wire because the
+ * node's field is a `uuid.UUID`, while `.uuid` (the string form) goes in the config.
+ * Mixing those up cost a live 500 once already (see the hysteria2 note in CLAUDE.md).
+ */
+async function handshakeChainHop(
+  hop: ChainHopParams,
+  privKey: Uint8Array,
+  role: 'entry' | 'exit',
+): Promise<HopSpec> {
+  const keygen = new V2Ray()
+  const result = await withTimeout(
+    sdkHandshake(Long.fromString(hop.sessionId, true), { uuid: keygen.getKey() }, privKey, hop.remoteUrl),
+    HANDSHAKE_TIMEOUT_MS,
+    `${role} node handshake`,
+  )
+
+  const handshakeData = parseHandshakeData(result)
+  const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
+
+  // Same encryption policy as single-hop, applied per hop so the failure names the
+  // offending node. buildMultihopConfig re-checks, but this throws the typed error
+  // the connect handlers already translate into a refund.
+  if (metadata.length > 0 && isAllCleartext(metadata)) {
+    throw new V2RayPolicyError(hop.nodeMoniker || hop.nodeAddress, v2raySecurityBadge(metadata))
+  }
+
+  return {
+    protocol: hop.nodeType === 4 ? 'xray' : 'v2ray',
+    metadata,
+    addrs: Array.isArray(result.addrs) ? result.addrs : [],
+    uuid: keygen.uuid,
+  }
+}
+
+/**
+ * Handshake BOTH hops of a multihop chain and build the single chained config.
+ *
+ * Both sessions must already be paid for; the caller (establishChainOrRefund) is
+ * responsible for cancelling BOTH if anything here throws. Nothing is persisted
+ * until both hops have succeeded, so a half-built chain leaves no stale config.
+ *
+ * The result is always run on the **xray** binary regardless of the hops' node
+ * types: xray-core is a v2ray-core fork and a strict superset of what we emit
+ * (vmess + vless, tcp/ws/grpc, tls + reality), so one runtime covers every
+ * entry/exit combination and there is no v2ray-vs-xray binary decision to get
+ * wrong at bring-up.
+ *
+ * The same chained config is saved under BOTH session ids: reconnect can then
+ * rebuild the whole chain from either hop's record, and `SavedSessionConfig` stays
+ * exactly as it is (one protocol, one config string, one node address per file).
+ */
+export async function performChainHandshake(params: {
+  entry: ChainHopParams
+  exit: ChainHopParams
+  privKey: Uint8Array
+}): Promise<{ protocol: 'xray'; configString: string }> {
+  const { entry, exit, privKey } = params
+
+  sendProgress('4/5', 'Handshaking entry node...')
+  const entrySpec = await handshakeChainHop(entry, privKey, 'entry')
+
+  sendProgress('4/5', 'Handshaking exit node...')
+  const exitSpec = await handshakeChainHop(exit, privKey, 'exit')
+
+  const configString = JSON.stringify(buildMultihopConfig(entrySpec, exitSpec), null, 2)
+
+  for (const [hop, peer, role] of [[entry, exit, 'entry'], [exit, entry, 'exit']] as const) {
+    saveSessionConfig({
+      sessionId: hop.sessionId,
+      protocol: 'xray',
+      configString,
+      nodeAddress: hop.nodeAddress,
+      nodeMoniker: hop.nodeMoniker,
+      nodeCountry: hop.nodeCountry,
+      nodeType: hop.nodeType,
+      chainPeerSessionId: peer.sessionId,
+      chainRole: role,
+    })
+  }
+
+  return { protocol: 'xray', configString }
 }

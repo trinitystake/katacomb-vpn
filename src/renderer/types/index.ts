@@ -70,6 +70,29 @@ export interface ReconnectParams {
   sessionId: string
 }
 
+/** One hop of a multihop chain. `nodeType` must be 2 (V2Ray) or 4 (XRAY). */
+export interface ChainHopParams {
+  nodeAddress: string
+  nodeMoniker: string
+  nodeCountry: string
+  nodeType: number
+  apiField: string
+  quoteValue: string
+}
+
+/**
+ * Buy a two-hop chain: entry -> exit. One duration/size applies to both hops (a
+ * chain only lives as long as its shorter half), and the cost is the sum. Main
+ * cancels BOTH sessions if any part of the purchase or handshake fails.
+ */
+export interface SubscribeChainParams {
+  entry: ChainHopParams
+  exit: ChainHopParams
+  type: 'gigabytes' | 'hours'
+  amount: number
+  denom: string
+}
+
 export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
 
 /** A subscription as listed by the Subscriptions manager. */
@@ -105,6 +128,14 @@ export interface SubscribeResult {
   protocol: string
 }
 
+/** `sessionId` is the ENTRY hop — the primary session for status and reconnect. */
+export interface SubscribeChainResult {
+  sessionId: string
+  exitSessionId: string
+  protocol: string
+  configString: string
+}
+
 export interface ReconnectResult {
   sessionId: string
   protocol: string
@@ -127,6 +158,35 @@ export interface SessionInfo {
   priceValue: string | null
   nodeMoniker: string
   nodeCountry: string
+  /**
+   * Set on both halves of a multihop chain: the other hop's session id, and which
+   * end this one is. They are two independent on-chain sessions, so without these
+   * the tab shows two unrelated rows and offers to end one — which tears the tunnel
+   * down and leaves the other paid for. Absent on an ordinary single-hop session.
+   */
+  chainPeerSessionId?: string
+  chainRole?: 'entry' | 'exit'
+}
+
+/**
+ * How a node graded for each end of a chain, from the inbounds it publishes at its
+ * root path. `reachable: false` means we could not ask (unreachable, or a pre-9.0.0
+ * node that publishes no listing) — NOT that the node is unusable.
+ */
+export interface ChainEligibility {
+  nodeAddress: string
+  checkedAt: number
+  reachable: boolean
+  transports: string[]
+  /** Dialable directly with TLS or Reality — usable as a chain ENTRY. */
+  entry: boolean
+  /** Serves plain TCP with TLS or Reality — usable as a chain EXIT. */
+  exit: boolean
+  /** How the entry-capable inbound would be wrapped, or null if none qualifies. */
+  entrySecurity: 'reality' | 'tls' | null
+  /** How the exit-capable inbound would be wrapped, or null if none qualifies. */
+  exitSecurity: 'reality' | 'tls' | null
+  error?: string
 }
 
 export type ConnectionState = 'idle' | 'connected' | 'reconnecting'
@@ -145,6 +205,19 @@ export interface ConnectionStatus {
   /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */
   socksAddr?: string
   sessionId?: string
+  /**
+   * Present only when a two-hop (multihop) chain is up. `nodeAddress`/`sessionId`
+   * above are the ENTRY hop — the node this host dials directly; this is the exit,
+   * whose location the traffic appears to come from. Both sessions are paid, both
+   * quotas are watched, and either running out ends the chain.
+   */
+  chainExit?: {
+    sessionId?: string
+    address: string
+    moniker: string
+    country: string
+    type: number
+  }
   /**
    * Epoch ms when the current tunnel came up. The Sessions card adds the elapsed
    * time since to the chain's metered `duration` for a live time gauge — the chain
@@ -510,9 +583,14 @@ export interface ElectronAPI {
   nodeTestSpeed: () => Promise<SpeedTestResult>
   nodeTestCancel: () => Promise<void>
   nodeTestResults: () => Promise<Record<string, NodeProbeResult>>
+  /** Max 60 nodes per call — the picker probes in chunks so it can show progress. */
+  nodeChainEligibility: (
+    nodes: Array<{ nodeAddress: string; remoteUrl: string; nodeType: number }>,
+  ) => Promise<ChainEligibility[]>
   onNodeTestProgress: (callback: (progress: BatchProgress) => void) => () => void
 
   connectionSubscribe: (params: SubscribeParams) => Promise<SubscribeResult>
+  connectionSubscribeChain: (params: SubscribeChainParams) => Promise<SubscribeChainResult>
   connectionReconnect: (params: ReconnectParams) => Promise<ReconnectResult>
   connectionCheckVpn: () => Promise<{ type: string; name: string; iface?: string }[]>
   connectionConnect: (params: ConnectParams) => Promise<{ protocol: string }>

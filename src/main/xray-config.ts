@@ -29,11 +29,49 @@ export interface XRayMetadataEntry {
   proxy_protocol: number
   transport_protocol: number
   transport_security: number
+  /**
+   * SHA-256 of the node's self-signed TLS certificate, issued per session in the
+   * handshake response (go-sdk `ServerMetadata.TLSPin`). REQUIRED for a TLS entry:
+   * the certificate is self-signed, so there is no CA to check it against and the
+   * pin is the only thing that authenticates the node. Reality needs none — it
+   * authenticates by public key instead.
+   */
+  tls_pin?: string
   flow?: number
   reality_server_name?: string
   reality_short_id?: string
   reality_public_key?: string
   reality_fingerprint?: string
+}
+
+/**
+ * Normalise a node's TLS pin to the lower-case hex SHA-256 that xray-core's
+ * `pinnedPeerCertSha256` requires, or null when it is not a usable 32-byte digest.
+ * Both encodings are accepted by shape: v2ray's SDK base64-encodes the pin and
+ * xray's hex-encodes it (same `sha256.Sum256(cert.Raw)`), and detecting by shape
+ * rather than by protocol means a node that switches encoding cannot silently
+ * break the connect path. Anything that does not decode to exactly 32 bytes is
+ * rejected — a malformed pin must fail the build, never fall through to an
+ * unverified TLS session.
+ *
+ * Duplicated from multihop-config.ts rather than imported, because every pure
+ * builder in this directory stays import-free for the native test runner (see
+ * isCleartextEntry there for the same arrangement). A test asserts the two agree.
+ */
+export function normalizeXRayTlsPin(pin: string | undefined): string | null {
+  if (typeof pin !== 'string' || pin.length === 0) return null
+  const trimmed = pin.trim()
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return trimmed.toLowerCase()
+  if (!/^[A-Za-z0-9+/]{42,44}={0,2}$/.test(trimmed)) return null
+  try {
+    const buf = Buffer.from(trimmed, 'base64')
+    if (buf.length !== 32 || buf.toString('base64').replace(/=+$/, '') !== trimmed.replace(/=+$/, '')) {
+      return null
+    }
+    return buf.toString('hex')
+  } catch {
+    return null
+  }
 }
 
 const PROXY_VLESS = 1
@@ -59,7 +97,13 @@ export function selectXRayEntry(metadata: XRayMetadataEntry[]): XRayMetadataEntr
   )
   const reality = usable.find((m) => m.transport_security === SECURITY_REALITY)
   if (reality) return reality
-  return usable.find((m) => m.transport_security === SECURITY_TLS) ?? null
+  // A TLS entry without a usable pin is NOT selectable: the node's certificate is
+  // self-signed, so with no pin there is nothing to verify it against and xray no
+  // longer offers an "accept anything" mode. The go-sdk's own client makes the same
+  // check (client_config.go: TransportSecurityTLS && TLSPin == "" -> error).
+  return usable.find(
+    (m) => m.transport_security === SECURITY_TLS && normalizeXRayTlsPin(m.tls_pin) !== null,
+  ) ?? null
 }
 
 /** Build a single VLESS outbound (reality or tls) for the chosen entry. */
@@ -84,10 +128,16 @@ export function buildXRayOutbound(
     }
   } else {
     streamSettings.security = 'tls'
+    // Sentinel nodes serve self-signed certificates, so the node is authenticated by
+    // PINNING the digest it sent in its own handshake — not by name, and not by
+    // trusting anything. `allowInsecure` was removed outright in xray 26.x and is now
+    // a hard config error, and `serverName` adds nothing once the exact certificate is
+    // pinned (the dial address is an IP by then anyway, via pinV2RayNodeAddresses).
+    // selectXRayEntry guarantees a usable pin for any TLS entry it returns, so this
+    // cannot degrade to an unverified session.
     streamSettings.tlsSettings = {
-      serverName: entry.reality_server_name || address,
       fingerprint: entry.reality_fingerprint || 'chrome',
-      allowInsecure: false,
+      pinnedPeerCertSha256: normalizeXRayTlsPin(entry.tls_pin),
     }
   }
 

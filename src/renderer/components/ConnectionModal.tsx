@@ -302,13 +302,24 @@ export default function ConnectionModal({ node, onClose }: Props) {
             <span className="text-text-secondary">Moniker</span>
             <span className="text-text-primary">{node.moniker}</span>
           </div>
-          <div className="flex justify-between">
-            <span className="text-text-secondary">Address</span>
-            <span className="text-text-primary truncate ml-4 max-w-[280px] font-mono text-xs">{node.address}</span>
+          <div className="flex justify-between gap-4">
+            <span className="text-text-secondary shrink-0">Address</span>
+            {/* Full address, not truncated: it is the node's on-chain identity and the
+                only way to tell two nodes of the same operator apart. */}
+            <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.address}</span>
+          </div>
+          <div className="flex justify-between gap-4">
+            <span className="text-text-secondary shrink-0">Endpoint</span>
+            {/* host:port the node advertises. Usually already an IPv4 literal; when it
+                is a hostname the tunnel pins it to an IP at connect time. */}
+            <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.api}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Location</span>
-            <span className="text-text-primary">{node.country}{node.city ? `, ${node.city}` : ''}</span>
+            <span className="text-text-primary">
+              {node.country}{node.city ? `, ${node.city}` : ''}
+              {node.asn ? <span className="text-text-tertiary font-mono text-xs ml-2">AS{node.asn}</span> : null}
+            </span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Type</span>

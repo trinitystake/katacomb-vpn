@@ -102,12 +102,25 @@ const NETWORK_BY_TRANSPORT: Record<string, string> = {
 }
 
 /**
- * UDP-based transports. An EXIT hop rides a TCP stream proxied through the entry,
- * so it can never be one of these. An entry hop could be (we dial it directly),
- * but none are emittable today — this set exists so widening NETWORK_BY_TRANSPORT
- * for the entry can't silently make a UDP exit legal.
+ * The EXIT hop must be plain TCP. Established by experiment against xray 26.3.27
+ * (two local vless servers, one transport each, chained through `proxySettings`):
+ *
+ *   entry tcp  -> exit tcp   WORKS  (also proven live on mainnet, ES -> TR)
+ *   entry tcp  -> exit grpc  FAILS  (entry relays the TCP connection, exit never
+ *                                    completes a session)
+ *   entry tcp  -> exit ws    FAILS  ("connection reset by peer")
+ *   entry grpc -> exit tcp   WORKS
+ *
+ * Controls: grpc and ws both work fine as a DIRECT single hop, so this is a
+ * property of chaining, not of the transports. Only plain TCP delegates dialing to
+ * xray's detour dialer; grpc brings its own HTTP/2 dialer and ws its own upgrade
+ * handshake, and neither routes through the entry.
+ *
+ * Note which hop this constrains: only the exit rides the detour, so the ENTRY may
+ * use any transport we can emit. bluecli requires TCP on both ends; that is stricter
+ * than necessary and needlessly shrinks the entry pool.
  */
-const UDP_TRANSPORTS = new Set(['mkcp', 'quic'])
+const EXIT_TRANSPORTS = new Set(['tcp'])
 
 /** Decode a hop's transport enum with ITS OWN protocol's table. */
 export function transportName(protocol: HopProtocol, value: number): string | null {
@@ -166,9 +179,9 @@ function parsePort(raw: string | number): number | null {
 
 /**
  * Pick the inbound to build this hop's outbound from. Requires: an emittable
- * transport, a usable port, and not cleartext. An `exit` additionally may not be a
- * UDP transport. Prefers Reality, then TLS, then whatever is left (VMess-none) —
- * the same "prefer encrypted" ordering the single-hop paths use.
+ * transport, a usable port, and not cleartext. An `exit` additionally must be plain
+ * TCP (see EXIT_TRANSPORTS). Prefers Reality, then TLS, then whatever is left
+ * (VMess-none) — the same "prefer encrypted" ordering the single-hop paths use.
  *
  * Returns null when the node offers nothing buildable; callers turn that into a
  * throw so the session is refunded rather than connected insecurely.
@@ -177,7 +190,7 @@ export function selectHopEntry(spec: HopSpec, role: HopRole): HopMetadataEntry |
   const usable = spec.metadata.filter((m) => {
     const name = transportName(spec.protocol, m.transport_protocol)
     if (name === null) return false
-    if (role === 'exit' && UDP_TRANSPORTS.has(name)) return false
+    if (role === 'exit' && !EXIT_TRANSPORTS.has(name)) return false
     if (NETWORK_BY_TRANSPORT[name] === undefined) return false
     if (parsePort(m.port) === null) return false
     // A TLS inbound is only usable if the node sent a pin we can verify it against.
@@ -289,9 +302,9 @@ function requireEntry(spec: HopSpec, role: HopRole): HopMetadataEntry {
   }
   throw new Error(
     role === 'exit'
-      ? 'Multihop exit node offers no TCP-based transport (tcp, websocket or grpc) — ' +
-        'a UDP transport such as mkcp or quic cannot be carried through the entry hop. ' +
-        'Pick a different exit node.'
+      ? 'Multihop exit node offers no plain-TCP inbound. Only TCP can be carried through ' +
+        'the entry hop — grpc and websocket bring their own dialer and fail when chained. ' +
+        'Pick a different exit node (the entry may use any transport).'
       : 'Multihop entry node offers no supported transport (tcp, websocket or grpc)',
   )
 }

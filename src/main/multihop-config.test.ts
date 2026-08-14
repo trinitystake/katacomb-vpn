@@ -48,11 +48,16 @@ const V2RAY_WS_TLS: HopMetadataEntry = {
 const V2RAY_TCP_TLS: HopMetadataEntry = {
   port: '18407', proxy_protocol: 1, transport_protocol: 7, transport_security: 2, tls_pin: 'b'.repeat(64),
 }
+// A second plain-TCP inbound, for the EXIT side of a chain — the exit must be TCP
+// (see EXIT_TRANSPORTS), so tests need two distinguishable TCP hops.
+const V2RAY_TCP_TLS_EXIT: HopMetadataEntry = {
+  port: '4876', proxy_protocol: 1, transport_protocol: 7, transport_security: 2, tls_pin: '9'.repeat(64),
+}
 
 test('chains exit through entry: exit is default egress and dials via the entry tag', () => {
   const config = buildMultihopConfig(
     v2rayHop([V2RAY_TCP_TLS]),
-    v2rayHop([V2RAY_GRPC_TLS], ['exit.example.net']),
+    v2rayHop([V2RAY_TCP_TLS_EXIT], ['exit.example.net']),
   )
   const outbounds = config.outbounds as Record<string, unknown>[]
   assert.equal(outbounds.length, 2)
@@ -67,7 +72,7 @@ test('chains exit through entry: exit is default egress and dials via the entry 
 test('exactly one outbound dials directly, and it is the entry (extractV2RayRemoteHost contract)', () => {
   const config = buildMultihopConfig(
     v2rayHop([V2RAY_TCP_TLS], ['entry.example.net']),
-    v2rayHop([V2RAY_GRPC_TLS], ['exit.example.net']),
+    v2rayHop([V2RAY_TCP_TLS_EXIT], ['exit.example.net']),
   )
   const outbounds = config.outbounds as Record<string, unknown>[]
   const direct = outbounds.filter((o) => o.proxySettings === undefined)
@@ -79,7 +84,7 @@ test('exactly one outbound dials directly, and it is the entry (extractV2RayRemo
 })
 
 test('the socks inbound is loopback-only, so assertSafeV2RayConfig accepts it', () => {
-  const config = buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([V2RAY_GRPC_TLS]))
+  const config = buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([V2RAY_TCP_TLS_EXIT]))
   const inbounds = config.inbounds as Record<string, unknown>[]
   assert.equal(inbounds.length, 1)
   assert.equal(inbounds[0].listen, '127.0.0.1')
@@ -116,7 +121,38 @@ test('transport_protocol 1 builds tcp for an xray hop and is rejected for a v2ra
 
 // --- exit-hop transport rule --------------------------------------------------
 
-test('a UDP transport is refused as the exit hop', () => {
+test('only plain TCP is accepted as the exit hop; the entry may use any transport', () => {
+  // Measured against xray 26.3.27 with two local vless servers chained via
+  // proxySettings: entry tcp -> exit grpc FAILS, entry tcp -> exit ws FAILS,
+  // entry grpc -> exit tcp WORKS. Both transports work as a DIRECT hop, so this is
+  // a property of chaining. Do not widen the exit set without re-running that test.
+  const grpcTls = V2RAY_GRPC_TLS      // transport_protocol 3
+  const wsTls = V2RAY_WS_TLS          // transport_protocol 8
+  const tcpTls = V2RAY_TCP_TLS        // transport_protocol 7
+
+  assert.equal(selectHopEntry(v2rayHop([grpcTls]), 'exit'), null, 'grpc must be refused as exit')
+  assert.equal(selectHopEntry(v2rayHop([wsTls]), 'exit'), null, 'websocket must be refused as exit')
+  assert.equal(selectHopEntry(v2rayHop([tcpTls]), 'exit'), tcpTls)
+
+  // ...but all three are fine for the entry, which is dialled directly.
+  assert.equal(selectHopEntry(v2rayHop([grpcTls]), 'entry'), grpcTls)
+  assert.equal(selectHopEntry(v2rayHop([wsTls]), 'entry'), wsTls)
+
+  // A grpc entry chained to a tcp exit is the combination proven to work.
+  const cfg = buildMultihopConfig(v2rayHop([grpcTls]), v2rayHop([tcpTls]))
+  const obs = cfg.outbounds as Record<string, unknown>[]
+  assert.equal((obs[0].streamSettings as Record<string, unknown>).network, 'tcp')   // exit
+  assert.equal((obs[1].streamSettings as Record<string, unknown>).network, 'grpc')  // entry
+})
+
+test('an exit node offering only non-TCP transports is rejected with an actionable message', () => {
+  assert.throws(
+    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([V2RAY_GRPC_TLS])),
+    /exit node offers no plain-TCP inbound/,
+  )
+})
+
+test('UDP transports are refused as the exit hop', () => {
   const quic: HopMetadataEntry = {
     port: '20000', proxy_protocol: 2, transport_protocol: 6, transport_security: 2, tls_pin: 'e'.repeat(64),
   }
@@ -128,16 +164,17 @@ test('a UDP transport is refused as the exit hop', () => {
 
   assert.throws(
     () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([quic])),
-    /exit node offers no TCP-based transport/,
+    /exit node offers no plain-TCP inbound/,
   )
 })
 
-test('a node offering both a UDP and a TCP-based transport is usable as the exit', () => {
+test('a node offering several transports is usable as the exit if one of them is TCP', () => {
   const quic: HopMetadataEntry = {
     port: '20000', proxy_protocol: 2, transport_protocol: 6, transport_security: 2, tls_pin: 'e'.repeat(64),
   }
-  const picked = selectHopEntry(v2rayHop([quic, V2RAY_GRPC_TLS]), 'exit')
-  assert.equal(picked, V2RAY_GRPC_TLS)
+  // quic and grpc are both unusable as an exit; the TCP inbound is what makes it work.
+  const picked = selectHopEntry(v2rayHop([quic, V2RAY_GRPC_TLS, V2RAY_TCP_TLS_EXIT]), 'exit')
+  assert.equal(picked, V2RAY_TCP_TLS_EXIT)
 })
 
 // --- security policy ----------------------------------------------------------
@@ -164,7 +201,7 @@ test('a cleartext-only node is refused on either hop', () => {
     port: '23457', proxy_protocol: 1, transport_protocol: 8, transport_security: 1,
   }
   assert.throws(
-    () => buildMultihopConfig(v2rayHop([cleartext]), v2rayHop([V2RAY_GRPC_TLS])),
+    () => buildMultihopConfig(v2rayHop([cleartext]), v2rayHop([V2RAY_TCP_TLS_EXIT])),
     /entry node offers only cleartext/,
   )
   assert.throws(
@@ -177,14 +214,14 @@ test('vmess without transport security is accepted (it carries its own AEAD ciph
   // Matches classifyV2RayInbound: only VLess-none is cleartext. This is the most
   // common inbound on the live network (26 of 40 probed nodes offer vmess/grpc/none).
   const vmessNone: HopMetadataEntry = {
-    port: '18407', proxy_protocol: 2, transport_protocol: 3, transport_security: 1,
+    port: '18407', proxy_protocol: 2, transport_protocol: 7, transport_security: 1,
   }
   assert.equal(selectHopEntry(v2rayHop([vmessNone]), 'exit'), vmessNone)
 })
 
 test('prefers reality, then tls, over an unsecured inbound', () => {
   const vmessNone: HopMetadataEntry = {
-    port: '1', proxy_protocol: 2, transport_protocol: 3, transport_security: 1,
+    port: '1', proxy_protocol: 2, transport_protocol: 1, transport_security: 1,
   }
   const reality: HopMetadataEntry = {
     port: '3', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
@@ -255,11 +292,11 @@ test('missing metadata, missing address and an unusable port all throw', () => {
     /entry node returned no service metadata/,
   )
   assert.throws(
-    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS], []), v2rayHop([V2RAY_GRPC_TLS])),
+    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS], []), v2rayHop([V2RAY_TCP_TLS_EXIT])),
     /entry node returned no address/,
   )
   assert.throws(
-    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([V2RAY_GRPC_TLS], [])),
+    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), v2rayHop([V2RAY_TCP_TLS_EXIT], [])),
     /exit node returned no address/,
   )
   // A node that advertises an empty port (what /info returns) is not buildable.
@@ -315,7 +352,7 @@ test('a TLS outbound pins the node cert and never sends allowInsecure', () => {
 test('a vmess inbound with no transport security needs no pin', () => {
   // VMess carries its own AEAD cipher, so there is no TLS layer to verify.
   const vmessNone: HopMetadataEntry = {
-    port: '18407', proxy_protocol: 2, transport_protocol: 3, transport_security: 1,
+    port: '18407', proxy_protocol: 2, transport_protocol: 7, transport_security: 1,
   }
   const picked = selectHopEntry(v2rayHop([vmessNone]), 'exit')
   assert.equal(picked, vmessNone)

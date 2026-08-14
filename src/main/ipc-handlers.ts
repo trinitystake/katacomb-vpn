@@ -19,13 +19,17 @@ import {
   previewDerivations,
   getAddress,
   getBalance,
+  getBalanceForAddress,
   getActiveSessions,
+  getSessionsForAddress,
+  getActiveWalletId,
+  loadWalletCredentials,
   getWallet,
   getPrivKey,
   logout,
   type SessionInfo,
 } from './wallet'
-import { subscribeToNode, performHandshake, performChainHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
+import { subscribeToNode, performHandshake, performChainHandshake, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
@@ -1037,6 +1041,29 @@ async function assertSufficientFunds(costUdvpn: number): Promise<void> {
 }
 
 /**
+ * The same check against a specific account, for the second wallet of a per-hop
+ * chain. Fails OPEN on an unreadable balance for the same reason as above: blocking
+ * a purchase because an RPC was briefly unreachable is worse than letting the chain
+ * reject it, which `assertTxSucceeded` reports readably.
+ */
+async function assertSufficientFundsFor(address: string, costUdvpn: number): Promise<void> {
+  let balances: { denom: string; amount: string }[]
+  try {
+    balances = await getBalanceForAddress(address)
+  } catch {
+    reportRpcFailure()
+    return
+  }
+  const check = checkFunds(udvpnOf(balances), costUdvpn)
+  if (!check.ok) {
+    throw new Error(
+      `${INSUFFICIENT_FUNDS}: the wallet paying for the exit hop is short. ` +
+      insufficientFundsMessage(check),
+    )
+  }
+}
+
+/**
  * Report a failed chain call to the health monitor and rethrow it. When the
  * message says we never reached the endpoint, tag it so the renderer can offer
  * the network settings instead of showing a raw `RPC connect timed out`.
@@ -1140,18 +1167,33 @@ interface ChainHopInput {
  * the second cancel see the sequence the first consumed.
  */
 async function refundSessions(
-  sessionIds: string[],
-  wallet: NonNullable<ReturnType<typeof getWallet>>,
-  address: string,
+  paid: { sessionId: string; signer: ChainSigner }[],
 ): Promise<{ sessionId: string; refunded: boolean }[]> {
-  return refundEachInTurn(sessionIds, async (sessionId) => {
+  const byId = new Map(paid.map((p) => [p.sessionId, p.signer]))
+  return refundEachInTurn(paid.map((p) => p.sessionId), async (sessionId) => {
+    const signer = byId.get(sessionId)!
     try {
-      await withTimeout(endSession({ wallet, address, sessionId }), REFUND_TIMEOUT_MS, 'refund')
+      // x/session only accepts a cancel signed by the session's OWN account, so a
+      // per-hop-wallet chain must cancel each hop with the wallet that bought it.
+      await withTimeout(
+        endSession({ wallet: signer.wallet, address: signer.address, sessionId }),
+        REFUND_TIMEOUT_MS,
+        'refund',
+      )
     } catch (err) {
       console.error(`[connect] auto-cancel of session ${sessionId} failed:`, err)
       throw err
     }
   })
+}
+
+/** The account that pays for, handshakes and can cancel one hop. */
+interface ChainSigner {
+  wallet: NonNullable<ReturnType<typeof getWallet>>
+  address: string
+  privKey: Uint8Array
+  /** Undefined when this is the active wallet. */
+  walletId?: string
 }
 
 /**
@@ -1175,25 +1217,26 @@ async function refundSessions(
 async function establishChainOrRefund(params: {
   entry: Omit<ChainHopInput, 'sessionId'>
   exit: Omit<ChainHopInput, 'sessionId'>
-  startSession: (hop: Omit<ChainHopInput, 'sessionId'>) => Promise<string>
-  wallet: NonNullable<ReturnType<typeof getWallet>>
-  address: string
-  privKey: Uint8Array
+  startSession: (hop: Omit<ChainHopInput, 'sessionId'>, signer: ChainSigner) => Promise<string>
+  /** Signers per hop. The same object for both when the chain is on one wallet. */
+  entrySigner: ChainSigner
+  exitSigner: ChainSigner
 }): Promise<{ protocol: 'xray'; configString: string; entrySessionId: string; exitSessionId: string }> {
-  const { entry, exit, startSession, wallet, address, privKey } = params
-  // Sessions paid for so far, in creation order. Everything in here is refunded on
-  // any throw below — including a throw from the exit purchase itself.
-  const paid: string[] = []
+  const { entry, exit, startSession, entrySigner, exitSigner } = params
+  // Sessions paid for so far, in creation order, each with the account that can
+  // cancel it. Everything in here is refunded on any throw below — including a
+  // throw from the exit purchase itself.
+  const paid: { sessionId: string; signer: ChainSigner }[] = []
   let failedRole: 'entry' | 'exit' | null = null
 
   try {
     failedRole = 'entry'
-    const entrySessionId = await startSession(entry)
-    paid.push(entrySessionId)
+    const entrySessionId = await startSession(entry, entrySigner)
+    paid.push({ sessionId: entrySessionId, signer: entrySigner })
 
     failedRole = 'exit'
-    const exitSessionId = await startSession(exit)
-    paid.push(exitSessionId)
+    const exitSessionId = await startSession(exit, exitSigner)
+    paid.push({ sessionId: exitSessionId, signer: exitSigner })
 
     failedRole = null
     const [entryUrl, exitUrl] = await Promise.all([
@@ -1208,13 +1251,14 @@ async function establishChainOrRefund(params: {
     ])
 
     const result = await performChainHandshake({
-      entry: { ...entry, sessionId: entrySessionId, remoteUrl: entryUrl },
-      exit: { ...exit, sessionId: exitSessionId, remoteUrl: exitUrl },
-      privKey,
+      entry: { ...entry, sessionId: entrySessionId, remoteUrl: entryUrl, walletId: entrySigner.walletId },
+      exit: { ...exit, sessionId: exitSessionId, remoteUrl: exitUrl, walletId: exitSigner.walletId },
+      privKey: entrySigner.privKey,
+      exitPrivKey: exitSigner.privKey,
     })
     return { ...result, entrySessionId, exitSessionId }
   } catch (err) {
-    const refunds = await refundSessions(paid, wallet, address)
+    const refunds = await refundSessions(paid)
     const moniker = (failedRole === 'exit' ? exit.nodeMoniker : entry.nodeMoniker) || ''
     throw new Error(chainFailureMessage({
       reason: describeHandshakeError(err),
@@ -1780,6 +1824,35 @@ async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
   return publicRpcCache.list
 }
 
+/**
+ * Sessions this app bought from a wallet that is NOT the active one — i.e. the exit
+ * hop of a per-hop-wallet chain. Queried per foreign account and filtered back down
+ * to the ids we recorded, so the tab never shows unrelated sessions that happen to
+ * exist on the user's other wallets.
+ *
+ * Best-effort: an account we cannot read simply contributes nothing, exactly as an
+ * unreachable RPC does for the active wallet.
+ */
+async function getOtherWalletSessions(): Promise<SessionInfo[]> {
+  const owned = listSessionsOwnedByOtherWallets()
+  if (owned.length === 0) return []
+  const activeId = getActiveWalletId()
+  const wanted = new Set(owned.filter((o) => o.walletId !== activeId).map((o) => o.sessionId))
+  if (wanted.size === 0) return []
+
+  const entries = listWallets()
+  const addresses = new Set(
+    owned
+      .filter((o) => o.walletId !== activeId)
+      .map((o) => entries.find((w) => w.id === o.walletId)?.address)
+      .filter((a): a is string => typeof a === 'string' && a !== ''),
+  )
+  const perAccount = await Promise.all(
+    [...addresses].map((a) => getSessionsForAddress(a).catch(() => [] as SessionInfo[])),
+  )
+  return perAccount.flat().filter((s) => wanted.has(s.id))
+}
+
 function getNodeMeta(nodeAddress: string): { moniker: string; country: string; type: number } {
   // First check saved session config
   // Then fall back to cached node list from API
@@ -1913,7 +1986,7 @@ export function registerIpcHandlers(): void {
       if (cachedNodes.length === 0) {
         try { await fetchNodes() } catch { /* best-effort */ }
       }
-      const sessions = await getActiveSessions()
+      const sessions = [...await getActiveSessions(), ...await getOtherWalletSessions()]
       // Enrich sessions with node metadata from saved configs or node cache, and
       // bridge the post-disconnect gap: show max(onChain, last-measured) so usage
       // doesn't collapse to ~0 while the chain settles (see lastSessionUsage).
@@ -1964,10 +2037,25 @@ export function registerIpcHandlers(): void {
     if (isVpnActive()) {
       throw new Error('Disconnect the VPN before ending a session — the chain is unreachable through the tunnel.')
     }
-    // Gas only — but a wallet drained to zero can't afford even that, and this is
-    // the action that reclaims the deposit. Say so plainly rather than failing on chain.
-    await assertSufficientFunds(0)
-    await endSession({ wallet, address, sessionId }).catch(noteChainError)
+    // A per-hop-wallet chain's exit session belongs to a SECOND account, and
+    // x/session only accepts a cancel signed by the session's own account — so
+    // "End both" on such a chain has to switch signer for the second hop or the
+    // cancel is rejected and the deposit is stranded.
+    const saved = loadSessionConfig(sessionId)
+    const ownerId = saved?.walletId
+    const foreign = ownerId !== undefined && ownerId !== getActiveWalletId()
+    const owner: ChainSigner = foreign
+      ? { ...(await loadWalletCredentials(ownerId)), walletId: ownerId }
+      : { wallet, address, privKey: new Uint8Array() }
+    try {
+      // Gas only — but a wallet drained to zero can't afford even that, and this is
+      // the action that reclaims the deposit. Say so plainly rather than failing on chain.
+      if (foreign) await assertSufficientFundsFor(owner.address, 0)
+      else await assertSufficientFunds(0)
+      await endSession({ wallet: owner.wallet, address: owner.address, sessionId }).catch(noteChainError)
+    } finally {
+      if (foreign) owner.privKey.fill(0)
+    }
   })
 
   handle(IPC.WALLET_LIST, async () => {
@@ -2261,8 +2349,11 @@ export function registerIpcHandlers(): void {
     type: 'gigabytes' | 'hours'
     amount: number
     denom: string
+    /** Pay for the exit hop from this wallet instead of the active one. */
+    exitWalletId?: string
   }) => {
     if (params.type !== 'gigabytes' && params.type !== 'hours') throw new Error('Invalid type')
+    if (params.exitWalletId !== undefined) assertString(params.exitWalletId, 'exitWalletId')
     assertNumber(params.amount, 'amount', 1, 1000)
     assertString(params.denom, 'denom')
 
@@ -2305,7 +2396,31 @@ export function registerIpcHandlers(): void {
 
     const hopCost = (quoteValue: string): number =>
       params.denom === 'udvpn' ? parseInt(quoteValue, 10) * params.amount : 0
-    await assertSufficientFunds(hopCost(params.entry.quoteValue) + hopCost(params.exit.quoteValue))
+
+    const activeSigner: ChainSigner = { wallet, address, privKey }
+    // Per-hop wallets: paying for the two hops from two accounts is what stops
+    // either node reading `Session.accAddress` and finding the other half of the
+    // chain via the public SessionsForAccount query. The second wallet is only ever
+    // one the user already has — the app never creates or funds one, because an
+    // in-app transfer between them is itself a public on-chain link and would put
+    // the pairing straight back.
+    let exitSigner: ChainSigner = activeSigner
+    if (params.exitWalletId && params.exitWalletId !== getActiveWalletId()) {
+      const creds = await loadWalletCredentials(params.exitWalletId)
+      exitSigner = { ...creds, walletId: params.exitWalletId }
+    }
+    const separateWallets = exitSigner !== activeSigner
+
+    try {
+      // Each account pays only for its own hop, so they are checked separately —
+      // summing them against one balance would pass a wallet that cannot afford the
+      // hop it is actually buying.
+      if (separateWallets) {
+        await assertSufficientFunds(hopCost(params.entry.quoteValue))
+        await assertSufficientFundsFor(exitSigner.address, hopCost(params.exit.quoteValue))
+      } else {
+        await assertSufficientFunds(hopCost(params.entry.quoteValue) + hopCost(params.exit.quoteValue))
+      }
 
     const toHop = (h: typeof params.entry) => ({
       nodeAddress: h.nodeAddress, nodeType: h.nodeType, apiField: h.apiField,
@@ -2315,14 +2430,13 @@ export function registerIpcHandlers(): void {
     const result = await establishChainOrRefund({
       entry: toHop(params.entry),
       exit: toHop(params.exit),
-      startSession: (hop) =>
+      startSession: (hop, signer) =>
         subscribeToNode({
-          wallet, address, nodeAddress: hop.nodeAddress,
+          wallet: signer.wallet, address: signer.address, nodeAddress: hop.nodeAddress,
           type: params.type, amount: params.amount, denom: params.denom,
         }).catch(noteChainError),
-      wallet,
-      address,
-      privKey,
+      entrySigner: activeSigner,
+      exitSigner,
     })
 
     const entryHop: ChainHopInput = { ...toHop(params.entry), sessionId: result.entrySessionId }
@@ -2354,11 +2468,17 @@ export function registerIpcHandlers(): void {
     }
     if (!activeExitQuota) activeExitQuota = purchasedQuota(result.exitSessionId)
 
-    return {
-      sessionId: result.entrySessionId,
-      exitSessionId: result.exitSessionId,
-      protocol: result.protocol,
-      configString: result.configString,
+      return {
+        sessionId: result.entrySessionId,
+        exitSessionId: result.exitSessionId,
+        protocol: result.protocol,
+        configString: result.configString,
+      }
+    } finally {
+      // The second wallet's key is derived here and tracked by nothing, so unlike the
+      // active wallet's (which setPrivKey owns) there is no other code that will ever
+      // wipe it. Zero it on every path, including the refund path.
+      if (separateWallets) exitSigner.privKey.fill(0)
     }
   })
 

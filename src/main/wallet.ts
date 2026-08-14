@@ -230,6 +230,39 @@ export async function previewDerivations(
   }))
 }
 
+/** Credentials for one wallet. `privKey` is live key material — zero it after use. */
+export interface WalletCredentials {
+  wallet: DirectSecp256k1HdWallet
+  address: string
+  privKey: Uint8Array
+}
+
+/**
+ * Derive a wallet's signing material by id WITHOUT making it the active wallet.
+ *
+ * Multihop with per-hop wallets needs to sign the exit hop's purchase, handshake and
+ * cancel as a DIFFERENT account, while the user stays on the wallet they are using.
+ * `switchWallet` cannot do that: it mutates the shared state, so the app would
+ * silently change wallets underneath the Wallet panel, the balance poll and the
+ * Sessions tab in the middle of a purchase.
+ *
+ * The returned `privKey` is live key material and is NOT tracked by `setPrivKey`, so
+ * nothing else will zero it — the caller must, in a finally.
+ */
+export async function loadWalletCredentials(walletId: string): Promise<WalletCredentials> {
+  const entry = listWallets().find((w) => w.id === walletId)
+  if (!entry) throw new Error('Wallet not found')
+  const mnemonic = getWalletMnemonic(walletId)
+  const hdPath = cosmosHdPath(entry.accountIndex ?? 0, entry.addressIndex ?? 0)
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: WALLET_PREFIX,
+    hdPaths: [hdPath],
+  })
+  const [account] = await wallet.getAccounts()
+  const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath })
+  return { wallet, address: account.address, privKey }
+}
+
 export function getAddress(): string | null {
   return state.address
 }
@@ -244,14 +277,28 @@ export function getPrivKey(): Uint8Array | null {
 
 export async function getBalance(): Promise<{ denom: string; amount: string }[]> {
   if (!state.address) return []
+  return getBalanceForAddress(state.address)
+}
 
+/**
+ * The same read for an account that is NOT the active wallet — a per-hop-wallet
+ * chain has to know the second account can afford the hop it is buying, and summing
+ * both hops against the active balance would let a broke second wallet through.
+ */
+export async function getBalanceForAddress(address: string): Promise<{ denom: string; amount: string }[]> {
+  if (!address) return []
   const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
-    const balances = await client.getAllBalances(state.address)
+    const balances = await client.getAllBalances(address)
     return balances.map((b) => ({ denom: b.denom, amount: b.amount }))
   } finally {
     client.disconnect()
   }
+}
+
+/** Id of the wallet currently loaded, or null when none is. */
+export function getActiveWalletId(): string | null {
+  return state.activeWalletId
 }
 
 export interface SessionInfo {
@@ -342,11 +389,25 @@ function decodeSession(any: { typeUrl: string; value: Uint8Array }): SessionInfo
 
 export async function getActiveSessions(): Promise<SessionInfo[]> {
   if (!state.address) return []
+  return getSessionsForAddress(state.address)
+}
+
+/**
+ * The same query for an account that is NOT the active wallet.
+ *
+ * Multihop with per-hop wallets pays for the exit session from a second account, so
+ * that session simply does not exist as far as `sessionsForAccount(active)` is
+ * concerned — it would vanish from the Sessions tab, meter nothing, and be
+ * uncancellable. Callers merge the results; the session ids are globally unique, so
+ * there is nothing to reconcile.
+ */
+export async function getSessionsForAddress(address: string): Promise<SessionInfo[]> {
+  if (!address) return []
 
   try {
     const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
     try {
-      const result = await client.sentinelQuery?.session.sessionsForAccount(state.address, {
+      const result = await client.sentinelQuery?.session.sessionsForAccount(address, {
         key: new Uint8Array(),
         offset: Long.fromNumber(0, true),
         limit: Long.fromNumber(20, true),

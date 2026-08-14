@@ -91,6 +91,14 @@ export interface SubscribeChainParams {
   type: 'gigabytes' | 'hours'
   amount: number
   denom: string
+  /**
+   * Pay for the EXIT hop from this wallet instead of the active one. Two accounts
+   * mean neither node can find the other half of the chain by reading its session's
+   * `accAddress` and querying SessionsForAccount. The wallet must already exist and
+   * already hold funds — the app never creates or funds one, because a transfer
+   * between them is itself a public on-chain link.
+   */
+  exitWalletId?: string
 }
 
 export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'

@@ -76,6 +76,14 @@ interface SavedSessionConfig {
    */
   chainRole?: 'entry' | 'exit'
   /**
+   * Which wallet owns this session, when it is NOT the active one. Multihop can pay
+   * for its two hops from two accounts so that neither node can pair them off the
+   * chain, and the session then only exists under that account: listing it, metering
+   * it and cancelling it all need the owning wallet. Absent means the active wallet,
+   * which is every single-hop session and every same-wallet chain.
+   */
+  walletId?: string
+  /**
    * The NODE's own protocol tag (2 = V2Ray, 4 = XRAY), which is deliberately not the
    * same thing as `protocol` above. `protocol` is the runtime that replays this
    * config, and a chain is always replayed by xray because xray-core is a strict
@@ -160,6 +168,31 @@ function retireSessionConfig(sessionId: string): void {
     return
   }
   deleteSessionConfig(sessionId)
+}
+
+/**
+ * Every saved session that a NON-active wallet paid for, as {sessionId, walletId}.
+ *
+ * A per-hop-wallet chain buys its exit session from a second account, and
+ * `sessionsForAccount(active)` cannot see it — so without this the exit hop drops
+ * out of the Sessions tab the moment it is bought: invisible, unmetered and
+ * impossible to cancel from the UI, with a live deposit against it. The caller uses
+ * it to look up which extra accounts to query and which session ids are ours.
+ *
+ * Only ids WE recorded are returned, so merging these in never surfaces unrelated
+ * sessions that happen to live on the user's other wallets.
+ */
+export function listSessionsOwnedByOtherWallets(): { sessionId: string; walletId: string }[] {
+  const out: { sessionId: string; walletId: string }[] = []
+  try {
+    for (const file of readdirSync(getSessionsDir())) {
+      const match = file.match(/^session-(\d+)\.json$/)
+      if (!match) continue
+      const saved = loadSessionConfig(match[1])
+      if (saved?.walletId) out.push({ sessionId: match[1], walletId: saved.walletId })
+    }
+  } catch { /* sessions dir missing or unreadable */ }
+  return out
 }
 
 /**
@@ -618,6 +651,8 @@ export interface ChainHopParams {
   remoteUrl: string
   nodeMoniker?: string
   nodeCountry?: string
+  /** Which wallet paid for this hop. Absent when both hops share the active one. */
+  walletId?: string
 }
 
 /**
@@ -677,20 +712,30 @@ async function handshakeChainHop(
 export async function performChainHandshake(params: {
   entry: ChainHopParams
   exit: ChainHopParams
+  /** Signs the ENTRY hop's handshake — the account that paid for that session. */
   privKey: Uint8Array
+  /**
+   * Signs the EXIT hop's handshake. Defaults to `privKey` when both hops are on one
+   * wallet. A node verifies the handshake against the session's own `accAddress`, so
+   * signing the exit with the entry's key is rejected outright once the hops are on
+   * separate accounts.
+   */
+  exitPrivKey?: Uint8Array
 }): Promise<{ protocol: 'xray'; configString: string }> {
   const { entry, exit, privKey } = params
+  const exitPrivKey = params.exitPrivKey ?? privKey
 
   sendProgress('4/5', 'Handshaking entry node...')
   const entrySpec = await handshakeChainHop(entry, privKey, 'entry')
 
   sendProgress('4/5', 'Handshaking exit node...')
-  const exitSpec = await handshakeChainHop(exit, privKey, 'exit')
+  const exitSpec = await handshakeChainHop(exit, exitPrivKey, 'exit')
 
   const configString = JSON.stringify(buildMultihopConfig(entrySpec, exitSpec), null, 2)
 
   for (const [hop, peer, role] of [[entry, exit, 'entry'], [exit, entry, 'exit']] as const) {
     saveSessionConfig({
+      walletId: hop.walletId,
       sessionId: hop.sessionId,
       protocol: 'xray',
       configString,

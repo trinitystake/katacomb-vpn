@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { SentNode, TunnelProtocol } from '../types'
+import type { SentNode, TunnelProtocol, WalletEntry } from '../types'
 import { useNodesContext } from '../contexts/NodesContext'
 import { useBalance } from '../hooks/useBalance'
 import { useConnection } from '../hooks/useConnection'
@@ -70,6 +70,11 @@ export default function MultihopModal({ onClose }: Props) {
   const [mode, setMode] = useState<'tunnel' | 'proxy'>('tunnel')
   const [acknowledged, setAcknowledged] = useState(false)
   const [overrideDiversity, setOverrideDiversity] = useState(false)
+  // Which wallet pays for the EXIT hop. '' = the active one, i.e. both hops on one
+  // account, which is what every chain did before per-hop wallets existed.
+  const [exitWalletId, setExitWalletId] = useState('')
+  const [wallets, setWallets] = useState<WalletEntry[]>([])
+  const [activeAddress, setActiveAddress] = useState<string | null>(null)
 
   const [connecting, setConnecting] = useState(false)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
@@ -83,6 +88,21 @@ export default function MultihopModal({ onClose }: Props) {
   useEffect(() => {
     const unsub = window.api.onConnectionProgress((s) => setCurrentStep(s))
     return unsub
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [list, addr] = await Promise.all([window.api.walletList(), window.api.walletGetAddress()])
+        if (cancelled) return
+        setWallets(list)
+        setActiveAddress(addr)
+      } catch {
+        if (!cancelled) setWallets([])
+      }
+    })()
+    return () => { cancelled = true }
   }, [])
 
   // Only v2ray/xray can be chained at all: proxySettings.tag is a v2ray-core
@@ -125,6 +145,7 @@ export default function MultihopModal({ onClose }: Props) {
         type: billing,
         amount,
         denom: 'udvpn',
+        ...(exitWalletId ? { exitWalletId } : {}),
       })
       setPaid({ entrySessionId: result.sessionId, exitSessionId: result.exitSessionId })
       await connectTunnelOnly(result.protocol as TunnelProtocol)
@@ -402,6 +423,47 @@ export default function MultihopModal({ onClose }: Props) {
               />
             )}
 
+            {/* Per-hop wallets. Paying both hops from one account is what lets either
+                node read its session's `accAddress`, run the public
+                SessionsForAccount query and find the other half of the chain — so
+                this is the control that closes the one break the text below
+                otherwise has to warn about. Deliberately a picker over wallets the
+                user already has: creating and funding one here would move coins
+                between the two accounts, which is itself a public link and would put
+                the pairing straight back. */}
+            <div className="space-y-1.5">
+              <div className="text-xs text-text-secondary">Exit hop paid by</div>
+              <select
+                value={exitWalletId}
+                onChange={(e) => setExitWalletId(e.target.value)}
+                className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus w-full"
+              >
+                <option value="">This wallet (both hops on one account)</option>
+                {wallets.filter((w) => w.address !== activeAddress).map((w) => (
+                  <option key={w.id} value={w.id}>{w.name} · {w.address.slice(0, 12)}…{w.address.slice(-6)}</option>
+                ))}
+              </select>
+              {exitWalletId ? (
+                <p className="text-text-tertiary text-xs">
+                  Each hop is paid by a different account, so neither node can look the other up on
+                  chain. That only holds if this wallet was funded independently: if you sent it
+                  coins from the other one, the transfer is public and links them again.
+                </p>
+              ) : wallets.filter((w) => w.address !== activeAddress).length === 0 ? (
+                <p className="text-text-tertiary text-xs">
+                  You have one wallet, so both hops are paid from it and either node can find the
+                  other by looking up your account on chain. Import a second wallet, funded from
+                  somewhere other than this one, to close that.
+                </p>
+              ) : (
+                <p className="text-warning text-xs">
+                  Both hops paid from one account: either node can read your address off its own
+                  session and find the other hop with a public query. Pick a second wallet to
+                  prevent that.
+                </p>
+              )}
+            </div>
+
             <div className="space-y-1.5">
               <div className="text-xs text-text-secondary">Connection mode</div>
               <div className="flex gap-4 text-sm">
@@ -435,10 +497,10 @@ export default function MultihopModal({ onClose }: Props) {
                 has both.
               </p>
               <p className="text-text-secondary">
-                <span className="text-danger">Does not make you anonymous.</span> Both sessions are paid from
-                this one wallet, and a session's account is public on chain, so either node can look up the
-                other and pair them. Two operators working together can also match the traffic itself, since
-                the same bytes cross both hops.
+                <span className="text-danger">Does not make you anonymous.</span>{' '}
+                {exitWalletId
+                  ? 'Two operators working together can still match the traffic itself, since the same bytes cross both hops at the same moments. Paying each hop from a different account stops them pairing you on chain; it does not stop them comparing notes.'
+                  : "Both sessions are paid from this one wallet, and a session's account is public on chain, so either node can look up the other and pair them. Two operators working together can also match the traffic itself, since the same bytes cross both hops."}
               </p>
               <p className="text-text-secondary">
                 <span className="text-warning">Costs twice, and it is slow.</span> Two sessions, two deposits.

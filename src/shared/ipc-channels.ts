@@ -28,6 +28,7 @@ export const IPC = {
 
   // Connection
   CONNECTION_SUBSCRIBE: 'connection:subscribe',
+  CONNECTION_SUBSCRIBE_CHAIN: 'connection:subscribe-chain',
   CONNECTION_RECONNECT: 'connection:reconnect',
   CONNECTION_CONNECT: 'connection:connect',
   CONNECTION_CHECK_VPN: 'connection:check-vpn',

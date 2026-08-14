@@ -25,6 +25,41 @@ export function sessionFailureMessage(opts: {
   return `${preamble}. ${tail}`
 }
 
+/**
+ * User-facing message for a MULTIHOP chain that failed after one or both of its
+ * sessions were paid for. Unlike the single-hop case there can be two deposits in
+ * flight, and cancelling them is two independent transactions either of which can
+ * fail — so the tail reports each session individually and names exactly the ones
+ * the user still has to cancel by hand. `failedRole` says which hop broke (null
+ * when the failure wasn't hop-specific, e.g. the second purchase never landed).
+ */
+export function chainFailureMessage(opts: {
+  reason: string
+  policyRejected: boolean
+  failedRole: 'entry' | 'exit' | null
+  nodeMoniker: string
+  refunds: { sessionId: string; refunded: boolean }[]
+}): string {
+  const where = opts.failedRole ? ` (${opts.failedRole} hop)` : ''
+  const preamble = opts.policyRejected
+    ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting${where}`
+    : `Could not establish the two-hop chain${where}: ${opts.reason}`
+
+  if (opts.refunds.length === 0) return `${preamble}. No sessions were created.`
+
+  const stranded = opts.refunds.filter((r) => !r.refunded).map((r) => `#${r.sessionId}`)
+  if (stranded.length === 0) {
+    const noun = opts.refunds.length === 1 ? 'The session was' : 'Both sessions were'
+    return `${preamble}. ${noun} cancelled and your deposit${opts.refunds.length === 1 ? '' : 's'} refunded.`
+  }
+  const list = stranded.join(' and ')
+  const verb = stranded.length === 1 ? 'session' : 'sessions'
+  return (
+    `${preamble}. Could not auto-cancel ${verb} ${list} — open the Session tab and ` +
+    `cancel ${stranded.length === 1 ? 'it' : 'them'} manually.`
+  )
+}
+
 export type ReconnectDecision =
   | { action: 'abort' }
   | { action: 'give-up' }

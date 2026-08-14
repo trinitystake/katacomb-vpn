@@ -76,6 +76,7 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   connectionSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.CONNECTION_SUBSCRIBE, params),
+  connectionSubscribeChain: (params: unknown) => ipcRenderer.invoke(IPC.CONNECTION_SUBSCRIBE_CHAIN, params),
   connectionReconnect: (params: unknown) => ipcRenderer.invoke(IPC.CONNECTION_RECONNECT, params),
   connectionCheckVpn: () => ipcRenderer.invoke(IPC.CONNECTION_CHECK_VPN),
   connectionConnect: (params: unknown) => ipcRenderer.invoke(IPC.CONNECTION_CONNECT, params),

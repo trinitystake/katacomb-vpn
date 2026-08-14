@@ -70,6 +70,29 @@ export interface ReconnectParams {
   sessionId: string
 }
 
+/** One hop of a multihop chain. `nodeType` must be 2 (V2Ray) or 4 (XRAY). */
+export interface ChainHopParams {
+  nodeAddress: string
+  nodeMoniker: string
+  nodeCountry: string
+  nodeType: number
+  apiField: string
+  quoteValue: string
+}
+
+/**
+ * Buy a two-hop chain: entry -> exit. One duration/size applies to both hops (a
+ * chain only lives as long as its shorter half), and the cost is the sum. Main
+ * cancels BOTH sessions if any part of the purchase or handshake fails.
+ */
+export interface SubscribeChainParams {
+  entry: ChainHopParams
+  exit: ChainHopParams
+  type: 'gigabytes' | 'hours'
+  amount: number
+  denom: string
+}
+
 export type TunnelProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
 
 /** A subscription as listed by the Subscriptions manager. */
@@ -103,6 +126,14 @@ export interface ConnectParams {
 export interface SubscribeResult {
   sessionId: string
   protocol: string
+}
+
+/** `sessionId` is the ENTRY hop — the primary session for status and reconnect. */
+export interface SubscribeChainResult {
+  sessionId: string
+  exitSessionId: string
+  protocol: string
+  configString: string
 }
 
 export interface ReconnectResult {
@@ -145,6 +176,19 @@ export interface ConnectionStatus {
   /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */
   socksAddr?: string
   sessionId?: string
+  /**
+   * Present only when a two-hop (multihop) chain is up. `nodeAddress`/`sessionId`
+   * above are the ENTRY hop — the node this host dials directly; this is the exit,
+   * whose location the traffic appears to come from. Both sessions are paid, both
+   * quotas are watched, and either running out ends the chain.
+   */
+  chainExit?: {
+    sessionId?: string
+    address: string
+    moniker: string
+    country: string
+    type: number
+  }
   /**
    * Epoch ms when the current tunnel came up. The Sessions card adds the elapsed
    * time since to the chain's metered `duration` for a live time gauge — the chain
@@ -513,6 +557,7 @@ export interface ElectronAPI {
   onNodeTestProgress: (callback: (progress: BatchProgress) => void) => () => void
 
   connectionSubscribe: (params: SubscribeParams) => Promise<SubscribeResult>
+  connectionSubscribeChain: (params: SubscribeChainParams) => Promise<SubscribeChainResult>
   connectionReconnect: (params: ReconnectParams) => Promise<ReconnectResult>
   connectionCheckVpn: () => Promise<{ type: string; name: string; iface?: string }[]>
   connectionConnect: (params: ConnectParams) => Promise<{ protocol: string }>

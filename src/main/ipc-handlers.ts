@@ -25,9 +25,9 @@ import {
   logout,
   type SessionInfo,
 } from './wallet'
-import { subscribeToNode, performHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
+import { subscribeToNode, performHandshake, performChainHandshake, resolveNodeRemoteUrl, loadSessionConfig, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction } from './connect-decisions'
+import { sessionFailureMessage, chainFailureMessage, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -130,6 +130,13 @@ let activeAmneziaWgConfig: string | null = null
 let activeOpenVpnConfig: string | null = null
 let activeSessionId: string | null = null
 let activeNodeInfo: { address: string; moniker: string; country: string; type: number; v2raySummary?: string } | null = null
+// MULTIHOP: the chain's second (exit) session and node, when a two-hop chain is up.
+// `activeSessionId`/`activeNodeInfo` deliberately stay the ENTRY hop, so every existing
+// reader (status, reconnect, usage, extractV2RayRemoteHost's whitelist) keeps its
+// current meaning — the entry is the hop this host actually dials. The chained config
+// is saved under BOTH session ids, so a reconnect from either rebuilds the whole chain.
+let activeExitSessionId: string | null = null
+let activeExitNodeInfo: { address: string; moniker: string; country: string; type: number } | null = null
 // Did the node mint a peer for the config we are about to build a tunnel from, or is
 // that config a replayed saved one? Only deadTunnelMessage cares, and only when the
 // tunnel turns out to carry nothing — at which point the answer is the difference
@@ -303,6 +310,11 @@ interface ActiveQuota {
   baselineBytes: number
 }
 let activeQuota: ActiveQuota | null = null
+// MULTIHOP: the exit hop's quota. Both hops carry the SAME byte stream and the same
+// wall-clock — one stream crosses both nodes — so both are scored against the same
+// live counters, which is exact rather than conservative. Whichever runs out first
+// stands the chain down (see currentQuotaVerdict).
+let activeExitQuota: ActiveQuota | null = null
 let quotaWarned = false
 let quotaTimer: ReturnType<typeof setInterval> | null = null
 // When the CURRENT tunnel came up. The quota watchdog measures elapsed session time
@@ -372,16 +384,38 @@ function setQuota(row: SessionInfo | undefined): void {
   )
 }
 
-function currentQuotaVerdict() {
-  if (!activeQuota) return null
+/** Rank a quota verdict so the worst of several can be picked. */
+const QUOTA_LEVEL_RANK = { ok: 0, warn: 1, expired: 2 } as const
+/** An 'expired' verdict carries no pct — it is already past the cap, so treat it as 100. */
+const quotaPct = (v: QuotaVerdict): number => ('pct' in v ? v.pct : 100)
+
+function verdictFor(quota: ActiveQuota) {
   return evaluateQuota({
-    maxDurationSeconds: activeQuota.maxDurationSeconds,
-    baselineDurationSeconds: activeQuota.baselineDurationSeconds,
+    maxDurationSeconds: quota.maxDurationSeconds,
+    baselineDurationSeconds: quota.baselineDurationSeconds,
     connectedSeconds: connectedSecondsAlive(),
-    maxBytes: activeQuota.maxBytes,
-    baselineBytes: activeQuota.baselineBytes,
+    maxBytes: quota.maxBytes,
+    baselineBytes: quota.baselineBytes,
     liveRxBytes: getTrafficStats().rxBytes,
   })
+}
+
+/**
+ * The binding quota verdict. With a multihop chain there are two paid sessions and
+ * the tunnel dies when EITHER runs out, so the worst verdict wins — by level first,
+ * then by how far through the cap it is.
+ */
+function currentQuotaVerdict() {
+  const verdicts = [activeQuota, activeExitQuota]
+    .filter((q): q is ActiveQuota => q !== null)
+    .map(verdictFor)
+  if (verdicts.length === 0) return null
+  return verdicts.reduce((worst, v) =>
+    QUOTA_LEVEL_RANK[v.level] > QUOTA_LEVEL_RANK[worst.level] ||
+    (QUOTA_LEVEL_RANK[v.level] === QUOTA_LEVEL_RANK[worst.level] && quotaPct(v) > quotaPct(worst))
+      ? v
+      : worst,
+  )
 }
 
 /**
@@ -604,7 +638,10 @@ async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<vo
     desiredMode = 'tunnel'
     activeSessionId = null
     activeNodeInfo = null
+    activeExitSessionId = null
+    activeExitNodeInfo = null
     activeQuota = null
+    activeExitQuota = null
     // The marker is written BEFORE arming, so a failed arm still reads as "armed".
     // This is deliberate: we bias toward over-reporting traffic as blocked (one
     // idempotent click to clear) rather than under-reporting it (user stranded). If
@@ -764,6 +801,40 @@ function applySession(
   activeOpenVpnConfig = result.protocol === 'openvpn' ? result.configString : null
   // Every caller reached here through a handshake the node answered, so the peer
   // behind this config is as fresh as it gets.
+  nodeIssuedFreshPeer = true
+}
+
+/**
+ * Stash a freshly-bought multihop chain. The chained config runs on the xray binary
+ * (see performChainHandshake), so it goes in `activeXrayConfig` and the connect path
+ * needs no new branch. Entry is the primary session/node for every existing reader;
+ * the exit is held alongside so both quotas are watched, both usages are floored and
+ * both are visible to the renderer.
+ *
+ * Unlike two applySession calls — which would silently clobber the first hop and
+ * leave its deposit untracked — this writes both halves in one step.
+ */
+function applyChainSession(
+  entry: ChainHopInput,
+  exit: ChainHopInput,
+  configString: string,
+): void {
+  activeSessionId = entry.sessionId
+  activeNodeInfo = {
+    address: entry.nodeAddress, moniker: entry.nodeMoniker,
+    country: entry.nodeCountry, type: entry.nodeType,
+  }
+  activeExitSessionId = exit.sessionId
+  activeExitNodeInfo = {
+    address: exit.nodeAddress, moniker: exit.nodeMoniker,
+    country: exit.nodeCountry, type: exit.nodeType,
+  }
+  activeWg = null
+  activeV2ray = null
+  activeXrayConfig = configString
+  activeHysteria2Config = null
+  activeAmneziaWgConfig = null
+  activeOpenVpnConfig = null
   nodeIssuedFreshPeer = true
 }
 
@@ -940,6 +1011,112 @@ async function establishSessionOrRefund(params: {
       nodeMoniker,
       reason: describeHandshakeError(err),
       policyRejected: err instanceof V2RayPolicyError,
+    }))
+  }
+}
+
+/** One hop's purchase inputs for a multihop chain. */
+interface ChainHopInput {
+  sessionId: string
+  nodeAddress: string
+  nodeType: number
+  apiField: string
+  nodeMoniker: string
+  nodeCountry: string
+}
+
+/**
+ * Cancel every session in `sessionIds`, independently and best-effort, reporting
+ * which ones actually came back. Each cancel is its own transaction: one failing
+ * must never stop the others from being attempted, or a single flaky broadcast
+ * strands the user's other deposit too.
+ */
+async function refundSessions(
+  sessionIds: string[],
+  wallet: NonNullable<ReturnType<typeof getWallet>>,
+  address: string,
+): Promise<{ sessionId: string; refunded: boolean }[]> {
+  return Promise.all(
+    sessionIds.map(async (sessionId) => {
+      try {
+        await withTimeout(endSession({ wallet, address, sessionId }), REFUND_TIMEOUT_MS, 'refund')
+        return { sessionId, refunded: true }
+      } catch (err) {
+        console.error(`[connect] auto-cancel of session ${sessionId} failed:`, err)
+        return { sessionId, refunded: false }
+      }
+    }),
+  )
+}
+
+/**
+ * The multihop analogue of establishSessionOrRefund, and the reason a chain can be
+ * bought at all: TWO sessions are paid for here, so a failure at ANY point must
+ * refund BOTH — including the case where the exit purchase itself fails after the
+ * entry session is already on chain. bluecli's equivalent just prints an "orphan
+ * session" notice; that is the behaviour this exists to avoid.
+ *
+ * Ordering is deliberate: buy entry, buy exit, then handshake both. Buying both
+ * first means a handshake failure has a single uniform cleanup path, and the two
+ * `nodeStartSession` broadcasts are the likeliest thing to fail — doing them
+ * back-to-back keeps the window where only one deposit is locked as short as
+ * possible. The two purchases MUST stay sequential (awaited, not raced): they are
+ * signed by one account, so parallel broadcasts collide on the account sequence
+ * number and the second is rejected. Only the endpoint resolves below are parallel.
+ *
+ * `startSession` is injected so this stays agnostic about how each hop is funded;
+ * today both hops are direct per-GB/per-hour purchases.
+ */
+async function establishChainOrRefund(params: {
+  entry: Omit<ChainHopInput, 'sessionId'>
+  exit: Omit<ChainHopInput, 'sessionId'>
+  startSession: (hop: Omit<ChainHopInput, 'sessionId'>) => Promise<string>
+  wallet: NonNullable<ReturnType<typeof getWallet>>
+  address: string
+  privKey: Uint8Array
+}): Promise<{ protocol: 'xray'; configString: string; entrySessionId: string; exitSessionId: string }> {
+  const { entry, exit, startSession, wallet, address, privKey } = params
+  // Sessions paid for so far, in creation order. Everything in here is refunded on
+  // any throw below — including a throw from the exit purchase itself.
+  const paid: string[] = []
+  let failedRole: 'entry' | 'exit' | null = null
+
+  try {
+    failedRole = 'entry'
+    const entrySessionId = await startSession(entry)
+    paid.push(entrySessionId)
+
+    failedRole = 'exit'
+    const exitSessionId = await startSession(exit)
+    paid.push(exitSessionId)
+
+    failedRole = null
+    const [entryUrl, exitUrl] = await Promise.all([
+      resolveNodeRemoteUrl(entry.nodeAddress, entry.apiField).catch((err) => {
+        failedRole = 'entry'
+        throw err
+      }),
+      resolveNodeRemoteUrl(exit.nodeAddress, exit.apiField).catch((err) => {
+        failedRole = 'exit'
+        throw err
+      }),
+    ])
+
+    const result = await performChainHandshake({
+      entry: { ...entry, sessionId: entrySessionId, remoteUrl: entryUrl },
+      exit: { ...exit, sessionId: exitSessionId, remoteUrl: exitUrl },
+      privKey,
+    })
+    return { ...result, entrySessionId, exitSessionId }
+  } catch (err) {
+    const refunds = await refundSessions(paid, wallet, address)
+    const moniker = (failedRole === 'exit' ? exit.nodeMoniker : entry.nodeMoniker) || ''
+    throw new Error(chainFailureMessage({
+      reason: describeHandshakeError(err),
+      policyRejected: err instanceof V2RayPolicyError,
+      failedRole,
+      nodeMoniker: moniker,
+      refunds,
     }))
   }
 }
@@ -1189,12 +1366,21 @@ export async function healStrandedKillSwitch(): Promise<void> {
  * the chain catches up. Must run while the tunnel is still up.
  */
 function rememberSessionUsage(): void {
-  if (!activeSessionId) return
+  // Both hops of a chain carry the same stream, so both accrue the same usage and
+  // both need a floor — otherwise the exit hop's gauge collapses to the lagging
+  // chain figure the moment the tunnel goes down.
+  for (const id of [activeSessionId, activeExitSessionId]) {
+    if (id) rememberUsageFor(id)
+  }
+  if (activeSessionId || activeExitSessionId) saveSessionUsage()
+}
+
+function rememberUsageFor(sessionId: string): void {
   const live = getTrafficStats()
-  const baseline = (lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeSessionId)
+  const baseline = (lastKnownSessions as SessionInfo[]).find((s) => s?.id === sessionId)
   const baseDown = parseInt(baseline?.downloadBytes || '0', 10) || 0
   const baseUp = parseInt(baseline?.uploadBytes || '0', 10) || 0
-  lastSessionUsage.set(activeSessionId, {
+  lastSessionUsage.set(sessionId, {
     downloadBytes: String(baseDown + live.rxBytes),
     uploadBytes: String(baseUp + live.txBytes),
     // Duration lags the same way bytes do — the node's final proof lands after we
@@ -1207,7 +1393,6 @@ function rememberSessionUsage(): void {
     // under the quota gauge, would end a session that still had paid time on it.
     durationSeconds: (baseline?.durationSeconds ?? 0) + connectedSecondsAlive(),
   })
-  saveSessionUsage()
 }
 
 /**
@@ -1254,7 +1439,10 @@ export async function performDisconnect(): Promise<void> {
     desiredMode = 'tunnel'
     activeSessionId = null
     activeNodeInfo = null
+    activeExitSessionId = null
+    activeExitNodeInfo = null
     activeQuota = null
+    activeExitQuota = null
     // This is also what the expiry banner's "Restore internet" button calls, so
     // clearing the notice here is what dismisses it once traffic is back.
     lastExpiry = null
@@ -1960,6 +2148,113 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  // Connection: buy and handshake a two-hop (multihop) chain.
+  //
+  // Both hops are direct per-GB/per-hour purchases of the SAME size — a chain is only
+  // as long-lived as its shorter half, so buying asymmetric halves would just waste
+  // the larger one. Everything after the two purchases is establishChainOrRefund's
+  // job, including cancelling BOTH deposits if anything fails.
+  handle(IPC.CONNECTION_SUBSCRIBE_CHAIN, async (_event, params: {
+    entry: { nodeAddress: string; nodeMoniker: string; nodeCountry: string; nodeType: number; apiField: string; quoteValue: string }
+    exit: { nodeAddress: string; nodeMoniker: string; nodeCountry: string; nodeType: number; apiField: string; quoteValue: string }
+    type: 'gigabytes' | 'hours'
+    amount: number
+    denom: string
+  }) => {
+    if (params.type !== 'gigabytes' && params.type !== 'hours') throw new Error('Invalid type')
+    assertNumber(params.amount, 'amount', 1, 1000)
+    assertString(params.denom, 'denom')
+
+    for (const [role, hop] of [['entry', params.entry], ['exit', params.exit]] as const) {
+      if (!hop || typeof hop !== 'object') throw new Error(`Missing ${role} hop`)
+      assertSentAddress(hop.nodeAddress, `${role}.nodeAddress`)
+      assertString(hop.nodeMoniker, `${role}.nodeMoniker`)
+      assertString(hop.nodeCountry, `${role}.nodeCountry`)
+      assertString(hop.apiField, `${role}.apiField`)
+      assertString(hop.quoteValue, `${role}.quoteValue`)
+      if (!/^\d+$/.test(hop.quoteValue)) throw new Error(`Invalid ${role}.quoteValue`)
+      // Chaining is a v2ray-core feature (proxySettings.tag); no other protocol can do it.
+      if (hop.nodeType !== 2 && hop.nodeType !== 4) {
+        throw new Error(`Multihop ${role} must be a V2Ray (2) or XRAY (4) node — no other protocol can be chained`)
+      }
+    }
+    if (params.entry.nodeAddress === params.exit.nodeAddress) {
+      throw new Error('Multihop entry and exit must be different nodes')
+    }
+
+    const wallet = getWallet()
+    const address = getAddress()
+    const privKey = getPrivKey()
+    if (!wallet || !address || !privKey) {
+      throw new Error('Wallet not loaded. Please re-import your mnemonic.')
+    }
+
+    // Verify BOTH nodes and our runtime before spending anything. Doing this up front
+    // means a bad exit node costs nothing, rather than costing the entry deposit.
+    await preflightConnect(params.entry.nodeType, params.entry.apiField)
+    await preflightConnect(params.exit.nodeType, params.exit.apiField)
+
+    const hopCost = (quoteValue: string): number =>
+      params.denom === 'udvpn' ? parseInt(quoteValue, 10) * params.amount : 0
+    await assertSufficientFunds(hopCost(params.entry.quoteValue) + hopCost(params.exit.quoteValue))
+
+    const toHop = (h: typeof params.entry) => ({
+      nodeAddress: h.nodeAddress, nodeType: h.nodeType, apiField: h.apiField,
+      nodeMoniker: h.nodeMoniker, nodeCountry: h.nodeCountry,
+    })
+
+    const result = await establishChainOrRefund({
+      entry: toHop(params.entry),
+      exit: toHop(params.exit),
+      startSession: (hop) =>
+        subscribeToNode({
+          wallet, address, nodeAddress: hop.nodeAddress,
+          type: params.type, amount: params.amount, denom: params.denom,
+        }).catch(noteChainError),
+      wallet,
+      address,
+      privKey,
+    })
+
+    const entryHop: ChainHopInput = { ...toHop(params.entry), sessionId: result.entrySessionId }
+    const exitHop: ChainHopInput = { ...toHop(params.exit), sessionId: result.exitSessionId }
+    applyChainSession(entryHop, exitHop, result.configString)
+
+    // Same best-effort quota baseline as the single-hop path, for both sessions.
+    try {
+      const sessions = await getActiveSessions()
+      lastKnownSessions = sessions.map((s) => {
+        const saved = loadSessionConfig(s.id)
+        const nodeMeta = getNodeMeta(s.nodeAddress)
+        return { ...s, nodeMoniker: saved?.nodeMoniker || nodeMeta.moniker, nodeCountry: saved?.nodeCountry || nodeMeta.country }
+      })
+      setQuota(sessions.find((s) => s.id === result.entrySessionId))
+      const exitRow = sessions.find((s) => s.id === result.exitSessionId)
+      activeExitQuota = exitRow ? quotaFromSessionRow(exitRow) : null
+    } catch { /* best-effort */ }
+
+    // Fall back to what was just bought when the chain rows aren't readable yet.
+    const purchasedQuota = (sessionId: string): ActiveQuota => ({
+      sessionId,
+      maxDurationSeconds: params.type === 'hours' ? params.amount * 3600 : null,
+      baselineDurationSeconds: 0,
+      maxBytes: params.type === 'gigabytes' ? params.amount * 1024 ** 3 : 0,
+      baselineBytes: 0,
+    })
+    if (!activeQuota) {
+      activeQuota = purchasedQuota(result.entrySessionId)
+      quotaWarned = false
+    }
+    if (!activeExitQuota) activeExitQuota = purchasedQuota(result.exitSessionId)
+
+    return {
+      sessionId: result.entrySessionId,
+      exitSessionId: result.exitSessionId,
+      protocol: result.protocol,
+      configString: result.configString,
+    }
+  })
+
   // Connection: Reconnect to existing session using saved config
   handle(IPC.CONNECTION_RECONNECT, async (_event, params: {
     sessionId: string
@@ -1983,6 +2278,51 @@ export function registerIpcHandlers(): void {
       moniker: saved.nodeMoniker || nodeMeta.moniker || '',
       country: saved.nodeCountry || nodeMeta.country || '',
       type: nodeType,
+    }
+
+    // A multihop chain must NEVER take the single-hop renewal path below: that would
+    // re-handshake this one node, build a one-hop config from it and connect with it
+    // while both sessions were still paid — dropping a hop without saying so. On the
+    // exit hop's record it would connect straight to the exit node, giving it the real
+    // IP the chain existed to hide. There is also nothing useful to renew: a chain's
+    // peers live on two nodes, and the 409 rule below means neither would re-issue one.
+    // So replay the saved chained config and restore BOTH halves of the runtime state.
+    if (saved.chainPeerSessionId) {
+      const peer = loadSessionConfig(saved.chainPeerSessionId)
+      if (!peer) {
+        throw new Error(
+          `This session is one hop of a two-hop chain, but the other hop ` +
+          `(#${saved.chainPeerSessionId}) has no saved config — the chain cannot be ` +
+          'rebuilt. End both sessions and build a new chain.',
+        )
+      }
+      // The chained config is stored identically under both ids, so whichever hop the
+      // user clicked, entry must stay entry — take that from the recorded role.
+      const entrySaved = saved.chainRole === 'exit' ? peer : saved
+      const exitSaved = saved.chainRole === 'exit' ? saved : peer
+      activeSessionId = entrySaved.sessionId
+      activeNodeInfo = {
+        address: entrySaved.nodeAddress,
+        moniker: entrySaved.nodeMoniker || getNodeMeta(entrySaved.nodeAddress).moniker || '',
+        country: entrySaved.nodeCountry || getNodeMeta(entrySaved.nodeAddress).country || '',
+        type: 4,
+      }
+      activeExitSessionId = exitSaved.sessionId
+      activeExitNodeInfo = {
+        address: exitSaved.nodeAddress,
+        moniker: exitSaved.nodeMoniker || getNodeMeta(exitSaved.nodeAddress).moniker || '',
+        country: exitSaved.nodeCountry || getNodeMeta(exitSaved.nodeAddress).country || '',
+        type: 4,
+      }
+      activeXrayConfig = saved.configString
+      // Same reasoning as the fallback return below: this config was minted earlier and
+      // has not been reconfirmed by either node.
+      nodeIssuedFreshPeer = false
+      return {
+        sessionId: entrySaved.sessionId,
+        protocol: 'xray' as const,
+        configString: saved.configString,
+      }
     }
 
     // Ask for a fresh peer before falling back to the saved config. The saved config
@@ -2360,6 +2700,18 @@ export function registerIpcHandlers(): void {
       killSwitchFailed: killSwitchFailed || undefined,
       killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
       sessionId: activeSessionId,
+      // MULTIHOP: present only for a two-hop chain. `nodeAddress`/`sessionId` above
+      // stay the ENTRY hop; this is the exit, whose location is what the user's
+      // traffic actually appears to come from.
+      chainExit: activeExitNodeInfo
+        ? {
+            sessionId: activeExitSessionId,
+            address: activeExitNodeInfo.address,
+            moniker: activeExitNodeInfo.moniker,
+            country: activeExitNodeInfo.country,
+            type: activeExitNodeInfo.type,
+          }
+        : undefined,
       // When this tunnel came up. The Sessions card adds the time since to the
       // chain's metered `duration` to draw a live time gauge — the same
       // baseline-plus-live sum the quota watchdog scores against.

@@ -1,6 +1,86 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+
+// --- chainFailureMessage (multihop: TWO deposits can be in flight) ---
+
+test('chainFailureMessage: both refunded says so and names no session', () => {
+  const msg = chainFailureMessage({
+    reason: 'handshake timed out',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'EXIT-NODE',
+    refunds: [{ sessionId: '111', refunded: true }, { sessionId: '222', refunded: true }],
+  })
+  assert.match(msg, /exit hop/)
+  assert.match(msg, /Both sessions were cancelled/)
+  // Nothing for the user to do, so no session id should be dangled at them.
+  assert.ok(!msg.includes('#111'))
+})
+
+test('chainFailureMessage: a stranded deposit is named so it can be cancelled by hand', () => {
+  const msg = chainFailureMessage({
+    reason: 'handshake timed out',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'EXIT-NODE',
+    refunds: [{ sessionId: '111', refunded: false }, { sessionId: '222', refunded: true }],
+  })
+  // Only the one that actually failed to cancel — naming the refunded one would
+  // send the user to cancel a session that no longer exists.
+  assert.match(msg, /#111/)
+  assert.ok(!msg.includes('#222'))
+  assert.match(msg, /cancel it manually/)
+})
+
+test('chainFailureMessage: both stranded names both', () => {
+  const msg = chainFailureMessage({
+    reason: 'rpc unreachable',
+    policyRejected: false,
+    failedRole: null,
+    nodeMoniker: '',
+    refunds: [{ sessionId: '111', refunded: false }, { sessionId: '222', refunded: false }],
+  })
+  assert.match(msg, /#111 and #222/)
+  assert.match(msg, /cancel them manually/)
+})
+
+test('chainFailureMessage: failing on the entry purchase leaves nothing paid', () => {
+  const msg = chainFailureMessage({
+    reason: 'insufficient funds',
+    policyRejected: false,
+    failedRole: 'entry',
+    nodeMoniker: 'ENTRY-NODE',
+    refunds: [],
+  })
+  assert.match(msg, /No sessions were created/)
+})
+
+test('chainFailureMessage: one paid session refunded is singular, not "both"', () => {
+  // The exit purchase failed, so only the entry deposit existed.
+  const msg = chainFailureMessage({
+    reason: 'tx timed out',
+    policyRejected: false,
+    failedRole: 'exit',
+    nodeMoniker: 'EXIT-NODE',
+    refunds: [{ sessionId: '111', refunded: true }],
+  })
+  assert.match(msg, /The session was cancelled/)
+  assert.ok(!msg.includes('Both sessions'))
+})
+
+test('chainFailureMessage: the cleartext policy refusal names the offending node', () => {
+  const msg = chainFailureMessage({
+    reason: 'ignored when policyRejected',
+    policyRejected: true,
+    failedRole: 'entry',
+    nodeMoniker: 'BAD-NODE',
+    refunds: [{ sessionId: '111', refunded: true }, { sessionId: '222', refunded: true }],
+  })
+  assert.match(msg, /"BAD-NODE" only offers unencrypted/)
+  assert.match(msg, /entry hop/)
+  assert.ok(!msg.includes('ignored when policyRejected'))
+})
 
 // --- sessionFailureMessage ---
 

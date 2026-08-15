@@ -37,5 +37,11 @@ export function useSessions() {
     return () => clearInterval(interval)
   }, [refresh])
 
+  // Main cancels sessions the user never sees a button for: the refund after a failed
+  // purchase, either hop of a failed chain. Without this the row sat here for up to
+  // POLL_SESSIONS_MS still looking live and still offering Connect, directly after a
+  // modal said the deposit had been refunded — which reads as the refund having failed.
+  useEffect(() => window.api.onSessionsChanged(() => { void refresh() }), [refresh])
+
   return { sessions, loading, refreshing, refresh }
 }

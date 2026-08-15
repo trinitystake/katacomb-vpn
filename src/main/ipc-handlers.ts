@@ -1216,6 +1216,26 @@ function cachedPlanCost(planId: string, denom: string): number {
 }
 
 /**
+ * Tell the renderer its session list is stale, so it re-queries now instead of at
+ * the next poll.
+ *
+ * The Sessions tab polls every 120s and otherwise refreshes only when the VPN
+ * connects — and a failed purchase never connects. So a session main had just
+ * cancelled sat there for up to two minutes looking live, with an enabled Connect
+ * button on a session no node will honour. A user who has just read "both sessions
+ * were cancelled and your deposits refunded" and then sees the session still listed
+ * reasonably concludes the refund did not happen. Reported from a live run.
+ *
+ * Safe to send the moment `endSession` resolves: it waits for tx inclusion, so the
+ * chain already reports `inactive_pending` by the time the renderer asks.
+ */
+function notifySessionsChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(IPC.SESSIONS_CHANGED)
+  }
+}
+
+/**
  * After a session is created on-chain (funds locked), resolve the node's endpoint
  * and run the handshake. On ANY failure between session creation and a live
  * tunnel — an unresolvable endpoint, a timed-out/garbage handshake, or the V2Ray
@@ -1245,6 +1265,7 @@ async function establishSessionOrRefund(params: {
     try {
       await withTimeout(endSession({ wallet, address, sessionId }), REFUND_TIMEOUT_MS, 'refund')
       refunded = true
+      notifySessionsChanged()
     } catch (refundErr) {
       console.error('[connect] auto-cancel of failed session failed:', refundErr)
     }
@@ -1297,6 +1318,10 @@ async function refundSessions(
         REFUND_TIMEOUT_MS,
         'refund',
       )
+      // Per hop, not once at the end: the two cancels are sequential and each is a
+      // block apart, so telling the renderer after the first means the list stops
+      // showing a refunded hop as live while the second is still broadcasting.
+      notifySessionsChanged()
     } catch (err) {
       console.error(`[connect] auto-cancel of session ${sessionId} failed:`, err)
       throw err
@@ -2227,6 +2252,9 @@ export function registerIpcHandlers(): void {
       await endSession({ wallet: owner.wallet, address: owner.address, sessionId }).catch(noteChainError)
     } finally {
       if (foreign) owner.privKey.fill(0)
+      // Unconditional: a cancel that reported an error may still have landed, and a
+      // re-query is how the renderer finds out either way.
+      notifySessionsChanged()
     }
   })
 

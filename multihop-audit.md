@@ -427,10 +427,9 @@ Every finding was acted on. Two were fixed differently from the suggestion above
 reasons given below; one (S1) is only half fixable without a redesign, and the half that
 is not fixed is now stated in the UI instead of contradicted by it.
 
-Verified by `npm run typecheck` (clean), `npm test` (451 pass, up from 445: 6 new tests
-covering the Reality validation) and `npm run build` (clean). **Nothing here has been
-exercised against a live chain** — the connect path spends real funds, so the runtime
-behaviour of B1, B2, B6, S2 and U4 is argued from the code, not measured.
+Verified by `npm run typecheck` (clean), `npm test` (480 pass, up from 445) and
+`npm run build` (clean), and **since 2026-08-15 against a live mainnet chain** — see
+"Measured on a live chain" below for what that did and did not cover.
 
 | # | Status | Where |
 |---|--------|-------|
@@ -513,6 +512,57 @@ hide.
 So the residual is now precisely "grading from a cold start, with no tunnel of any kind"
 — which is the case the picker is usually used in, and closing it would mean grading
 exits only after an entry is already bought.
+
+### Measured on a live chain
+
+2026-08-15, mainnet, entry `45.124.52.245` (grpc/TLS) → exit `217.154.177.24` (tcp/TLS),
+sessions #55313487 (entry) and #55313511 (exit) on two different accounts. Read-only
+inspection of a chain the maintainer had already brought up. Both sessions have since
+settled and been deleted by the chain with nothing stranded.
+
+| Invariant | How it was checked | Result |
+|---|---|---|
+| Provisioning proxy is torn down | `ss -tlnp` | nothing on :1081, one xray, one tun2socks |
+| Exit is reached THROUGH the tunnel | `ip route get 217.154.177.24` | `dev sntl-tun` |
+| Entry is the only direct dial | `ip route get 45.124.52.245` | `via 192.168.20.1 dev wlp3s0` |
+| Only the entry gets a bypass route | `ip route show` | one `/32`, entry; none for the exit |
+| Exit must be plain TCP | live config | `exit-out` tcp+tls with `proxySettings.tag: entry-out` |
+| Both hops TLS or Reality | live config | entry grpc+tls, exit tcp+tls |
+| Egress is the exit | public IP lookup | `217.154.177.24`, exactly the exit |
+| DNS cannot leak | `ip route get 9.9.9.9` | `dev sntl-tun`; DoH to Quad9, bootstrap pinned |
+| DNS is hidden from the ENTRY too | live config | `dns-module` routed to `exit-out` |
+| Per-hop wallets | chain query | two distinct accounts |
+| Credentials never plaintext | `sessions/*.json` | safeStorage blobs, not JSON |
+| **Only the entry is ever dialled** | `ss -tnp` | xray holds ONE outbound socket, to the entry; **zero sockets to the exit IP anywhere on the host** |
+| Kill switch whitelists the ENTRY | `iptables -S KATACOMB_KILLSWITCH` | `-d 45.124.52.245/32 -j ACCEPT` present |
+| Kill switch does NOT whitelist the exit | same | absent, correctly; trailing `-j DROP` present |
+| Nothing bypasses the tunnel | `ss -tn` on the physical NIC | zero flows except the entry |
+
+The **string-port fix** (`SocksHttpsAgent`, `postHandshake`) is live-verified by this chain
+existing at all: the exit's peer material can only have come from the proxied handshake.
+
+**Two findings from the live run, neither a defect in this code:**
+
+- **The exit node never submitted a usage proof.** #55313511 read 0s and 0.00 MB after
+  ~16 MB had crossed the tunnel, and its `inactiveAt` did not move between readings a
+  minute apart — so `lastNodeProof + statusTimeout` had never been refreshed. It settled
+  at zero usage, so the hop cost gas only. Harmless here, but a node that never proves
+  will have its session reaped on the idle deadline while the UI says connected, which is
+  the dead-tunnel tell `CLAUDE.md` describes. Worth treating as a node-quality signal.
+- **The kill switch's `-m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT` is broader
+  than its comment.** It is documented as being "for the tunnel itself", but the tunnel's
+  own outer connection is already covered by the entry whitelist two rules above it. What
+  it actually permits is any established flow egressing any interface, so a connection
+  opened over the physical NIC *before* connecting can keep running outside the tunnel
+  while the kill switch is armed. Measured as **latent, not active**: zero non-entry flows
+  existed on the NIC. Flows that were inside the tunnel are sourced from `198.18.0.1` and
+  cannot survive the interface going away, so the tunnel-drop case is likely covered. Not
+  changed here: it is a root-run firewall rule and the change needs its own pass through
+  `scripts/verify-deb-portability.sh`.
+
+**Still unverified, because each needs a fresh connect rather than a running one:** the
+provisioning-window check (during setup, no socket to the exit may exist — the decisive
+S1 proof), the fail-closed path, and a single-hop regression on v2ray/xray.
 
 ### Where the other fix differs from the suggestion
 

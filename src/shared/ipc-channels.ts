@@ -113,6 +113,9 @@ export const IPC = {
   CONNECTION_TRAY_CONNECT: 'connection:tray-connect',
   NODE_TEST_PROGRESS: 'node-test:progress',
   NODES_UPDATE: 'nodes:update',
+  // Main changed a session's state on chain (cancelled one, refunded a failed chain).
+  // Carries nothing: it means "your list is stale", and the renderer re-queries.
+  SESSIONS_CHANGED: 'sessions:changed',
   PLAN_DISCOVER_PROGRESS: 'plan:discover:progress',
   RPC_HEALTH_UPDATE: 'rpc:health-update',
 } as const

@@ -36,6 +36,13 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.removeListener(IPC.NODES_UPDATE, handler)
     }
   },
+  onSessionsChanged: (callback: () => void) => {
+    const handler = (): void => { callback() }
+    ipcRenderer.on(IPC.SESSIONS_CHANGED, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.SESSIONS_CHANGED, handler)
+    }
+  },
   networkGetIp: (includeGeo?: boolean) => ipcRenderer.invoke(IPC.NETWORK_GET_IP, includeGeo),
 
   trafficStats: () => ipcRenderer.invoke(IPC.TRAFFIC_STATS),

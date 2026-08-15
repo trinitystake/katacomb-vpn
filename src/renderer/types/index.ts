@@ -516,6 +516,8 @@ export interface ElectronAPI {
   nodesFetch: () => Promise<SentNode[]>
   nodesGetCached: () => Promise<{ nodes: SentNode[]; fetchedAt: number } | null>
   onNodesUpdate: (callback: (nodes: SentNode[]) => void) => () => void
+  /** Main changed a session on chain (refund, cancel): the list is stale, re-query. */
+  onSessionsChanged: (callback: () => void) => () => void
   networkGetIp: (includeGeo?: boolean) => Promise<IpInfo>
 
   planDiscover: (maxId: number) => Promise<PlanInfo[]>

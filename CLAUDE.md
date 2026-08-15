@@ -720,6 +720,23 @@ xray-core is a strict superset of what the builder emits, so it lands in
   from `lastKnownSessions`: a Sessions-tab reconnect restores `activeExitSessionId` with
   no quota behind it, and scoring the entry alone leaves an exhausted exit to be caught
   only by `checkTunnelStalled`, 64 KB and 90 s later.
+- **In practice the EXIT hop meters NOTHING, so a chain has a hard ~2 h life from the
+  exit's purchase.** Measured 2026-08-15 by pushing 30 MB through a live chain and polling
+  both sessions for an hour: the entry reported `1201s / 58 371 970 B` (matching `sntl-tun`
+  plus overhead, ending exactly at disconnect) while the exit reported `0s / 0 B`. Its
+  `inactiveAt - startAt` was **exactly** `statusTimeout`, which is the arithmetic proof that
+  no proof ever landed. Three chains, three different exit nodes, all zero, while the entry
+  proved correctly — it tracks the ROLE, not the operator. Not our bug: metering is entirely
+  node-side (`SessionUsageSyncWithDatabase` reads the node's own core via `StatsService`
+  `user>>>id>>>traffic>>>uplink|downlink`, and `SessionUsageSyncWithBlockchain` skips the tx
+  when usage is unchanged), and the identical client code path proves fine on the entry.
+  **The consequence is ours, though:** on an active row `inactiveAt` is
+  `lastNodeProof + statusTimeout`, so an exit that never proves has a deadline pinned at
+  purchase + 2 h that never moves. The chain then reaps the exit while the entry still has
+  hours and most of its quota, and the tunnel dies with the UI saying connected.
+  `evaluateQuota` scores duration and bytes, NOT `inactiveAt`, so it cannot see this
+  coming — only `checkTunnelStalled` catches it, after the fact. Anything that wants to
+  warn before a chain dies has to read `inactiveAt` on the worse hop, not the quota.
 - **Progress is per hop AND per phase.** A chain runs the purchase sequence TWICE, so the
   shared 1/5..3/5 steps replay from the start halfway through and read as a restart.
   `sendChainHopProgress` emits `hop:<role>:<phase>` (buy | handshake) and the modal maps

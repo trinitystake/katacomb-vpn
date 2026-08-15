@@ -560,9 +560,36 @@ existing at all: the exit's peer material can only have come from the proxied ha
   changed here: it is a root-run firewall rule and the change needs its own pass through
   `scripts/verify-deb-portability.sh`.
 
-**Still unverified, because each needs a fresh connect rather than a running one:** the
-provisioning-window check (during setup, no socket to the exit may exist — the decisive
-S1 proof), the fail-closed path, and a single-hop regression on v2ray/xray.
+#### The provisioning window, captured
+
+The decisive S1 measurement, taken 2026-08-15 11:31Z by sampling `ss -tan` every 200 ms
+from before "Buy both hops" until the tunnel was up. Entry node API
+`45.124.52.245:26132`, exit node API `217.154.177.25:35159` (both read from the chain's
+`remoteAddrs`, not guessed); sessions #55343939 (entry) and #55343976 (exit).
+
+| Time | Event | Socket observed |
+|---|---|---|
+| 11:31:28 | capture starts | pre-existing unrelated traffic only |
+| 11:31:34.73 | entry preflight + eligibility | `ESTAB 45.124.52.245:26132` — direct, by design |
+| 11:31:37.58 | entry session created | chain RPC |
+| 11:31:44.86 | provisioning proxy dials the entry | `ESTAB 45.124.52.245:48923` |
+| 11:31:48.30 | exit session created | chain RPC (deliberately direct) |
+| — | exit preflight, eligibility, **signed handshake** | **no new direct socket** |
+| 11:32:01.87 | `sntl-tun` up | |
+
+**`217.154.177.25` appears zero times in the capture**, in any state, from any source. The
+exit session was nonetheless bought and handshaked, which cannot happen without reaching
+`217.154.177.25:35159`. The only route open was the proxy's connection to the entry,
+established four seconds earlier. So the exit was provisioned entirely through the entry
+and the host never contacted it — S1's property, measured rather than argued.
+
+Two supporting results from the same technique: a chain **reconnect** (11:25Z) also never
+contacts the exit, which matters because it replays a saved config and re-applies no
+policy; and the **string-port fix** is live-proven by any chain existing at all, since
+`SOCKS5 CONNECT: invalid port` can only be raised by `socks-agent.ts`, which is only ever
+used with the provisioning proxy.
+
+**Still unverified:** the fail-closed path, and a single-hop regression on v2ray/xray.
 
 ### Where the other fix differs from the suggestion
 

@@ -713,6 +713,13 @@ xray-core is a strict superset of what the builder emits, so it lands in
   broadcast directly on purpose (a public tx tells the exit nothing new, and it keeps
   CosmJS off the proxy); proxied calls get their own longer timeouts, because a
   timeout there strands a paid entry. **Never add a direct call to the exit node.**
+  **Verified live on mainnet 2026-08-15**, by sampling `ss -tan` across a whole purchase:
+  the host opened `45.124.52.245:26132` (entry API, direct) and `:48923` (the proxy), and
+  the exit's API `217.154.177.25:35159` appeared ZERO times while its session was bought
+  and handshaked anyway. To re-check after touching this path, sample sockets from before
+  "Buy both hops" until the tunnel is up and read each node's API from the chain's
+  `remoteAddrs` — the API port is NOT the VLESS port, so watching the config's address
+  alone would miss a direct handshake entirely.
 - **The SDK cannot handshake through a proxy**, so `node-handshake.ts` rebuilds that one
   POST (checked against 2.1.0's published `dist/utils.js`; the Go SDK's node client is
   the same, `WithInsecure`/`WithTimeout` only). The SDK still owns every DIRECT

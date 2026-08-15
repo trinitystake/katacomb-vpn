@@ -30,6 +30,13 @@ type BillingType = 'gigabytes' | 'hours'
 const MAX_ROWS = 300
 
 /**
+ * How long the filter must hold still before its nodes are graded. Long enough that
+ * typing a city name is one sweep rather than one per letter, short enough that
+ * choosing a country feels immediate.
+ */
+const PROBE_SETTLE_MS = 250
+
+/**
  * Only v9.0.0 nodes publish the inbound listing the chain checks read, so they sort
  * first. Otherwise the list opens on the cheapest nodes, which are the oldest, every
  * row reads "unknown" and the check looks broken.
@@ -957,9 +964,17 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
   // Sorted, because grades arriving change the list ORDER and an order-sensitive
   // key would retrigger this effect on every one of them.
   const visibleKey = checkable.map((n) => n.address).sort().join(',')
+  // Settle before probing. The search box filters on every keystroke, and each new set
+  // abandons the sweep in flight and starts one for the new one — so typing "toronto"
+  // unthrottled would fire a chunk of 30 requests per letter. probe's identity is
+  // stable (it reads results from a ref), so this timer is only reset by a real change
+  // of role or filter, never by a chunk landing.
   useEffect(() => {
     if (checkable.length === 0) return
-    void probe(checkable)
+    // The key tells probe() whether this is the set it is already working or a new one
+    // to switch to. Role is in it because the two ends are graded against different rules.
+    const timer = setTimeout(() => { void probe(checkable, `${role}:${visibleKey}`) }, PROBE_SETTLE_MS)
+    return () => clearTimeout(timer)
     // visibleKey stands in for `visible`, which is a fresh array every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [role, visibleKey, probe])

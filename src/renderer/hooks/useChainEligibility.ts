@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChainEligibility, SentNode } from '../types'
 
 /** Main caps one call at 60; probe in chunks so progress moves while it runs. */
@@ -11,14 +11,29 @@ const CHUNK = 30
  *
  * A node is only re-probed when we have no answer for it — an operator does not
  * reconfigure inbounds while someone is picking a hop.
+ *
+ * `key` identifies the SET being graded, and it is what makes filtering work: a
+ * different key abandons the sweep in flight and starts on the new set. Narrowing to
+ * 23 Canadian nodes used to leave the full 408-node sweep running to completion,
+ * which is slower for the user AND contacts hundreds of operators they just
+ * excluded. Nothing is lost by abandoning it, because grades are cached in main, so
+ * widening again re-probes only what is genuinely new.
  */
 export function useChainEligibility() {
   const [results, setResults] = useState<Map<string, ChainEligibility>>(new Map())
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
-  // Guards against a second probe of the same node from a re-render or a rapid
-  // re-open; `results` alone can't, because it lags the in-flight requests.
-  const inFlight = useRef<Set<string>>(new Set())
-  const cancelled = useRef(false)
+  /**
+   * Read by probe() instead of the state, so probe's identity does not change every
+   * time a chunk lands. A caller debouncing on `probe` in its deps would otherwise
+   * reset its timer on each recorded chunk and, if chunks land faster than the
+   * debounce, never fire at all.
+   */
+  const resultsRef = useRef(results)
+  useEffect(() => { resultsRef.current = results }, [results])
+  /** The set currently being graded. */
+  const runKey = useRef<string>('')
+  /** Bumped per run, so a superseded loop can tell it no longer owns the state. */
+  const generation = useRef(0)
 
   const record = useCallback((batch: ChainEligibility[]) => {
     setResults((prev) => {
@@ -28,18 +43,23 @@ export function useChainEligibility() {
     })
   }, [])
 
-  /** Probe every node we don't already have an answer for. Chunked, resumable. */
-  const probe = useCallback(async (nodes: SentNode[]) => {
-    const pending = nodes.filter(
-      (n) => !results.has(n.address) && !inFlight.current.has(n.address) && n.api,
-    )
-    if (pending.length === 0) return
-    cancelled.current = false
-    for (const n of pending) inFlight.current.add(n.address)
+  /** Probe every node in `nodes` we don't already have an answer for. */
+  const probe = useCallback(async (nodes: SentNode[], key: string) => {
+    if (key === runKey.current) return
+    runKey.current = key
+    const run = ++generation.current
+
+    const pending = nodes.filter((n) => !resultsRef.current.has(n.address) && n.api)
+    if (pending.length === 0) {
+      setProgress(null)
+      return
+    }
     setProgress({ done: 0, total: pending.length })
     try {
       for (let i = 0; i < pending.length; i += CHUNK) {
-        if (cancelled.current) break
+        // Superseded by a newer filter: stop issuing requests, and touch no shared
+        // state on the way out — the newer run owns it now.
+        if (generation.current !== run) return
         const chunk = pending.slice(i, i + CHUNK)
         try {
           record(await window.api.nodeChainEligibility(
@@ -49,15 +69,15 @@ export function useChainEligibility() {
           // One bad chunk must not abandon the rest: the nodes in it simply stay
           // ungraded, which the picker already renders as "unknown".
         }
+        // Recorded above even when superseded — the request was already paid for, and
+        // a result is a result. Only the progress bar belongs to the current run.
+        if (generation.current !== run) return
         setProgress({ done: Math.min(i + CHUNK, pending.length), total: pending.length })
       }
     } finally {
-      for (const n of pending) inFlight.current.delete(n.address)
-      setProgress(null)
+      if (generation.current === run) setProgress(null)
     }
-  }, [results, record])
+  }, [record])
 
-  const cancel = useCallback(() => { cancelled.current = true }, [])
-
-  return { results, progress, probe, cancel }
+  return { results, progress, probe }
 }

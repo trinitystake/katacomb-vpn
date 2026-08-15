@@ -656,6 +656,18 @@ export interface ChainHopParams {
 }
 
 /**
+ * Announce which hop the next steps belong to.
+ *
+ * A chain runs the purchase sequence TWICE, so the shared 1/5..3/5 progress replays
+ * from the start halfway through and reads as the connect having restarted. The
+ * renderer keys off this to show the two hops as separate, independently tracked
+ * stages instead.
+ */
+export function sendChainHopProgress(role: 'entry' | 'exit'): void {
+  sendProgress(`hop:${role}`, role === 'entry' ? 'Entry hop' : 'Exit hop')
+}
+
+/**
  * Handshake ONE hop and return what buildMultihopConfig needs. VLESS/VMess peer
  * material is a UUID for both protocols, so an SDK `V2Ray` instance is used purely
  * as a keygen — `getKey()` (the 16-byte array form) goes on the wire because the
@@ -725,9 +737,11 @@ export async function performChainHandshake(params: {
   const { entry, exit, privKey } = params
   const exitPrivKey = params.exitPrivKey ?? privKey
 
+  sendChainHopProgress('entry')
   sendProgress('4/5', 'Handshaking entry node...')
   const entrySpec = await handshakeChainHop(entry, privKey, 'entry')
 
+  sendChainHopProgress('exit')
   sendProgress('4/5', 'Handshaking exit node...')
   const exitSpec = await handshakeChainHop(exit, exitPrivKey, 'exit')
 

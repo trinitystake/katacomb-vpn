@@ -296,6 +296,44 @@ export async function getBalanceForAddress(address: string): Promise<{ denom: st
   }
 }
 
+/**
+ * Is there a direct transfer on chain between these two accounts, in either
+ * direction?
+ *
+ * Per-hop wallets only unlink a chain if the second account's funds did not visibly
+ * come from the first. Sending it coins from the main wallet is the obvious way to
+ * fund one and it defeats the entire feature — the transfer is public, so anyone who
+ * pairs the two addresses has the link back. This is what turns that caveat from a
+ * sentence the user can skim into something the app can actually show them.
+ *
+ * `checked: false` means the question could not be answered (a pruned RPC with no tx
+ * index, an unreachable endpoint) — never report that as "clean", because a silent
+ * pass here is precisely the false assurance the whole check exists to prevent.
+ */
+export async function findTransferBetween(
+  a: string,
+  b: string,
+): Promise<{ checked: boolean; linked: boolean }> {
+  if (!a || !b || a === b) return { checked: true, linked: false }
+  try {
+    const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+    try {
+      for (const [sender, recipient] of [[a, b], [b, a]]) {
+        const hits = await client.searchTx([
+          { key: 'transfer.sender', value: sender },
+          { key: 'transfer.recipient', value: recipient },
+        ])
+        if (hits.length > 0) return { checked: true, linked: true }
+      }
+      return { checked: true, linked: false }
+    } finally {
+      client.disconnect()
+    }
+  } catch {
+    return { checked: false, linked: false }
+  }
+}
+
 /** Id of the wallet currently loaded, or null when none is. */
 export function getActiveWalletId(): string | null {
   return state.activeWalletId

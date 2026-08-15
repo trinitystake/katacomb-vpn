@@ -75,20 +75,50 @@ export default function MultihopModal({ onClose }: Props) {
   const [exitWalletId, setExitWalletId] = useState('')
   const [wallets, setWallets] = useState<WalletEntry[]>([])
   const [activeAddress, setActiveAddress] = useState<string | null>(null)
+  // Whether the chosen exit wallet is visibly funded from the active one. null =
+  // not asked yet or asking.
+  const [walletLink, setWalletLink] = useState<{ checked: boolean; linked: boolean } | null>(null)
 
   const [connecting, setConnecting] = useState(false)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
+  const [currentDetail, setCurrentDetail] = useState<string | null>(null)
+  const [currentHop, setCurrentHop] = useState<'entry' | 'exit' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [paid, setPaid] = useState<{ entrySessionId: string; exitSessionId: string } | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
 
   const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
+  // Both purchases and handshakes are done once the modal moves to the bring-up.
+  const tunnelStarted = currentStep === '5/5'
 
   useEffect(() => {
-    const unsub = window.api.onConnectionProgress((s) => setCurrentStep(s))
+    // `hop:entry` / `hop:exit` are markers, not steps: a chain runs the purchase
+    // sequence twice, and without them the shared 1/5..3/5 list replays from the
+    // start halfway through and looks like the connect restarted.
+    const unsub = window.api.onConnectionProgress((step, detail) => {
+      if (step === 'hop:entry' || step === 'hop:exit') {
+        setCurrentHop(step === 'hop:entry' ? 'entry' : 'exit')
+        return
+      }
+      setCurrentStep(step)
+      setCurrentDetail(detail || null)
+    })
     return unsub
   }, [])
+
+  // Ask the chain whether the two accounts are already tied together by a transfer.
+  // Without this the "funded independently" caveat is a sentence the user skims and
+  // then defeats in the obvious way — topping the second wallet up from the first.
+  useEffect(() => {
+    if (!exitWalletId) { setWalletLink(null); return }
+    let cancelled = false
+    setWalletLink(null)
+    window.api.walletLinkCheck(exitWalletId)
+      .then((r) => { if (!cancelled) setWalletLink(r) })
+      .catch(() => { if (!cancelled) setWalletLink({ checked: false, linked: false }) })
+    return () => { cancelled = true }
+  }, [exitWalletId])
 
   useEffect(() => {
     let cancelled = false
@@ -132,6 +162,7 @@ export default function MultihopModal({ onClose }: Props) {
     setConnecting(true)
     setError(null)
     setCurrentStep('1/5')
+    setCurrentHop('entry')
     try {
       const result = await window.api.connectionSubscribeChain({
         entry: {
@@ -444,11 +475,35 @@ export default function MultihopModal({ onClose }: Props) {
                 ))}
               </select>
               {exitWalletId ? (
-                <p className="text-text-tertiary text-xs">
-                  Each hop is paid by a different account, so neither node can look the other up on
-                  chain. That only holds if this wallet was funded independently: if you sent it
-                  coins from the other one, the transfer is public and links them again.
-                </p>
+                walletLink === null ? (
+                  <p className="text-text-tertiary text-xs flex items-center gap-1.5">
+                    <Spinner className="text-accent" /> Checking whether these two accounts are already
+                    linked on chain…
+                  </p>
+                ) : walletLink.linked ? (
+                  <div className="bg-danger-subtle border border-danger p-3 rounded-md space-y-1">
+                    <p className="text-danger text-xs font-medium">
+                      These two wallets are already linked on chain
+                    </p>
+                    <p className="text-text-secondary text-xs">
+                      There is a transfer between this wallet and your active one, and transfers are
+                      public. Anyone who sees both hops can follow it back and join them, so paying
+                      the hops separately buys you nothing here. To get the benefit, the exit wallet
+                      needs funds that never touched the other account.
+                    </p>
+                  </div>
+                ) : walletLink.checked ? (
+                  <p className="text-text-tertiary text-xs">
+                    <span className="text-success">No transfer between these two accounts</span>, so
+                    nothing on chain joins them and neither node can look the other up.
+                  </p>
+                ) : (
+                  <p className="text-warning text-xs">
+                    Couldn't check whether these two accounts are linked (the RPC did not answer, or
+                    keeps no transaction index). If you funded this wallet from the other one, that
+                    transfer is public and the hops are still joined.
+                  </p>
+                )
               ) : wallets.filter((w) => w.address !== activeAddress).length === 0 ? (
                 <p className="text-text-tertiary text-xs">
                   You have one wallet, so both hops are paid from it and either node can find the
@@ -539,7 +594,34 @@ export default function MultihopModal({ onClose }: Props) {
               <div className="text-text-tertiary text-center text-xs">↓ tunnelled inside the entry hop</div>
               <HopRow label="Exit" hint="Sees where you go. Never sees your IP." node={exit} price={exitPrice} billing={billing} />
             </div>
-            <ProgressSteps currentStep={currentStep} error={error} />
+            {/* Two hops, tracked separately. The generic 5-step list is wrong here: a
+                chain repeats steps 1-3 for the second purchase, so it counts up,
+                jumps back and counts up again with nothing saying why. */}
+            <div className="space-y-2">
+              <HopProgress
+                label="Entry"
+                node={entry}
+                state={hopState('entry', currentHop, tunnelStarted)}
+                detail={currentHop === 'entry' && !tunnelStarted ? currentDetail : null}
+              />
+              <HopProgress
+                label="Exit"
+                node={exit}
+                state={hopState('exit', currentHop, tunnelStarted)}
+                detail={currentHop === 'exit' && !tunnelStarted ? currentDetail : null}
+              />
+              <div className="flex items-start gap-3 text-sm">
+                <span className={`status-dot mt-1.5 ${tunnelStarted ? 'status-dot-pending' : ''}`} />
+                <span className="min-w-0">
+                  <span className={tunnelStarted ? 'text-text-primary' : 'text-text-tertiary'}>
+                    Establishing the chained tunnel
+                  </span>
+                  {tunnelStarted && currentDetail && (
+                    <span className="block text-text-tertiary text-xs">{currentDetail}</span>
+                  )}
+                </span>
+              </div>
+            </div>
             <p className="text-text-tertiary text-xs">
               Buying both hops takes two transactions. Leave this open: if anything fails after a
               session is paid for, it is cancelled automatically.
@@ -590,6 +672,41 @@ export default function MultihopModal({ onClose }: Props) {
         )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/** Where a hop sits in the purchase sequence, given the hop main last announced. */
+function hopState(
+  role: 'entry' | 'exit',
+  current: 'entry' | 'exit' | null,
+  tunnelStarted: boolean,
+): 'pending' | 'active' | 'done' {
+  if (tunnelStarted) return 'done'
+  if (current === null) return 'pending'
+  if (current === role) return 'active'
+  // Only ever entry -> exit, so seeing the exit means the entry is finished.
+  return role === 'entry' ? 'done' : 'pending'
+}
+
+function HopProgress({ label, node, state, detail }: {
+  label: string
+  node: SentNode | null
+  state: 'pending' | 'active' | 'done'
+  detail: string | null
+}) {
+  return (
+    <div className="flex items-start gap-3 text-sm">
+      <span className={`status-dot mt-1.5 ${
+        state === 'done' ? 'status-dot-active' : state === 'active' ? 'status-dot-pending' : ''
+      }`} />
+      <span className="min-w-0">
+        <span className={state === 'pending' ? 'text-text-tertiary' : 'text-text-primary'}>
+          {label} hop{node ? ` · ${node.moniker || node.country}` : ''}
+        </span>
+        {detail && <span className="block text-text-tertiary text-xs">{detail}</span>}
+        {state === 'done' && <span className="block text-text-tertiary text-xs">Bought and handshaked.</span>}
+      </span>
     </div>
   )
 }

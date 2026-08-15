@@ -487,6 +487,11 @@ export interface ElectronAPI {
   walletSessions: () => Promise<SessionInfo[]>
   walletEndSession: (sessionId: string) => Promise<void>
   walletList: () => Promise<WalletEntry[]>
+  /**
+   * Is the given wallet visibly funded from the active one? `checked: false` means
+   * the chain could not answer (pruned RPC, unreachable) — never treat that as clean.
+   */
+  walletLinkCheck: (walletId: string) => Promise<{ checked: boolean; linked: boolean }>
   walletSwitch: (walletId: string) => Promise<{ address: string | null }>
   /** `keepSeed` applies only to the last wallet — see WalletStoreStatus.retainedSeedId. */
   walletDelete: (walletId: string, keepSeed?: boolean) => Promise<void>

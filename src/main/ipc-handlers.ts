@@ -24,12 +24,13 @@ import {
   getSessionsForAddress,
   getActiveWalletId,
   loadWalletCredentials,
+  findTransferBetween,
   getWallet,
   getPrivKey,
   logout,
   type SessionInfo,
 } from './wallet'
-import { subscribeToNode, performHandshake, performChainHandshake, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
+import { subscribeToNode, performHandshake, performChainHandshake, sendChainHopProgress, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
@@ -1231,10 +1232,12 @@ async function establishChainOrRefund(params: {
 
   try {
     failedRole = 'entry'
+    sendChainHopProgress('entry')
     const entrySessionId = await startSession(entry, entrySigner)
     paid.push({ sessionId: entrySessionId, signer: entrySigner })
 
     failedRole = 'exit'
+    sendChainHopProgress('exit')
     const exitSessionId = await startSession(exit, exitSigner)
     paid.push({ sessionId: exitSessionId, signer: exitSigner })
 
@@ -1833,6 +1836,21 @@ async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
  * Best-effort: an account we cannot read simply contributes nothing, exactly as an
  * unreachable RPC does for the active wallet.
  */
+async function readAllSessions(): Promise<SessionInfo[]> {
+  return [...await getActiveSessions(), ...await getOtherWalletSessions()]
+}
+
+/**
+ * Every session this app holds, across every wallet that paid for one.
+ *
+ * EVERY writer of `lastKnownSessions` must use `readAllSessions`, not
+ * `getActiveSessions`. WALLET_SESSIONS returns that cache verbatim while a tunnel is
+ * up, so a writer that only reads the active wallet primes it without the exit hop of
+ * a per-hop-wallet chain — and the tab then shows one lonely row badged "partner
+ * gone" for as long as the chain is connected, with no way to see or end the other
+ * half. Live: entry #55268780 (wallet Test) showed, exit #55268795 (wallet Third) did
+ * not, both ACTIVE on chain throughout. Same trap as decorateSessionRow, one layer down.
+ */
 async function getOtherWalletSessions(): Promise<SessionInfo[]> {
   const owned = listSessionsOwnedByOtherWallets()
   if (owned.length === 0) return []
@@ -1986,7 +2004,7 @@ export function registerIpcHandlers(): void {
       if (cachedNodes.length === 0) {
         try { await fetchNodes() } catch { /* best-effort */ }
       }
-      const sessions = [...await getActiveSessions(), ...await getOtherWalletSessions()]
+      const sessions = await readAllSessions()
       // Enrich sessions with node metadata from saved configs or node cache, and
       // bridge the post-disconnect gap: show max(onChain, last-measured) so usage
       // doesn't collapse to ~0 while the chain settles (see lastSessionUsage).
@@ -2060,6 +2078,18 @@ export function registerIpcHandlers(): void {
 
   handle(IPC.WALLET_LIST, async () => {
     return listWallets()
+  })
+
+  // Multihop: is the wallet the user picked for the exit hop visibly funded from the
+  // active one? Per-hop wallets only unlink a chain when the second account's coins
+  // did not come from the first, and topping it up from the main wallet is both the
+  // obvious way to fund one and the thing that undoes the entire feature.
+  handle(IPC.WALLET_LINK_CHECK, async (_event, walletId: string) => {
+    assertString(walletId, 'walletId')
+    const active = getAddress()
+    const other = listWallets().find((w) => w.id === walletId)?.address
+    if (!active || !other) return { checked: false, linked: false }
+    return findTransferBetween(active, other)
   })
 
   handle(IPC.WALLET_SWITCH, async (_event, walletId: string) => {
@@ -2309,7 +2339,7 @@ export function registerIpcHandlers(): void {
     // Pre-cache sessions now (RPC is still reachable before tunnel goes up), and
     // take the quota watchdog's baseline off the same read.
     try {
-      const sessions = await getActiveSessions()
+      const sessions = await readAllSessions()
       lastKnownSessions = sessions.map((s) => {
         return decorateSessionRow(s)
       })
@@ -2445,7 +2475,7 @@ export function registerIpcHandlers(): void {
 
     // Same best-effort quota baseline as the single-hop path, for both sessions.
     try {
-      const sessions = await getActiveSessions()
+      const sessions = await readAllSessions()
       lastKnownSessions = sessions.map((s) => {
         return decorateSessionRow(s)
       })

@@ -648,10 +648,24 @@ xray-core is a strict superset of what the builder emits, so it lands in
   nothing — zero it in a `finally`. The app never creates or funds the second wallet: an
   in-app transfer between them is itself a public link. A subaccount is a normal
   `WalletEntry`, so it already appears in the picker.
+- **…and the funding trail is checked, not just warned about.** `findTransferBetween`
+  (WALLET_LINK_CHECK) asks the chain for a transfer in either direction between the two
+  accounts and the modal shows it, because topping the second wallet up from the first
+  is both the obvious way to fund one and the thing that undoes the whole feature —
+  confirmed on the maintainer's own wallets, which were linked by a 1000 P2P transfer.
+  `checked: false` (pruned RPC, no tx index) must NEVER render as clean: a silent pass
+  is the exact false assurance the check exists to prevent.
 - **A foreign-owned session is invisible by default.** `sessionsForAccount(active)`
   cannot see the exit hop, so `SavedSessionConfig.walletId` +
   `listSessionsOwnedByOtherWallets` + `getSessionsForAddress` exist to merge it back in;
   without them the exit hop vanishes from the Sessions tab with a live deposit against it.
+- **All THREE writers of `lastKnownSessions` must ALSO read `readAllSessions()`**, not
+  `getActiveSessions()`. The two connect handlers prime that cache themselves, and
+  WALLET_SESSIONS returns it verbatim while a tunnel is up — so priming it from the
+  active wallet alone drops the exit hop of a per-hop-wallet chain for exactly as long
+  as the chain is connected, leaving one row badged "partner gone" and no way to see or
+  end the other half. Live: entry #55268780 shown, exit #55268795 (second wallet) not,
+  both ACTIVE on chain throughout.
 - **All THREE writers of `lastKnownSessions` must go through `decorateSessionRow`.**
   `WALLET_SESSIONS` returns that cache verbatim while a tunnel is up, so a writer that
   omits `chainPeerSessionId`/`chainRole` makes the tab forget it is a chain for exactly
@@ -667,6 +681,10 @@ xray-core is a strict superset of what the builder emits, so it lands in
 - Dual quota: both hops meter the same stream, so **worst verdict wins** — but they
   settle independently and can land far apart, so the Sessions card scores off the worse
   hop and the sooner expiry.
+- **Progress is per hop.** A chain runs the purchase sequence TWICE, so the shared
+  1/5..3/5 steps replay from the start halfway through and read as a restart.
+  `sendChainHopProgress` emits `hop:entry`/`hop:exit` markers and the modal tracks the
+  two hops as separate stages rather than reusing `ProgressSteps`.
 - Measured cost: ~20x latency vs single-hop on a long chain (ES→TR 1.75s), ~0.95s AU→JP,
   ~2-3 MB/s. Chains are for privacy, not speed.
 

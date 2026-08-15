@@ -52,6 +52,7 @@ export const IPC = {
   NODE_TEST_CANCEL: 'node-test:cancel',
   NODE_TEST_RESULTS: 'node-test:results',
   NODE_CHAIN_ELIGIBILITY: 'node-test:chain-eligibility',
+  WALLET_LINK_CHECK: 'wallet:link-check',
 
   // RPC health
   RPC_HEALTH_GET: 'rpc:health-get',

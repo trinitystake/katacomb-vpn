@@ -38,7 +38,7 @@ const RPC_CONNECT_TIMEOUT_MS = 10_000
 // A session-creating tx may confirm after we stop polling — surface that instead of a
 // raw CosmJS TimeoutError so the user can check the Session tab (finding H2).
 const TX_TIMEOUT_MESSAGE =
-  'The transaction timed out before confirmation. It may still be processing — check ' +
+  'The transaction timed out before confirmation. It may still be processing. Check ' +
   'the Session tab shortly and cancel any unexpected session.'
 
 type ChainPlan = {

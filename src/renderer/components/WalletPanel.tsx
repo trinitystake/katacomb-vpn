@@ -103,7 +103,7 @@ export default function WalletPanel({ address, name, onLogout, connected, wallet
                 {connected && (
                   <span
                     className="text-text-tertiary text-xs"
-                    title="Connected to the VPN — the chain is unreachable through the tunnel, so this is the balance from before you connected."
+                    title="Connected to the VPN, so the chain is unreachable through the tunnel. This is the balance from before you connected."
                   >
                     cached
                   </span>
@@ -146,7 +146,7 @@ export default function WalletPanel({ address, name, onLogout, connected, wallet
           <button
             onClick={onLogout}
             className="text-text-secondary hover:text-danger text-sm transition-colors w-full text-center"
-            title="Lock — your wallets stay stored on this device"
+            title="Lock: your wallets stay stored on this device"
           >
             Lock
           </button>

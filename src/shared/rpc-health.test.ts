@@ -187,7 +187,7 @@ test('isRpcConnectivityError matches cosmjs bad-status errors, but only the "end
 test('isRpcConnectivityError does NOT match a broadcast timeout — that tx may have landed', () => {
   assert.equal(
     isRpcConnectivityError(
-      'The transaction timed out before confirmation. It may still be processing — check ' +
+      'The transaction timed out before confirmation. It may still be processing. Check ' +
         'the Session tab shortly and cancel any unexpected session to reclaim your funds.',
     ),
     false,

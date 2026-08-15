@@ -99,7 +99,7 @@ export default function WalletPicker({ status, onChanged, onAddAnother }: Props)
           <div className="space-y-3">
             <h1 className="text-accent font-semibold text-2xl">Your seed is saved</h1>
             <p className="text-text-secondary text-sm leading-relaxed">
-              No wallets derived from the seed. Derive one to carry on — you won't need to
+              No wallets derived from the seed. Derive one to carry on. You won't need to
               retype your recovery phrase.
             </p>
           </div>
@@ -210,7 +210,7 @@ export default function WalletPicker({ status, onChanged, onAddAnother }: Props)
                 {!w.unlockable && (
                   <p className="text-warning text-xs mt-1.5">
                     Saved under the app's previous name, so its seed can no longer be unlocked.
-                    Import the same recovery phrase again — your funds are on-chain and unaffected.
+                    Import the same recovery phrase again. Your funds are on-chain and unaffected.
                   </p>
                 )}
               </div>
@@ -241,7 +241,7 @@ export default function WalletPicker({ status, onChanged, onAddAnother }: Props)
               <ul className="text-text-secondary text-xs space-y-1 list-disc pl-4">
                 {status.wallets.map((w) => (
                   <li key={w.id}>
-                    <span className="text-text-primary">{w.name}</span> — {w.address || 'address unknown'}
+                    <span className="text-text-primary">{w.name}</span> · {w.address || 'address unknown'}
                   </li>
                 ))}
               </ul>

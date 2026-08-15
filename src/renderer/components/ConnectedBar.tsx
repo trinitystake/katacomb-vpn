@@ -32,7 +32,7 @@ export default function ConnectedBar() {
           {status.killSwitchFailed && (
             <span
               className="px-1.5 py-0.5 border border-danger text-danger text-xs rounded-sm"
-              title="The kill switch could not be enabled — your real IP is NOT protected if the tunnel drops. Try reconnecting; if it persists, check that the VPN helper/daemon is installed."
+              title="The kill switch could not be enabled, so your real IP is NOT protected if the tunnel drops. Try reconnecting; if it persists, check that the VPN helper/daemon is installed."
             >
               ⚠ Kill switch inactive
             </span>

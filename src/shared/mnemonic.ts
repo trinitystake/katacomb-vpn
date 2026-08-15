@@ -69,7 +69,7 @@ export function checkMnemonic(value: string): MnemonicCheck {
   }
 
   if (wordCount > 24) {
-    return { ...base, status: 'invalid', message: `Too many words — a seed phrase is 12 or 24, this is ${wordCount}` }
+    return { ...base, status: 'invalid', message: `Too many words: a seed phrase is 12 or 24, this is ${wordCount}` }
   }
   // A half-typed last word doesn't count towards the total yet.
   const done = pending ? wordCount - 1 : wordCount
@@ -81,7 +81,7 @@ export function checkMnemonic(value: string): MnemonicCheck {
     return {
       ...base,
       status: 'invalid',
-      message: 'Checksum does not match — a word is wrong or two are in the wrong order',
+      message: 'Checksum does not match: a word is wrong or two are in the wrong order',
     }
   }
 

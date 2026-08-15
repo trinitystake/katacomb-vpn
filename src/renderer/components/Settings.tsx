@@ -476,7 +476,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                     <span className="text-text-primary text-sm">Local Network Sharing</span>
                     <p className="text-text-tertiary text-xs mt-0.5">
                       {settings.killSwitch
-                        ? 'Reach other devices on your network — SSH, printers, NAS — while the kill switch is on. This traffic stays on your LAN and is not encrypted by the VPN.'
+                        ? 'Reach other devices on your network (SSH, printers, NAS) while the kill switch is on. This traffic stays on your LAN and is not encrypted by the VPN.'
                         : 'Only applies while the kill switch is on. Your local network is already reachable without it.'}
                     </p>
                   </div>
@@ -510,7 +510,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                     appears regardless of this toggle. */}
                 <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
                   <div>
-                    <span className="text-text-primary text-sm">Provider Mode — this wallet</span>
+                    <span className="text-text-primary text-sm">Provider Mode: this wallet</span>
                     <p className="text-text-tertiary text-xs mt-0.5">
                       Show the Provider tab, where you can register as a provider, publish plans and lease nodes.
                       Applies to the selected wallet only.
@@ -577,13 +577,13 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 {splitTunnel.invalid.length > 0 && (
                   <p className="text-danger text-xs">
                     Not a valid IPv4 CIDR: {splitTunnel.invalid.map((r) => `"${r}"`).join(', ')}.
-                    Each line needs an address and a prefix, like 192.168.1.0/24 — hostnames,
+                    Each line needs an address and a prefix, like 192.168.1.0/24. Hostnames,
                     IPv6 and 0.0.0.0/x are not accepted.
                   </p>
                 )}
                 {splitTunnel.tooMany && (
                   <p className="text-danger text-xs">
-                    Too many routes — {MAX_SPLIT_TUNNEL_ROUTES} is the maximum.
+                    Too many routes: {MAX_SPLIT_TUNNEL_ROUTES} is the maximum.
                   </p>
                 )}
                 {splitTunnelError && <p className="text-danger text-xs">{splitTunnelError}</p>}
@@ -649,7 +649,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                   clear it. Say what the pause is and what ends it. */}
               {rpcHealth.state === 'suspended' && (
                 <p className="text-text-tertiary text-xs">
-                  Paused while the VPN is connected — chain data is served from the cache and nothing is
+                  Paused while the VPN is connected. Chain data is served from the cache and nothing is
                   queried through the tunnel. It resumes when you disconnect; changing endpoints will not
                   resume it, though a new one is saved and used from then on.
                 </p>
@@ -661,7 +661,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 <p className="text-text-tertiary text-xs">
                   Blocked by the kill switch, which stayed on after your session ended so nothing leaves
                   the machine untunnelled. Use “Restore internet” in the banner, or turn the kill switch
-                  off under General — changing endpoints will not resume it.
+                  off under General. Changing endpoints will not resume it.
                 </p>
               )}
 
@@ -880,7 +880,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                             disabled={isActive}
                             title={
                               isActive
-                                ? 'Switch to another wallet before deleting this one — or use Remove seed to clear everything'
+                                ? 'Switch to another wallet before deleting this one, or use Remove seed to clear everything'
                                 : undefined
                             }
                             className="btn btn-danger text-xs px-3 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1043,7 +1043,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 <div className="border border-danger bg-danger-subtle rounded-md p-3 space-y-2">
                   <p className="text-danger text-xs font-medium">Anyone with these words controls this wallet's funds.</p>
                   <ul className="text-text-secondary text-xs space-y-1 list-disc pl-4">
-                    <li>Never share them — nobody from Katacomb will ever ask for them.</li>
+                    <li>Never share them. Nobody from Katacomb will ever ask for them.</li>
                     <li>Make sure nobody can see your screen, and that you aren't recording or sharing it.</li>
                     <li>Write them down offline; anything typed into a website is a theft attempt.</li>
                   </ul>
@@ -1102,7 +1102,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                     onClick={copyPhrase}
                     className="text-text-secondary hover:text-accent text-xs transition-colors"
                   >
-                    {phraseCopied ? 'Copied — clipboard clears itself in 30s' : 'Copy to clipboard'}
+                    {phraseCopied ? 'Copied. Clipboard clears itself in 30s' : 'Copy to clipboard'}
                   </button>
                   <span className="text-text-tertiary text-xs ml-auto">
                     {phraseRevealed ? 'Hides automatically after 60s' : 'Hidden'}
@@ -1182,7 +1182,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 <ul className="text-text-secondary text-xs space-y-1 list-disc pl-4">
                   {wallets.map((w) => (
                     <li key={w.id}>
-                      <span className="text-text-primary">{w.name}</span> — {w.address || 'address unknown'}
+                      <span className="text-text-primary">{w.name}</span> · {w.address || 'address unknown'}
                     </li>
                   ))}
                 </ul>
@@ -1192,12 +1192,12 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
 
             <div className="space-y-2 text-xs">
               <p className="text-text-secondary">
-                <span className="text-text-primary font-medium">Keep seed</span> — the recovery
+                <span className="text-text-primary font-medium">Keep seed</span>: the recovery
                 phrase stays encrypted on this device, so you can derive new wallets without
                 retyping it.
               </p>
               <p className="text-text-secondary">
-                <span className="text-text-primary font-medium">Delete seed too</span> — the phrase
+                <span className="text-text-primary font-medium">Delete seed too</span>: the phrase
                 is removed as well. Funds stay on-chain, reachable only by importing your
                 written-down phrase again.
               </p>

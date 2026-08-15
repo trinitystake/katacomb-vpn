@@ -53,7 +53,7 @@ export function isSessionNotActive(message: string): boolean {
 }
 
 export const FUNDS_MESSAGE =
-  `${INSUFFICIENT_FUNDS}: The transaction was rejected — your wallet doesn't have enough P2P ` +
+  `${INSUFFICIENT_FUNDS}: The transaction was rejected: your wallet doesn't have enough P2P ` +
   `to cover it plus the network fee. Nothing was charged. Top up your wallet and try again.`
 
 /**

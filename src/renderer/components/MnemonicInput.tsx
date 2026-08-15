@@ -272,7 +272,7 @@ export default function MnemonicInput({ onImport, onBackToWallets, onUseExisting
             Create Wallet
           </h1>
           <p className="text-text-secondary text-sm leading-relaxed">
-            Generate a new BIP-39 mnemonic. Write it down and store it safely — this is the only way to recover your wallet.
+            Generate a new BIP-39 mnemonic. Write it down and store it safely: this is the only way to recover your wallet.
           </p>
         </div>
 

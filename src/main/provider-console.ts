@@ -61,7 +61,7 @@ const QUERY_TIMEOUT_MS = 10_000
 // path uses so a funds-spending tx can't confirm long after we stop polling.
 const TX_TIMEOUT_HEIGHT_OFFSET = 30
 const TX_TIMEOUT_MESSAGE =
-  'The transaction timed out before confirmation. It may still be processing — reopen the ' +
+  'The transaction timed out before confirmation. It may still be processing. Reopen the ' +
   'Provider tab in a moment to see the current on-chain state before retrying.'
 
 export interface MyProviderInfo {

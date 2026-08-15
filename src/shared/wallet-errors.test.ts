@@ -30,7 +30,7 @@ test('parseWalletExists ignores unrelated errors', () => {
 
 test('parseWalletExists does not claim the other markers', () => {
   assert.equal(parseWalletExists('RPC_UNREACHABLE: Couldn\'t reach the blockchain at rpc.sentinel.co.'), null)
-  assert.equal(parseWalletExists('INSUFFICIENT_FUNDS: Not enough P2P — this costs 5.00.'), null)
+  assert.equal(parseWalletExists('INSUFFICIENT_FUNDS: Not enough P2P: this costs 5.00.'), null)
 })
 
 test('parseWalletExists rejects a malformed payload rather than inventing an id', () => {

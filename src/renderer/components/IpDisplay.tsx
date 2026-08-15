@@ -93,7 +93,7 @@ export default function IpDisplay({ connected }: Props) {
         // Connected, and three attempts could not reach the IP service through
         // the tunnel. That is the signature of a tunnel that is up but carrying
         // nothing, so say so rather than showing a reassuring blank.
-        <span className="text-danger" title="Could not reach the internet through the tunnel — it may be up but not passing traffic.">
+        <span className="text-danger" title="Could not reach the internet through the tunnel. It may be up but not passing traffic.">
           unreachable
         </span>
       ) : (

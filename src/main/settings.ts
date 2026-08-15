@@ -332,7 +332,7 @@ export function getWalletMnemonic(id: string): string {
     // surfacing "Error while decrypting the ciphertext provided to …".
     throw new Error(
       'This wallet was saved under the app\'s previous name and can no longer be unlocked. ' +
-      'Remove it and import the same seed phrase again — your funds are on-chain and unaffected.'
+      'Remove it and import the same seed phrase again. Your funds are on-chain and unaffected.'
     )
   }
 }

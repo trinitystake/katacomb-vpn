@@ -28,10 +28,10 @@ export default function RpcStatus() {
   const tooltip = [
     `RPC: ${host}`,
     health.state === 'suspended'
-      ? 'Paused while the VPN is connected: balances, sessions and plans come from the cache and no query is sent through the tunnel.\nIt resumes on disconnect — switching endpoints will not clear it.'
+      ? 'Paused while the VPN is connected: balances, sessions and plans come from the cache and no query is sent through the tunnel.\nIt resumes on disconnect. Switching endpoints will not clear it.'
       : null,
     health.state === 'blocked'
-      ? 'The kill switch is still blocking all traffic after the session ended, so nothing reaches the chain.\nRestore internet from the banner, or turn the kill switch off — switching endpoints will not clear it.'
+      ? 'The kill switch is still blocking all traffic after the session ended, so nothing reaches the chain.\nRestore internet from the banner, or turn the kill switch off. Switching endpoints will not clear it.'
       : null,
     health.chainId ? `Chain: ${health.chainId}` : null,
     health.height !== null ? `Height: ${health.height.toLocaleString('en')}` : null,

@@ -253,7 +253,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
       const result = await reconnect(reconnectTarget)
       if (result.ok) await refreshConnection()
       else endError = endError
-        ? `${endError} — and reconnect failed: ${result.error}`
+        ? `${endError}. Reconnect also failed: ${result.error}`
         : (result.error ?? 'Reconnection failed')
     }
 
@@ -453,7 +453,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                             className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
                             title={
                               quotaUsedUp
-                                ? 'This session has used everything it was paid for — end it and start a new one'
+                                ? 'This session has used everything it was paid for. End it and start a new one'
                                 : vpnConnected
                                   ? 'Disconnect current VPN first'
                                   : isChain

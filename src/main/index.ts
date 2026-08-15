@@ -144,7 +144,7 @@ function refreshTray(info: ConnectionInfo): void {
     tray.setImage(trayImage(iconKey))
     trayIconKey = iconKey
   }
-  tray.setToolTip(`Katacomb VPN — ${status}`)
+  tray.setToolTip(`Katacomb VPN: ${status}`)
 
   const contextMenu = Menu.buildFromTemplate([
     { label: status, enabled: false },

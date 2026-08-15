@@ -256,7 +256,7 @@ export default function NodeTable() {
                 <div className="w-[60px] shrink-0 flex justify-center">
                   <span
                     className={`status-dot ${nodeStatus.dotClass}`}
-                    title={`${nodeStatus.label} — ${nodeStatus.detail}`}
+                    title={`${nodeStatus.label}: ${nodeStatus.detail}`}
                   />
                 </div>
               </div>

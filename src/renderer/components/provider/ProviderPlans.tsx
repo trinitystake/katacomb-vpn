@@ -172,7 +172,7 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
   async function toggleStatus(e: React.MouseEvent) {
     e.stopPropagation()
     if (!active && !providerActive) {
-      setError('Activate your provider first — the chain rejects an active plan under an inactive provider.')
+      setError('Activate your provider first. The chain rejects an active plan under an inactive provider.')
       return
     }
     if (!confirm(
@@ -237,7 +237,7 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
             <span
               className={stats.active > 0 ? 'text-success' : undefined}
               title={stats.truncated
-                ? `At least ${stats.active} are active — this plan has too many subscriptions to count them all`
+                ? `At least ${stats.active} are active: this plan has too many subscriptions to count them all`
                 : 'Subscriptions currently active'}
             >
               {stats.truncated ? `${stats.active}+` : stats.active} active
@@ -297,7 +297,7 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
     if (!valid || priceUdvpn === null) return
     if (!confirm(
       `Create a plan for ${gb} GB over ${dayCount} days at ${formatUdvpn(priceUdvpn)}?\n\n` +
-      `It is created inactive — you activate it afterwards. This is an on-chain transaction.`
+      `It is created inactive, and you activate it afterwards. This is an on-chain transaction.`
     )) return
     setBusy(true)
     setError(null)
@@ -359,7 +359,7 @@ function BreakEvenHint({ net, burnDailyUdvpn, result }: {
     return (
       <p className="text-text-tertiary text-xs">
         You have no nodes leased yet, so there is nothing to cover. Lease one before activating this
-        plan — a plan with no nodes has nothing to serve its subscribers.
+        plan. A plan with no nodes has nothing to serve its subscribers.
       </p>
     )
   }
@@ -368,7 +368,7 @@ function BreakEvenHint({ net, burnDailyUdvpn, result }: {
     return (
       <p className="text-warning text-xs">
         At this price you keep nothing per subscription, so this plan can never cover the{' '}
-        {formatUdvpnAmount(burnDailyUdvpn)}/day your nodes cost. That is allowed — just make sure it&apos;s deliberate.
+        {formatUdvpnAmount(burnDailyUdvpn)}/day your nodes cost. That is allowed, just make sure it&apos;s deliberate.
       </p>
     )
   }

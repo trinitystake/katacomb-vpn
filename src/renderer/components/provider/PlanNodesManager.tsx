@@ -99,7 +99,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
           )}
           {linked !== null && linkedSet.size === 0 && (
             <p className="text-text-tertiary text-xs">
-              No nodes yet. Add one below — subscribers to this plan have nothing to connect to until you do.
+              No nodes yet. Add one below. Subscribers to this plan have nothing to connect to until you do.
             </p>
           )}
           {[...linkedSet].map((address) => (
@@ -450,7 +450,7 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
           a running cost your plan price has to cover. Unused hours are refunded if you end it early.
           {poolPercent !== null && (
             <> Of each hourly payment the chain sends {poolPercent}% to the community pool and the rest to
-            the node operator — you pay the full rate either way.</>
+            the node operator, and you pay the full rate either way.</>
           )}
         </p>
 

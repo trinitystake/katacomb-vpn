@@ -753,7 +753,7 @@ export default function PlanDiscovery() {
               className="btn btn-primary text-xs px-3 py-2 disabled:opacity-30 disabled:cursor-not-allowed"
               title={
                 tunnelUp
-                  ? 'Disconnect to rescan — the chain RPC is unreachable through the tunnel'
+                  ? 'Disconnect to rescan. The chain RPC is unreachable through the tunnel'
                   : plans.length === 0
                     ? 'Discover plans on-chain'
                     : `Rescan plans · last updated ${formatTimeAgo(fetchedAt)}`
@@ -1148,7 +1148,7 @@ function SubscriptionManager({ tunnelUp, activeSessionId, onSubscriptionsChanged
       <div className="border-t border-border shrink-0 bg-bg-secondary px-5 py-2">
         <span className="text-text-secondary text-xs font-medium uppercase tracking-wide">Manage subscriptions</span>
         <p className="text-text-tertiary text-xs mt-1">
-          Disconnect to cancel, renew or re-price a subscription — the blockchain isn&apos;t reachable through your own tunnel.
+          Disconnect to cancel, renew or re-price a subscription. The blockchain isn&apos;t reachable through your own tunnel.
         </p>
       </div>
     )
@@ -1487,7 +1487,7 @@ function PlanDetail({
             </button>
             {showInfo && (
               <div className="absolute left-0 top-full mt-1 z-20 w-80 bg-bg-secondary border border-border rounded-md shadow-lg p-3 text-[11px] text-text-secondary leading-relaxed">
-                Nodes the provider has linked to this plan on-chain. Sessions using this plan run only on these nodes. Providers manage this list themselves — most public plans leave it empty.
+                Nodes the provider has linked to this plan on-chain. Sessions using this plan run only on these nodes. Providers manage this list themselves, and most public plans leave it empty.
               </div>
             )}
           </div>
@@ -1545,7 +1545,7 @@ function PlanDetail({
                     <div className="text-text-primary text-sm font-medium">No nodes linked on-chain.</div>
                     <div className="text-text-secondary text-xs mt-1 leading-relaxed">
                       Providers decide which nodes accept this plan by linking them on-chain. Most
-                      public plans leave this list empty — ask the provider, or pick a plan whose
+                      public plans leave this list empty. Ask the provider, or pick a plan whose
                       provider has published linked nodes.
                     </div>
                   </div>
@@ -1573,7 +1573,7 @@ function PlanDetail({
                 </div>
                 {!nodeIndex && (
                   <div className="text-[11px] text-text-tertiary italic">
-                    Node directory still loading — addresses will resolve to monikers/countries once it finishes.
+                    Node directory still loading. Addresses will resolve to monikers/countries once it finishes.
                   </div>
                 )}
                 <div className="border border-border rounded-md divide-y divide-border max-h-[360px] overflow-y-auto">
@@ -1604,7 +1604,7 @@ function PlanDetail({
                           {!node && nodeIndex && (
                             <span
                               className="text-[9px] text-text-tertiary border border-border bg-bg-secondary px-1 rounded-sm uppercase"
-                              title="Not in the current node directory — refresh Nodes tab"
+                              title="Not in the current node directory. Refresh the Nodes tab"
                             >
                               Unknown
                             </span>
@@ -1644,7 +1644,7 @@ function PlanDetail({
       <div className="bg-info-subtle border border-info rounded-md p-3 text-xs text-text-secondary leading-relaxed">
         <div className="text-info font-medium mb-1">How to use this plan</div>
         Plans pre-pay a data bundle. Subscribe once, then connect to any compatible node using
-        that single allocation — no extra fees per node. After subscribing, your plan appears in{' '}
+        that single allocation, with no extra fees per node. After subscribing, your plan appears in{' '}
         <span className="text-text-primary">Your Plan Subscriptions</span> below; click{' '}
         <span className="text-text-primary">Connect</span> there to pick a node, or use the Nodes
         tab and the app will reuse this allocation automatically.
@@ -1842,7 +1842,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
             <span className="text-text-secondary font-mono">plan #{allocation.planId}</span>
           </div>
           <div className="text-text-secondary mt-1">
-            Reusing this allocation — no new on-chain subscription will be created.
+            Reusing this allocation, so no new on-chain subscription will be created.
           </div>
         </div>
 
@@ -1904,7 +1904,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
                               {node.city ? `, ${node.city}` : ''}
                             </>
                           ) : (
-                            'Not in node directory — refresh Nodes tab'
+                            'Not in node directory. Refresh the Nodes tab'
                           )}
                         </span>
                         {status && (
@@ -1936,7 +1936,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
             </button>
             {selected?.node && !isProtocolSupported(selected.node.type) && (
               <div className="text-xs text-warning text-center pt-2">
-                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a node running a supported protocol.
+                {protocolMeta(selected.node.type).label} isn't supported by this client yet. Pick a node running a supported protocol.
               </div>
             )}
           </>
@@ -2231,7 +2231,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
                               {node.city ? `, ${node.city}` : ''}
                             </>
                           ) : (
-                            'Not in node directory — refresh Nodes tab'
+                            'Not in node directory. Refresh the Nodes tab'
                           )}
                         </span>
                         {status && (
@@ -2276,7 +2276,7 @@ function PlanSubscribeModal({ plan, nodeIndex, provider, onClose }: PlanSubscrib
             </button>
             {selected?.node && !isProtocolSupported(selected.node.type) && (
               <div className="text-xs text-warning text-center pt-2">
-                {protocolMeta(selected.node.type).label} isn't supported by this client yet — pick a node running a supported protocol.
+                {protocolMeta(selected.node.type).label} isn't supported by this client yet. Pick a node running a supported protocol.
               </div>
             )}
           </>

@@ -146,7 +146,7 @@ function EconomicsStrip({ state }: { state: ProviderEconomicsState }) {
     return (
       <StripShell>
         <span className="text-text-tertiary text-xs">
-          Economics unavailable — the chain couldn&apos;t be read just now.
+          Economics unavailable: the chain couldn&apos;t be read just now.
         </span>
       </StripShell>
     )
@@ -179,7 +179,7 @@ function EconomicsStrip({ state }: { state: ProviderEconomicsState }) {
       <p className="text-text-tertiary text-[11px] mt-2">
         You pay nodes <span className="text-text-secondary">by the hour</span> whether or not anyone connects,
         but sell plans <span className="text-text-secondary">by the gigabyte</span>. Extra subscribers on nodes
-        you already lease cost you nothing more — until those nodes run out of bandwidth.
+        you already lease cost you nothing more, until those nodes run out of bandwidth.
       </p>
     </StripShell>
   )
@@ -233,7 +233,7 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
 
   async function handleRegister() {
     if (!details.name.trim()) {
-      setError('Give your provider a name — it is what subscribers see next to your plans.')
+      setError('Give your provider a name: it is what subscribers see next to your plans.')
       return
     }
     if (!confirm(
@@ -276,7 +276,7 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
         </dl>
 
         <p className="text-text-tertiary text-xs">
-          The provider address is your wallet address in provider form — the same key signs for both.
+          The provider address is your wallet address in provider form, and the same key signs for both.
           The deposit is set by chain governance and is paid into the community pool, so it cannot be
           reclaimed by deactivating later.
         </p>
@@ -299,7 +299,7 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
         </button>
 
         <p className="text-text-tertiary text-xs">
-          You will be inactive right after registering — a second transaction activates you. Plans can only
+          You will be inactive right after registering: a second transaction activates you. Plans can only
           go live while the provider is active.
         </p>
       </div>
@@ -357,7 +357,7 @@ function ProviderHeader({ provider, onChanged }: { provider: { address: string; 
       </div>
       {!active && (
         <p className="text-warning text-xs mt-2">
-          Your provider is inactive — plans cannot be activated until you activate it.
+          Your provider is inactive: plans cannot be activated until you activate it.
         </p>
       )}
       {error && <p className="text-danger text-xs mt-2">{displayConnectError(error)}</p>}

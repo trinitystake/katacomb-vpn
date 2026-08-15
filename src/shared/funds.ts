@@ -65,12 +65,12 @@ export function checkFunds(available: number, costUdvpn: number): FundsCheck {
 export function insufficientFundsMessage(c: FundsCheck): string {
   if (c.cost === 0) {
     return (
-      `Not enough P2P for the network fee — this needs ~${formatP2p(c.required)} P2P ` +
+      `Not enough P2P for the network fee: this needs ~${formatP2p(c.required)} P2P ` +
       `and your wallet has ${formatP2p(c.available)}.`
     )
   }
   return (
-    `Not enough P2P — this costs ${formatP2p(c.cost)} plus ~${formatP2p(FEE_RESERVE_UDVPN)} ` +
+    `Not enough P2P: this costs ${formatP2p(c.cost)} plus ~${formatP2p(FEE_RESERVE_UDVPN)} ` +
     `in network fees (${formatP2p(c.required)} total), and your wallet has ${formatP2p(c.available)}. ` +
     `Add ${formatP2pCeil(c.shortfall)} P2P and try again.`
   )

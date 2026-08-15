@@ -727,6 +727,28 @@ async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<vo
 // Reachability probe for a freshly-built tunnel. Small response, plain HTTPS, and
 // already contacted by NETWORK_GET_IP — no new third party is introduced.
 const TUNNEL_PROBE_URL = 'https://icanhazip.com'
+/**
+ * A second probe target dialled by IP, so it needs NO DNS.
+ *
+ * The hostname probe above resolves THROUGH the tunnel, which makes its failure
+ * ambiguous on exactly the tunnels worth catching: a dead tunnel breaks DNS, and
+ * broken DNS breaks the probe, so "probe failed" looks identical to "the probe host
+ * is down" — the reason the byte fallback exists at all. Removing DNS from one of the
+ * two targets is what tells those apart. Two independent targets also mean a node
+ * blocking one of them cannot cause a working tunnel to be torn down.
+ */
+const TUNNEL_PROBE_IP_URL = 'https://1.1.1.1'
+/**
+ * How many bytes must come BACK before the byte evidence alone is believed.
+ *
+ * `now.rx > before.rx` was not a test. When xray cannot reach the exit hop of a chain
+ * it fails each relay locally, and tun2socks writes the resulting connection resets
+ * back into the tun — so rx ticks upward while the tunnel carries nothing, and a
+ * completely dead chain reported "connected". Measured on that failure: ~92 KB out
+ * against ~28 KB back over two minutes, none of it real. Sized like
+ * ONE_WAY_TX_FLOOR_BYTES: comfortably above teardown noise, far below a real reply.
+ */
+const TUNNEL_PROBE_MIN_RX_BYTES = 16 * 1024
 const TUNNEL_PROBE_TIMEOUT_MS = 6000
 const TUNNEL_PROBE_ATTEMPTS = 3
 
@@ -748,14 +770,16 @@ const TUNNEL_PROBE_ATTEMPTS = 3
 async function tunnelCarriesTraffic(): Promise<boolean> {
   const before = readTunnelBytes()
   for (let attempt = 0; attempt < TUNNEL_PROBE_ATTEMPTS; attempt++) {
-    try {
-      const res = await net.fetch(TUNNEL_PROBE_URL, {
-        signal: AbortSignal.timeout(TUNNEL_PROBE_TIMEOUT_MS),
-      })
-      if (res.ok) return true
-    } catch { /* the byte check below is the second opinion */ }
+    // By name first (proves the whole path, DNS included), then by IP (proves
+    // routing even when DNS is what is broken).
+    for (const url of [TUNNEL_PROBE_URL, TUNNEL_PROBE_IP_URL]) {
+      try {
+        const res = await net.fetch(url, { signal: AbortSignal.timeout(TUNNEL_PROBE_TIMEOUT_MS) })
+        if (res.ok) return true
+      } catch { /* the byte check below is the second opinion */ }
+    }
     const now = readTunnelBytes()
-    if (before && now && now.rx > before.rx) return true
+    if (before && now && now.rx - before.rx >= TUNNEL_PROBE_MIN_RX_BYTES) return true
   }
   return false
 }
@@ -778,7 +802,7 @@ async function assertTunnelCarriesTraffic(): Promise<void> {
   )
   await revertPostConnectSettings()
   await disconnect()
-  throw new Error(deadTunnelMessage(nodeIssuedFreshPeer))
+  throw new Error(deadTunnelMessage(nodeIssuedFreshPeer, activeExitSessionId !== null))
 }
 
 // Main-process listeners (e.g. the tray) for connection-state changes. Mirrors

@@ -605,3 +605,19 @@ test('refundEachInTurn reports a total failure without throwing', async () => {
   const results = await refundEachInTurn(['9'], async () => { throw new Error('rpc down') })
   assert.deepEqual(results, [{ sessionId: '9', refunded: false }])
 })
+
+test('deadTunnelMessage names the exit as the likely fault on a chain', () => {
+  // A chain has two nodes and the user cannot tell which one stopped forwarding.
+  // The entry is dialled directly and certificate-verified, so it fails earlier;
+  // an exit that accepts the relay and forwards nothing gives exactly this shape.
+  const msg = deadTunnelMessage(true, true)
+  assert.match(msg, /chain came up/i)
+  assert.match(msg, /exit hop is the more likely/i)
+  assert.match(msg, /retry the connection first/i)
+  assert.ok(!msg.includes('pick a different node'), 'single-hop wording must not leak in')
+})
+
+test('deadTunnelMessage keeps both single-hop variants intact', () => {
+  assert.match(deadTunnelMessage(true), /peer it just issued/)
+  assert.match(deadTunnelMessage(false), /cannot be reconnected/)
+})

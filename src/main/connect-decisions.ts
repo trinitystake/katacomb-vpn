@@ -302,7 +302,19 @@ export function isTunnelOneWay(txSinceLastRx: number, msSinceLastRx: number): bo
  * Neither wording promises money back: ending a session forfeits its remainder,
  * which is what the confirm dialog already tells the user.
  */
-export function deadTunnelMessage(nodeIssuedFreshPeer: boolean): string {
+export function deadTunnelMessage(nodeIssuedFreshPeer: boolean, isChain = false): string {
+  if (isChain) {
+    // Which hop failed is not knowable from here, but it is not a coin flip: the
+    // entry is dialled directly and its certificate is verified, so a dead entry
+    // fails earlier and louder. An exit that accepts the relay and forwards nothing
+    // produces exactly this signature, so say so rather than making the user guess
+    // between two nodes with no information.
+    return 'The chain came up but no traffic is getting through.\n\n' +
+      'Both hops are paid for and still open, so retry the connection first. If it fails ' +
+      'again, the exit hop is the more likely one at fault: the entry is dialled directly ' +
+      'and would have failed earlier, while an exit that accepts the connection and forwards ' +
+      'nothing looks exactly like this. End both and build a chain with a different exit.'
+  }
   if (nodeIssuedFreshPeer) {
     return 'The tunnel came up but no traffic is getting through — the node is not carrying ' +
       'traffic for the peer it just issued.\n\n' +

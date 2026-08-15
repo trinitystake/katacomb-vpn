@@ -223,6 +223,15 @@ The connect path spends real on-chain funds, so these are enforced and must hold
     **or** inbound bytes on the interface, because the probe host being down is not
     the tunnel's fault. Failure tears down and throws, leaving the stashed config
     intact so "Retry connection" still works.
+    **Two things that check costs, both learned from a dead chain that reported
+    "connected":** the probe must include an **IP-literal** target
+    (`TUNNEL_PROBE_IP_URL`), because the hostname one resolves THROUGH the tunnel and
+    a dead tunnel breaks DNS — so its failure is indistinguishable from the probe host
+    being down; and the byte fallback needs a real floor
+    (`TUNNEL_PROBE_MIN_RX_BYTES`), because `rx > before.rx` is not a test: when xray
+    cannot reach the exit hop it fails each relay locally and tun2socks writes the
+    resets back into the tun, so rx climbs while nothing works (~92 KB out / ~28 KB
+    back over two minutes, none of it real).
   - `checkTunnelStalled()` on the quota loop (all six protocols, unlike the root-only
     interface monitor), via the pure `isTunnelOneWay`. **Both** a tx floor and a
     silence window are required: an idle tunnel also receives nothing, and that is

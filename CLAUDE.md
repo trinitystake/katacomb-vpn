@@ -145,6 +145,20 @@ node-derived data to disk or hands it to the helper without a `config-guard` che
 Likewise, tunnel credentials are only persisted when `safeStorage` is available —
 never fall back to writing them in plaintext.
 
+**And the channel that delivers a node's keys authenticates nothing.** The SDK's
+handshake POST and `node-tester.ts` both set `rejectUnauthorized: false`, so the TLS pin,
+the Reality public key, the port and `addrs` all arrive over a connection that accepts any
+certificate — and those are precisely what the tunnel's confidentiality then rests on. An
+on-path attacker (the ISP) can answer the handshake with its own metadata and become the
+node; `normalizeTlsPin` and the config builders will faithfully pin the attacker's
+certificate. There is **nothing on chain to verify against**: `sentinel/node/v3/node.proto`
+gives `Node` only `{address, gigabyte_prices, hourly_prices, remote_addrs, inactive_at,
+status, status_at}` — no certificate, fingerprint or public key. Trust-on-first-use
+pinning is therefore the only option that exists, and it is deliberately **not
+implemented** (it changes the failure mode of every connect and can't be validated without
+live nodes). So never write UI copy implying that the TLS/Reality wrapping defeats the
+local network; multihop's threat-model block states the limit instead.
+
 ### Reliability invariants (do not regress)
 
 The connect path spends real on-chain funds, so these are enforced and must hold:
@@ -304,6 +318,18 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `reapplyFirewall()` under `withConnectionLock`, and the pure `decideFirewallAction`
   keys off the **armed marker**, not the connection — which is what lets the user
   disarm the stand-down ("expired, traffic blocked") chain without a restart.
+  The flag reaches the helper as a trailing `lan-sharing` **sentinel token** rather than a
+  fourth positional argument, because `dnsIp` is optional and passing `''` for it would
+  fail the daemon's `isIPv4` check. Auto-detected subnets and reusing `splitTunnelRoutes`
+  were both considered and rejected: the first goes stale on every dock or Wi-Fi roam, the
+  second overloads one control with two meanings and accepts public CIDRs. `100.64.0.0/10`
+  (CGNAT, Tailscale) is deliberately absent from the ranges.
+- **The kill switch's `ESTABLISHED,RELATED` accept now scopes to the tunnel interface
+  only.** Was scoped to **any** interface, so a connection opened over the physical NIC
+  *before* connecting would keep running while the chain was armed — latent but not
+  defended against. Fixed 2026-08-15: both IPv4 (:570) and IPv6 (:289) rules now carry
+  `-o $VPN_IFACE` / `-o "$vpn_iface"`, matching the honest scope of the comment. Measured
+  as latent-not-active before the fix: zero pre-connect flows were observed on the NIC.
 
 ### Session lifecycle (verified against live mainnet, not inferred)
 
@@ -713,6 +739,13 @@ xray-core is a strict superset of what the builder emits, so it lands in
   broadcast directly on purpose (a public tx tells the exit nothing new, and it keeps
   CosmJS off the proxy); proxied calls get their own longer timeouts, because a
   timeout there strands a paid entry. **Never add a direct call to the exit node.**
+  **Why splitting provisioning and traffic across two source addresses is safe at all:**
+  the node binds the peer to nothing but the session. `sentinel-dvpnx`
+  `api/handshake/handlers.go` persists account address, node address, peer id, session id,
+  quotas, peer metadata, the peer request, byte counters, service type and signature, and
+  no client IP; `node/setup.go` builds the API with `gin.New()`, so no logger middleware
+  records one either. The exposure this ordering closes therefore always needed a modified
+  node, a reverse proxy in front, or capture at the OS level — real, but not automatic.
   **Verified live on mainnet 2026-08-15**, by sampling `ss -tan` across a whole purchase:
   the host opened `45.124.52.245:26132` (entry API, direct) and `:48923` (the proxy), and
   the exit's API `217.154.177.25:35159` appeared ZERO times while its session was bought

@@ -286,7 +286,7 @@ ipv6_killswitch_on() {
   ip6tables -w 5 -N "$CHAIN6" &&
   ip6tables -w 5 -A "$CHAIN6" -o lo -j ACCEPT &&
   ip6tables -w 5 -A "$CHAIN6" -o "$vpn_iface" -j ACCEPT &&
-  ip6tables -w 5 -A "$CHAIN6" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
+  ip6tables -w 5 -A "$CHAIN6" -o "$vpn_iface" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
   if [[ "$lan_sharing" == "1" ]]; then
     for range in "${LAN_RANGES_V6[@]}"; do
       ip6tables -w 5 -A "$CHAIN6" -d "$range" -j ACCEPT || return 1
@@ -566,8 +566,8 @@ case "${1:-}" in
       iptables -w 5 -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p udp --dport 53 -j ACCEPT
       iptables -w 5 -A "$CHAIN" -o "$VPN_IFACE" -d "$DNS_IP/32" -p tcp --dport 53 -j ACCEPT
     fi
-    # Allow established/related connections (for the tunnel itself)
-    iptables -w 5 -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    # Allow established/related connections (for the tunnel interface only)
+    iptables -w 5 -A "$CHAIN" -o "$VPN_IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     # Local network sharing — must precede the DROP below.
     if [[ "$LAN_SHARING" == "1" ]]; then
       for range in "${LAN_RANGES_V4[@]}"; do

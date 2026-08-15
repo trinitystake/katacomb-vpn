@@ -2,9 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildMultihopConfig,
+  buildEntryOnlyConfig,
   buildHopOutbound,
   selectHopEntry,
   isCleartextEntry,
+  isUsableReality,
   normalizeTlsPin,
   transportName,
   classifyHopEligibility,
@@ -13,7 +15,8 @@ import {
   type HopSpec,
   type HopMetadataEntry,
 } from './multihop-config.ts'
-import { classifyV2RayInbound } from './config-guard.ts'
+import { classifyV2RayInbound, assertSafeV2RayConfig } from './config-guard.ts'
+import { isUsableXRayReality } from './xray-config.ts'
 
 // The proxy/transport/security triples below are real combinations captured from
 // live v9.0.0 nodes on 2026-08-14 (probed at each node's root path). Their
@@ -112,7 +115,8 @@ test('transport_protocol is decoded with the hop protocol own table', () => {
 test('transport_protocol 1 builds tcp for an xray hop and is rejected for a v2ray hop', () => {
   const meta: HopMetadataEntry = {
     port: '37545', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
-    flow: 2, reality_server_name: 'www.apple.com', reality_public_key: 'xVP4a6JqZ',
+    flow: 2, reality_server_name: 'www.apple.com',
+    reality_public_key: 'xVP4a6JqZL3tG9Cc3m6Ytn8xtdNnHyyEcCBxFpDFhzg',
     reality_short_id: '252f43c7d3719ef6', reality_fingerprint: 'chrome',
   }
   assert.notEqual(selectHopEntry(xrayHop([meta]), 'exit'), null)
@@ -235,6 +239,8 @@ test('prefers reality, then tls, over an unsecured inbound', () => {
   }
   const reality: HopMetadataEntry = {
     port: '3', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
+    reality_server_name: 'www.apple.com',
+    reality_public_key: 'xVP4a6JqZL3tG9Cc3m6Ytn8xtdNnHyyEcCBxFpDFhzg',
   }
   const tls: HopMetadataEntry = {
     port: '2', proxy_protocol: 1, transport_protocol: 1, transport_security: 2, tls_pin: 'a'.repeat(64),
@@ -360,14 +366,123 @@ test('a TLS outbound pins the node cert and never sends allowInsecure', () => {
   assert.ok(!('serverName' in tls))
 })
 
+// A real Reality inbound: 43-char base64url x25519 key (32 bytes) plus the server
+// name that becomes the outer ClientHello's SNI.
+const XRAY_REALITY: HopMetadataEntry = {
+  port: '37545', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
+  reality_public_key: 'xVP4a6JqZL3tG9Cc3m6Ytn8xtdNnHyyEcCBxFpDFhzg',
+  reality_server_name: 'www.apple.com', reality_short_id: '252f43c7d3719ef6',
+}
+
 test('a Reality inbound needs no tls_pin (Reality authenticates by public key)', () => {
-  const reality: HopMetadataEntry = {
-    port: '37545', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
-    reality_public_key: 'xVP4a6JqZ', reality_short_id: '252f43c7d3719ef6',
-  }
-  assert.equal(selectHopEntry(xrayHop([reality]), 'exit'), reality)
-  const ob = buildHopOutbound(xrayHop([reality]), reality, 'n', 'x')
+  assert.equal(selectHopEntry(xrayHop([XRAY_REALITY]), 'exit'), XRAY_REALITY)
+  const ob = buildHopOutbound(xrayHop([XRAY_REALITY]), XRAY_REALITY, 'n', 'x')
   assert.equal((ob.streamSettings as Record<string, unknown>).security, 'reality')
+})
+
+test('an empty short id is still a usable Reality inbound', () => {
+  // A server configured with `shortIds: [""]` is ordinary; only the key and the
+  // server name are load-bearing.
+  const noShortId = { ...XRAY_REALITY, reality_short_id: '' }
+  assert.equal(selectHopEntry(xrayHop([noShortId]), 'exit'), noShortId)
+})
+
+test('a Reality inbound without usable keys is not selectable', () => {
+  // The failure this prevents lands AFTER the money moves: the config builds fine
+  // with publicKey '', xray refuses it at spawn, and establishChainOrRefund has
+  // already returned, so neither deposit is refunded.
+  for (const broken of [
+    { ...XRAY_REALITY, reality_public_key: '' },
+    { ...XRAY_REALITY, reality_public_key: undefined },
+    { ...XRAY_REALITY, reality_public_key: 'xVP4a6JqZ' },        // not 32 bytes
+    { ...XRAY_REALITY, reality_server_name: '' },
+    { ...XRAY_REALITY, reality_server_name: undefined },
+  ] as HopMetadataEntry[]) {
+    assert.equal(selectHopEntry(xrayHop([broken]), 'exit'), null)
+  }
+  assert.throws(
+    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), xrayHop([{ ...XRAY_REALITY, reality_public_key: '' }])),
+    /Reality inbound with no usable public key/,
+  )
+})
+
+test('an unusable Reality inbound is skipped in favour of a pinned TLS one', () => {
+  // Reality is preferred, so an unusable Reality entry used to shadow a perfectly
+  // good TLS inbound on the SAME node and turn a working chain into a paid-for one
+  // that cannot start. (transport_protocol 1 is TCP on an xray node, 7 on a v2ray
+  // one — hence the separate constant.)
+  const xrayTcpTls: HopMetadataEntry = {
+    port: '18407', proxy_protocol: 1, transport_protocol: 1, transport_security: 2, tls_pin: 'a'.repeat(64),
+  }
+  const node = xrayHop([{ ...XRAY_REALITY, reality_public_key: '' }, xrayTcpTls])
+  assert.equal(selectHopEntry(node, 'exit'), xrayTcpTls)
+})
+
+test('isUsableReality agrees with the single-hop builder xray-config uses', () => {
+  // The two pure builders stay import-free of each other (see normalizeTlsPin), so
+  // this is what stops the duplicated validators drifting apart.
+  const cases: HopMetadataEntry[] = [
+    XRAY_REALITY,
+    { ...XRAY_REALITY, reality_public_key: '' },
+    { ...XRAY_REALITY, reality_public_key: 'not-base64!!' },
+    { ...XRAY_REALITY, reality_public_key: 'xVP4a6JqZ' },
+    { ...XRAY_REALITY, reality_server_name: '' },
+    { ...XRAY_REALITY, reality_short_id: '' },
+  ]
+  for (const c of cases) {
+    assert.equal(isUsableReality(c), isUsableXRayReality(c as never), JSON.stringify(c))
+  }
+})
+
+test('a Reality inbound on a transport the exit cannot use reports the transport, not the keys', () => {
+  // grpc can't be chained as an exit whatever its keys look like; saying "no usable
+  // public key" there would send the user off fixing the wrong thing.
+  const grpcReality: HopMetadataEntry = {
+    ...XRAY_REALITY, transport_protocol: 3, reality_public_key: '',
+  }
+  assert.throws(
+    () => buildMultihopConfig(v2rayHop([V2RAY_TCP_TLS]), xrayHop([grpcReality])),
+    /no plain-TCP inbound/,
+  )
+})
+
+// --- the entry-only provisioning config ---------------------------------------
+
+test('buildEntryOnlyConfig exposes only the entry, on its own loopback port', () => {
+  const config = buildEntryOnlyConfig(v2rayHop([V2RAY_TCP_TLS]), 1081)
+  const outbounds = config.outbounds as Record<string, unknown>[]
+  assert.equal(outbounds.length, 1, 'the exit must not be reachable from this config')
+  assert.equal(outbounds[0].tag, ENTRY_TAG)
+  // Nothing dials through anything else: this IS the direct hop.
+  assert.ok(!('proxySettings' in outbounds[0]))
+
+  const inbounds = config.inbounds as Record<string, unknown>[]
+  assert.equal(inbounds.length, 1)
+  assert.equal(inbounds[0].listen, '127.0.0.1')
+  assert.equal(inbounds[0].port, 1081)
+  assert.equal(inbounds[0].protocol, 'socks')
+  // TCP CONNECT is all the provisioning agent needs.
+  assert.deepEqual(inbounds[0].settings, { udp: false })
+})
+
+test('buildEntryOnlyConfig passes the same guard the real config does', () => {
+  // It goes through assertSafeV2RayConfig unchanged, so a loopback listener and a
+  // file-free log are not optional.
+  const config = buildEntryOnlyConfig(v2rayHop([V2RAY_TCP_TLS]), 1081)
+  assert.doesNotThrow(() => assertSafeV2RayConfig(config))
+})
+
+test('buildEntryOnlyConfig grades the entry by the CHAIN rule, before any money moves', () => {
+  // A node with nothing wrapped cannot be a chain entry, and failing here costs nothing.
+  const cleartext: HopMetadataEntry = {
+    port: '80', proxy_protocol: 1, transport_protocol: 7, transport_security: 1,
+  }
+  assert.throws(() => buildEntryOnlyConfig(v2rayHop([cleartext]), 1081), /cleartext/)
+})
+
+test('buildEntryOnlyConfig refuses a port it cannot listen on', () => {
+  assert.throws(() => buildEntryOnlyConfig(v2rayHop([V2RAY_TCP_TLS]), 0), /invalid port/)
+  assert.throws(() => buildEntryOnlyConfig(v2rayHop([V2RAY_TCP_TLS]), 70000), /invalid port/)
 })
 
 // --- classifyHopEligibility: the PRE-PURCHASE grade -------------------------

@@ -125,10 +125,23 @@ test('a TLS entry with no usable pin is not selectable', () => {
 test('Reality still wins over TLS, and needs no pin of its own', () => {
   const reality: XRayMetadataEntry = {
     port: '37545', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
-    reality_public_key: 'xVP4a6JqZ', reality_short_id: '252f43c7d3719ef6',
+    reality_public_key: 'xVP4a6JqZL3tG9Cc3m6Ytn8xtdNnHyyEcCBxFpDFhzg',
+    reality_server_name: 'www.apple.com', reality_short_id: '252f43c7d3719ef6',
   }
   assert.equal(selectXRayEntry([tlsEntry(), reality]), reality)
   assert.equal(selectXRayEntry([reality]), reality)
+})
+
+test('a Reality entry with no usable keys loses to a pinned TLS one', () => {
+  // It used to win, and then xray refused the config it produced (publicKey '') at
+  // spawn — after the session was paid for.
+  const broken: XRayMetadataEntry = {
+    port: '37545', proxy_protocol: 1, transport_protocol: 1, transport_security: 3,
+    reality_public_key: '', reality_server_name: 'www.apple.com',
+  }
+  const tls = tlsEntry()
+  assert.equal(selectXRayEntry([tls, broken]), tls)
+  assert.equal(selectXRayEntry([broken]), null)
 })
 
 test('normalizeXRayTlsPin agrees with the multihop builder byte for byte', () => {

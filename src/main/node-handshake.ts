@@ -96,7 +96,11 @@ export function postHandshake(
       {
         protocol: target.protocol,
         hostname: target.hostname,
-        port: target.port,
+        // URL.port is a STRING, and '' when the URL carries no explicit port. Passing it
+        // straight through is what broke the proxied exit handshake: http.get(urlString)
+        // would have coerced it via urlToHttpOptions, but building options by hand skips
+        // that. undefined lets Node pick the protocol default, which '' also did.
+        port: target.port === '' ? undefined : Number(target.port),
         path: target.pathname === '' ? '/' : target.pathname,
         method: 'POST',
         headers: {

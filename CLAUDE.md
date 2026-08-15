@@ -719,6 +719,17 @@ xray-core is a strict superset of what the builder emits, so it lands in
   handshake. `node-handshake.test.ts` captures what the real SDK puts on the wire and
   asserts ours is byte-identical — that test is the whole safety argument for the
   reimplementation, so it must never be weakened to a hand-written fixture.
+- **`URL.port` is a STRING, and the SOCKS agent is the one place that notices.**
+  `http.get(urlString)` launders it through Node's `urlToHttpOptions`, which coerces to a
+  Number, so `node-tester`'s probes were fine; `postHandshake` built its options by hand
+  from `new URL(...)` and passed the raw string. `SocksHttpsAgent.createConnection`
+  asserted `port?: number`, trusted it, and threw "invalid port 6636" — AFTER both hops
+  were bought, because the preflight had gone through the coercing path and passed. Both
+  ends are fixed (the agent coerces, `postHandshake` sends a number), and the agent's
+  options type must keep saying `number | string`: it is Node's contract, not ours. The
+  live cost was a two-session buy-and-refund with all 12 codec tests green, because none
+  of them went through `createConnection` — the only door untyped options come in by.
+  Anything reaching that class from a URL needs a test AT the agent, not at the codec.
 - **The picker's bulk grading rides whatever tunnel is up; a cold start is the accepted
   residual.** It carries no wallet and no session and goes to hundreds of nodes, so what a
   node learns is "an address looked at me" with nothing to attach it to. The modal says so.

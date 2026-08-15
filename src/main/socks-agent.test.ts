@@ -7,6 +7,7 @@ import {
   parseGreetingReply,
   parseConnectReply,
   socks5Connect,
+  SocksHttpsAgent,
 } from './socks-agent.ts'
 
 // --- the wire format (RFC 1928) ------------------------------------------------
@@ -102,14 +103,24 @@ function stubProxy(
   onConnect: (target: { atyp: number; host: string; port: number }) => number,
 ): Promise<{ port: number; close: () => void; targets: { host: string; port: number }[] }> {
   const targets: { host: string; port: number }[] = []
+  // Held so close() can tear them down. A CONNECT the agent made is followed by a TLS
+  // handshake this stub cannot answer, so without this the socket lingers and the test
+  // runner waits on it forever.
+  const live: net.Socket[] = []
   const server = net.createServer((socket) => {
-    let stage: 'greet' | 'connect' = 'greet'
+    live.push(socket)
+    let stage: 'greet' | 'connect' | 'done' = 'greet'
     socket.on('data', (chunk) => {
       if (stage === 'greet') {
         socket.write(Buffer.from([0x05, 0x00]))
         stage = 'connect'
         return
       }
+      // Once CONNECT is answered the stream belongs to the tunnelled protocol. The
+      // agent's next write is a TLS ClientHello, and parsing that as another CONNECT
+      // invents a second bogus target.
+      if (stage === 'done') return
+      stage = 'done'
       const atyp = chunk[3]
       let host = ''
       let offset = 4
@@ -130,7 +141,14 @@ function stubProxy(
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const port = (server.address() as net.AddressInfo).port
-      resolve({ port, close: () => server.close(), targets })
+      resolve({
+        port,
+        close: () => {
+          for (const s of live) s.destroy()
+          server.close()
+        },
+        targets,
+      })
     })
   })
 }
@@ -171,5 +189,96 @@ test('socks5Connect rejects rather than hanging when the proxy hangs up mid-hand
     await assert.rejects(socks5Connect(socket, 'exit.example.net', 443), /closed the connection|ECONNRESET/)
   } finally {
     server.close()
+  }
+})
+
+// --- the agent's own entry point -----------------------------------------------
+//
+// These exist because the tests above did not. Every one of them calls the codec with a
+// numeric literal, so nothing ever exercised createConnection, which is the ONLY place
+// Node's untyped options reach us — and the only place a string port can arrive. A live
+// chain bought two sessions and then failed the exit handshake on "invalid port 6636"
+// with all 12 of the tests above passing.
+//
+// The TLS handshake that follows CONNECT is not the subject here (the stub speaks no
+// TLS), so each test reads what the proxy was ASKED for and stops.
+
+/** What target did the agent request for these options? Ignores the TLS attempt after. */
+function targetAskedFor(
+  proxyPort: number,
+  options: Record<string, unknown>,
+  targets: { host: string; port: number }[],
+): Promise<{ host: string; port: number }> {
+  const agent = new SocksHttpsAgent(proxyPort)
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('proxy was never asked for a target')), 2000)
+    const poll = setInterval(() => {
+      if (targets.length > 0) {
+        clearInterval(poll)
+        clearTimeout(timer)
+        resolve(targets[0])
+      }
+    }, 5)
+    // The callback fires once the stub's socket dies under the TLS attempt; the
+    // assertion is on `targets`, so this only has to avoid leaving a stream open.
+    agent.createConnection(options as never, (_err, stream) => {
+      ;(stream as { destroy?: () => void } | undefined)?.destroy?.()
+    })
+  })
+}
+
+test('the agent accepts a STRING port, which is what URL.port and http options give it', async () => {
+  const proxy = await stubProxy(() => 0x00)
+  try {
+    const asked = await targetAskedFor(proxy.port, { host: 'exit.example.net', port: '6636' }, proxy.targets)
+    assert.deepEqual(asked, { host: 'exit.example.net', port: 6636 })
+  } finally {
+    proxy.close()
+  }
+})
+
+test('the agent accepts a numeric port too', async () => {
+  const proxy = await stubProxy(() => 0x00)
+  try {
+    const asked = await targetAskedFor(proxy.port, { host: 'exit.example.net', port: 6636 }, proxy.targets)
+    assert.deepEqual(asked, { host: 'exit.example.net', port: 6636 })
+  } finally {
+    proxy.close()
+  }
+})
+
+test('the agent defaults to 443 when the options carry no port', async () => {
+  const proxy = await stubProxy(() => 0x00)
+  try {
+    const asked = await targetAskedFor(proxy.port, { host: 'exit.example.net' }, proxy.targets)
+    assert.deepEqual(asked, { host: 'exit.example.net', port: 443 })
+  } finally {
+    proxy.close()
+  }
+})
+
+test('the agent prefers hostname over host, since host can carry a port', async () => {
+  const proxy = await stubProxy(() => 0x00)
+  try {
+    const asked = await targetAskedFor(
+      proxy.port,
+      { host: 'exit.example.net:6636', hostname: 'exit.example.net', port: '6636' },
+      proxy.targets,
+    )
+    assert.deepEqual(asked, { host: 'exit.example.net', port: 6636 })
+  } finally {
+    proxy.close()
+  }
+})
+
+test('an IPv4 target still goes out as ATYP 1 through the agent', async () => {
+  const seen: number[] = []
+  const proxy = await stubProxy((t) => { seen.push(t.atyp); return 0x00 })
+  try {
+    const asked = await targetAskedFor(proxy.port, { hostname: '203.0.113.9', port: '443' }, proxy.targets)
+    assert.deepEqual(asked, { host: '203.0.113.9', port: 443 })
+    assert.deepEqual(seen, [0x01])
+  } finally {
+    proxy.close()
   }
 })

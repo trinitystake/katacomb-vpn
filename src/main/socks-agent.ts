@@ -188,14 +188,29 @@ export class SocksHttpsAgent extends https.Agent {
     options: Parameters<https.Agent['createConnection']>[0],
     callback?: Parameters<https.Agent['createConnection']>[1],
   ): ReturnType<https.Agent['createConnection']> {
-    const target = options as { host?: string; port?: number; servername?: string }
+    // Node hands these over untyped, and `port` really can be either: http.get(urlString)
+    // runs the URL through urlToHttpOptions, which coerces to a Number, but a caller that
+    // builds options itself from `new URL(...)` passes URL.port, which is a STRING. Both
+    // reach here, so narrow to what Node actually promises rather than what is convenient.
+    // Asserting `port?: number` here is what shipped a chain that bought two sessions and
+    // then failed the exit handshake on "invalid port 6636".
+    const target = options as {
+      host?: string
+      hostname?: string
+      port?: number | string
+      servername?: string
+    }
     if (!callback) {
       // Every https.Agent path that reaches here passes one; without it there is no way
       // to hand back a socket that only exists after two round trips.
       throw new Error('SOCKS5 agent requires the async createConnection callback')
     }
-    const host = target.host ?? ''
-    const port = target.port ?? 443
+    // `hostname` is always the bare name; `host` can carry host:port depending on the
+    // caller, so prefer the unambiguous one.
+    const host = target.hostname ?? target.host ?? ''
+    const port = target.port === undefined || target.port === ''
+      ? 443
+      : Number(target.port)
     const socket = net.connect({ host: '127.0.0.1', port: this.proxyPort })
 
     const fail = (err: Error): void => {

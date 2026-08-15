@@ -88,6 +88,7 @@ import {
   binaryExists,
   isBinaryAvailable,
   protocolRuntimeError,
+  getActiveProxyPort,
 } from './vpn-manager'
 import { runPrivileged, canEscalatePrivileges } from './privileged'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
@@ -126,6 +127,11 @@ const CHAIN_ELIGIBILITY_TTL_MS = 10 * 60 * 1000
 // The picker probes in chunks; this bounds one IPC call, not the whole list.
 const CHAIN_ELIGIBILITY_MAX_BATCH = 60
 const CHAIN_ELIGIBILITY_CONCURRENCY = 8
+// Grading through an already-connected local proxy: an extra hop each way, so more
+// than the direct budget. Well under NODE_CHECK_VIA_PROXY_TIMEOUT_MS, though — that
+// one is generous because a timeout there strands a paid entry session, whereas a
+// slow answer here only costs one row in the picker.
+const CHAIN_ELIGIBILITY_VIA_PROXY_TIMEOUT_MS = 15_000
 
 /** How a node graded for each end of a chain. `reachable: false` means unknown. */
 interface ChainEligibilityResult {
@@ -3294,10 +3300,24 @@ export function registerIpcHandlers(): void {
     const now = Date.now()
     const out: ChainEligibilityResult[] = new Array(nodes.length)
     let index = 0
+    // Grading is unauthenticated and carries no session, but it still tells every node
+    // it asks that this address is shopping for a chain. When a tunnel is already up we
+    // send it through that tunnel rather than off the physical NIC.
+    //
+    // Only proxy mode needs an agent to do it. In tunnel mode the OS has already put
+    // these probes in the tunnel (see getActiveProxyPort), so asking for one there would
+    // route tunnel traffic through a proxy that isn't running. One agent for the batch:
+    // it opens a fresh socket per request (keepAlive false) and is safe to share.
+    const proxyPort = getActiveProxyPort()
+    const proxyAgent = proxyPort === null ? undefined : new SocksHttpsAgent(proxyPort)
     async function worker(): Promise<void> {
       while (index < nodes.length) {
         const slot = index++
         const node = nodes[slot]
+        // Keyed by node alone, unlike node-tester's rootMemo. There, a direct answer
+        // satisfying a proxied read would skip a request that existed to BE proxied;
+        // here a cache hit means no request at all, which is the better outcome either
+        // way, so the route it was first learned over doesn't matter.
         const cached = chainEligibilityCache.get(node.nodeAddress)
         if (cached && now - cached.checkedAt < CHAIN_ELIGIBILITY_TTL_MS) {
           out[slot] = cached
@@ -3307,10 +3327,12 @@ export function registerIpcHandlers(): void {
         try {
           // Same reason preflightConnect wraps its own call: nodeFetch's timeout
           // covers socket inactivity, not the TCP connect, so a blackholed node
-          // hangs past it.
+          // hangs past it. Through the proxy each probe crosses an extra hop, but
+          // no money rides on this one, so it gets a tighter budget than the
+          // purchase-time check.
           const metadata = await withTimeout(
-            fetchNodeServiceMetadata(node.remoteUrl),
-            NODE_PROTOCOL_CHECK_TIMEOUT_MS,
+            fetchNodeServiceMetadata(node.remoteUrl, proxyAgent),
+            proxyAgent ? CHAIN_ELIGIBILITY_VIA_PROXY_TIMEOUT_MS : NODE_PROTOCOL_CHECK_TIMEOUT_MS,
             'node inbound listing',
           )
           const graded = classifyHopEligibility(
@@ -3322,6 +3344,10 @@ export function registerIpcHandlers(): void {
           // Unreachable and "too old to say" are both reported as unknown rather
           // than as a refusal: a v8.3.1 node may well work, we just cannot tell
           // without paying, and the picker says so instead of hiding it.
+          //
+          // A proxied probe that fails lands here too, and deliberately does NOT
+          // retry direct: falling back would leak the address this route exists to
+          // hide, and would do it silently. The row reads as unknown instead.
           result = {
             nodeAddress: node.nodeAddress,
             checkedAt: Date.now(),

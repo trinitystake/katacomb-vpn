@@ -493,11 +493,26 @@ bad exit costs an entry refund rather than nothing. The picker already refuses a
 without positive evidence, so this is a backstop against a node that changed since it
 was graded.
 
-**Still residual:** the picker's bulk grading is still direct. It carries no wallet and
-no session and goes to hundreds of nodes at once, so a node learns "an address looked at
-me" with nothing to attach it to — a different kind of exposure from the signed,
+**Still residual:** the picker's bulk grading, when no tunnel is up. It carries no wallet
+and no session and goes to hundreds of nodes at once, so a node learns "an address looked
+at me" with nothing to attach it to — a different kind of exposure from the signed,
 session-bound, immediately-followed-by-traffic contact that was closed. The modal says
 so rather than implying otherwise.
+
+What it is NOT is a leak whenever a tunnel exists. Checking the routing rather than
+assuming: in tunnel mode the OS already carries these probes through the tunnel
+(wg/awg/openvpn replace the default route; the helper gives tun2socks `0.0.0.0/1` +
+`128.0.0.0/1`, and only the connected node's own `/32` bypasses it), so grading was
+private there all along and needed no code. **Local-proxy mode was the exception** — it
+leaves routing untouched by design, so a tunnel existed while our own probes went out on
+the physical NIC. `getActiveProxyPort()` + the `SocksHttpsAgent` built for S1 now put
+grading through that listener. A proxied probe that fails reports the row as unknown and
+never retries direct: falling back would silently leak the address the route exists to
+hide.
+
+So the residual is now precisely "grading from a cold start, with no tunnel of any kind"
+— which is the case the picker is usually used in, and closing it would mean grading
+exits only after an entry is already bought.
 
 ### Where the other fix differs from the suggestion
 
@@ -518,8 +533,10 @@ DoH request fails.
   against and TOFU is the only option that exists. It belongs to the whole app rather
   than to multihop, changes the failure mode of every connect, and cannot be validated
   without live nodes. Documented in the UI instead.
-- **The picker's direct grading** (see "S1, closed"): a deliberate residual, not an
-  oversight.
+- **The picker's grading from a cold start** (see "S1, closed"): a deliberate residual,
+  not an oversight. It now rides whatever tunnel is up, including local-proxy mode; what
+  is left is the no-tunnel case, and closing that means grading exits only after an entry
+  has been paid for.
 - **`sendChainHopProgress`'s open question** was resolved in the direction this audit
   assumed (the marker means "this hop, this phase, right now"). If the other reading was
   intended, B6's fix is where to change it.

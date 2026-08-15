@@ -719,9 +719,18 @@ xray-core is a strict superset of what the builder emits, so it lands in
   handshake. `node-handshake.test.ts` captures what the real SDK puts on the wire and
   asserts ours is byte-identical — that test is the whole safety argument for the
   reimplementation, so it must never be weakened to a hand-written fixture.
-- **The picker's bulk grading is still direct, and that is the accepted residual.** It
-  carries no wallet and no session and goes to hundreds of nodes, so what a node learns
-  is "an address looked at me" with nothing to attach it to. The modal says so.
+- **The picker's bulk grading rides whatever tunnel is up; a cold start is the accepted
+  residual.** It carries no wallet and no session and goes to hundreds of nodes, so what a
+  node learns is "an address looked at me" with nothing to attach it to. The modal says so.
+  In TUNNEL mode nothing was ever needed: the OS puts these probes in the tunnel already
+  (wg/awg/openvpn replace the default route; tun2socks owns `0.0.0.0/1` + `128.0.0.0/1`,
+  and only the connected node's `/32` bypasses). **Local-proxy mode was the one state
+  where a tunnel existed and our own traffic did not use it**, so grading now goes through
+  its SOCKS listener via `getActiveProxyPort()` + `SocksHttpsAgent`. That accessor is for
+  this caller only, and is deliberately not `isVpnActive()`'s inverse. **A proxied probe
+  that fails must never retry direct** — that is the silent leak this exists to prevent;
+  the row reads as unknown instead. Don't route `probeNode` the same way: it measures
+  latency, and through a proxy it would measure the wrong thing.
 - **Key material is validated before an inbound is selected, on both protocols.** TLS
   needs a `tls_pin` that normalises; Reality needs a 32-byte `reality_public_key` AND a
   non-empty `reality_server_name` (`isUsableReality`, mirrored in `xray-config.ts` with a

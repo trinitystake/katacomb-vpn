@@ -99,7 +99,8 @@ const TUN_IFACE = 'sntl-tun'
 // teardown ambiguous (awg-down and ovpn-down are not interchangeable).
 const OVPN_IFACE = 'sntl-ovpn'
 const OVPN_CONFIG_NAME = 'openvpn.conf'
-const SOCKS_ADDR = '127.0.0.1:1080'
+const SOCKS_PORT = 1080
+const SOCKS_ADDR = `127.0.0.1:${SOCKS_PORT}`
 
 /** Where the child proxies listen — shown to the user in local-proxy mode. */
 export function getSocksAddr(): string {
@@ -1168,6 +1169,26 @@ export function isVpnActive(): boolean {
   if (activeMode === 'proxy') return false
   if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) return true
   return false
+}
+
+/**
+ * The live SOCKS5 port when local-proxy mode is what's running, else null.
+ *
+ * This exists for one caller: the multihop picker's grading probe. In TUNNEL mode
+ * nobody needs it, because the OS already carries our probes through the tunnel
+ * (wg/awg/openvpn replace the default route; tun2socks owns 0.0.0.0/1 + 128.0.0.0/1,
+ * and only the connected node's own /32 bypasses it). Proxy mode is the one state
+ * where a tunnel exists and our own traffic does NOT use it, so it's the only place
+ * a caller has to route itself.
+ *
+ * Deliberately NOT isVpnActive()'s inverse: that returns false here on purpose, to
+ * mean "system routing is untouched, don't fall back to cached chain data".
+ */
+export function getActiveProxyPort(): number | null {
+  if (activeMode !== 'proxy') return null
+  if (!isChildProxy(activeProtocol)) return null
+  if (!activeChild || activeChild.exitCode !== null) return null
+  return SOCKS_PORT
 }
 
 /** Get V2Ray error output if the process crashed */

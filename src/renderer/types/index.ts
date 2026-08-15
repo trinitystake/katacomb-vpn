@@ -250,6 +250,12 @@ export interface ConnectionStatus {
     nodeMoniker: string
     reason: 'time' | 'data' | 'stalled'
     trafficBlocked: boolean
+    /**
+     * MULTIHOP: which end of the chain ran out, so the banner can name it. `sessionId`
+     * and `nodeMoniker` are that hop's, not necessarily the entry's. Absent for an
+     * ordinary single-hop session.
+     */
+    chainRole?: 'entry' | 'exit'
   }
 }
 

@@ -192,10 +192,61 @@ export function normalizeTlsPin(pin: string | undefined): string | null {
   }
 }
 
+/**
+ * Is this Reality inbound one we can actually build a working outbound from?
+ *
+ * Reality's counterpart to the TLS pin check, and it was missing. A TLS inbound with
+ * no usable `tls_pin` is refused (there is nothing to verify the self-signed cert
+ * against), but a Reality inbound was taken entirely on trust — and Reality is
+ * PREFERRED first, so a node advertising `transport_security: 3` with blank keys was
+ * chosen ahead of a perfectly good TLS inbound on the same node. `buildHopOutbound`
+ * then emitted `publicKey: ''`, the config built cleanly, and xray rejected it at
+ * spawn: a failure that lands AFTER establishChainOrRefund has returned, so neither
+ * deposit is refunded and "Retry connection" can never succeed.
+ *
+ * Two things are required and no more:
+ *  - `reality_public_key` must decode to exactly 32 bytes (an x25519 public key).
+ *    `xray x25519` emits base64url, but standard base64 is accepted too rather than
+ *    silently refusing a node over an encoding difference, the same way
+ *    normalizeTlsPin takes either.
+ *  - `reality_server_name` must be non-empty: it becomes the SNI of the outer
+ *    ClientHello, and the node's Reality server matches its dest against it.
+ * `reality_short_id` is deliberately NOT required — an empty short id is a valid,
+ * common server configuration.
+ */
+export function isUsableReality(entry: HopMetadataEntry): boolean {
+  const name = entry.reality_server_name
+  if (typeof name !== 'string' || name.trim() === '') return false
+  const key = entry.reality_public_key
+  if (typeof key !== 'string') return false
+  const trimmed = key.trim()
+  if (!/^[A-Za-z0-9+/_-]{42,44}={0,2}$/.test(trimmed)) return false
+  try {
+    return Buffer.from(trimmed.replace(/-/g, '+').replace(/_/g, '/'), 'base64').length === 32
+  } catch {
+    return false
+  }
+}
+
 function parsePort(raw: string | number): number | null {
   const port = typeof raw === 'string' ? parseInt(raw, 10) : raw
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return null
   return port
+}
+
+/**
+ * Everything about an inbound EXCEPT whether its key material is usable: an emittable
+ * transport, a usable port, and TLS/Reality. Split out so requireEntry can tell
+ * "wrong shape" from "right shape, unusable keys" and report the one that is actually
+ * blocking, instead of blaming a grpc-only node's Reality keys.
+ */
+function isShapeUsable(spec: HopSpec, role: HopRole, m: HopMetadataEntry): boolean {
+  const name = transportName(spec.protocol, m.transport_protocol)
+  if (name === null) return false
+  if (role === 'exit' && !EXIT_TRANSPORTS.has(name)) return false
+  if (NETWORK_BY_TRANSPORT[name] === undefined) return false
+  if (parsePort(m.port) === null) return false
+  return isChainGradeSecurity(m)
 }
 
 /**
@@ -209,17 +260,16 @@ function parsePort(raw: string | number): number | null {
  */
 export function selectHopEntry(spec: HopSpec, role: HopRole): HopMetadataEntry | null {
   const usable = spec.metadata.filter((m) => {
-    const name = transportName(spec.protocol, m.transport_protocol)
-    if (name === null) return false
-    if (role === 'exit' && !EXIT_TRANSPORTS.has(name)) return false
-    if (NETWORK_BY_TRANSPORT[name] === undefined) return false
-    if (parsePort(m.port) === null) return false
-    if (!isChainGradeSecurity(m)) return false
+    if (!isShapeUsable(spec, role, m)) return false
     // A TLS inbound is only usable if the node sent a pin we can verify it against.
     // Without one there is no way to authenticate a self-signed cert, and xray no
     // longer offers an "accept anything" mode — the go-sdk's own client config makes
     // the same check (client_config.go: TransportSecurityTLS && TLSPin == "" → error).
     if (m.transport_security === SECURITY_TLS && normalizeTlsPin(m.tls_pin) === null) return false
+    // The same rule for Reality: an entry whose keys can't build a working outbound
+    // must not be selected, or the chain is paid for and then fails at spawn — past
+    // the point anything refunds it (see isUsableReality).
+    if (m.transport_security === SECURITY_REALITY && !isUsableReality(m)) return false
     // No cleartext check is needed here: TLS/Reality already excludes it, since the
     // only cleartext combination is VLess with no transport security.
     return true
@@ -398,13 +448,65 @@ function requireEntry(spec: HopSpec, role: HopRole): HopMetadataEntry {
       '(tls_pin), so its self-signed certificate cannot be verified. Pick a different node.',
     )
   }
+  // The Reality equivalent: an inbound of exactly the right shape for this role,
+  // refused only because its keys can't build a working outbound. Worth its own
+  // message, because the node looks fully qualified right up to the point xray
+  // refuses to start on it.
+  if (spec.metadata.some((m) =>
+    isShapeUsable(spec, role, m) && m.transport_security === SECURITY_REALITY && !isUsableReality(m)
+  )) {
+    throw new Error(
+      `Multihop ${role} node offered a Reality inbound with no usable public key or ` +
+      'server name, so there is nothing to authenticate it with. Pick a different node.',
+    )
+  }
   throw new Error(
     role === 'exit'
       ? 'Multihop exit node offers no plain-TCP inbound. Only TCP can be carried through ' +
-        'the entry hop — grpc and websocket bring their own dialer and fail when chained. ' +
+        'the entry hop: grpc and websocket bring their own dialer and fail when chained. ' +
         'Pick a different exit node (the entry may use any transport).'
       : 'Multihop entry node offers no supported transport (tcp, websocket or grpc)',
   )
+}
+
+/**
+ * Build a config for the ENTRY HOP ALONE, exposing nothing but a loopback SOCKS5
+ * listener on `socksPort`.
+ *
+ * This is what lets the exit hop be provisioned without the exit ever seeing the user's
+ * address. The exit's grade, its preflight and above all its signed handshake are
+ * session-bound and are followed seconds later by the user's traffic, so a node that
+ * records who asked can join the two — the very thing a chain is bought to prevent. Run
+ * through this proxy instead, they arrive from the ENTRY.
+ *
+ * Deliberately minimal, because it exists for a handful of HTTPS requests and is torn
+ * down before the real tunnel is built: no exit outbound, no UDP (CONNECT is all the
+ * agent needs), and its own port so it cannot collide with the live listener on 1080.
+ * The shape is otherwise the chained config's, so it flows through the same
+ * pinV2RayNodeAddresses / assertSafeV2RayConfig transforms with no special casing.
+ *
+ * Graded as an 'entry', the same rule the chain itself applies, so a node that cannot be
+ * a chain entry fails here rather than after its session is paid for.
+ */
+export function buildEntryOnlyConfig(entryHop: HopSpec, socksPort: number): Record<string, unknown> {
+  if (!Number.isInteger(socksPort) || socksPort <= 0 || socksPort > 65535) {
+    throw new Error(`Multihop provisioning proxy: invalid port ${socksPort}`)
+  }
+  const entryMeta = requireEntry(entryHop, 'entry')
+  const entryAddress = firstAddress(entryHop, 'entry')
+  return {
+    log: { loglevel: 'warning' },
+    inbounds: [
+      {
+        tag: SOCKS_TAG,
+        listen: SOCKS_LISTEN,
+        port: socksPort,
+        protocol: 'socks',
+        settings: { udp: false },
+      },
+    ],
+    outbounds: [buildHopOutbound(entryHop, entryMeta, entryAddress, ENTRY_TAG)],
+  }
 }
 
 /**

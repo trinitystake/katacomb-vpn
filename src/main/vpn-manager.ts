@@ -1,4 +1,5 @@
 import { execSync, execFileSync, spawn, type ChildProcess } from 'child_process'
+import { connect as netConnect } from 'node:net'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync, appendFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
@@ -47,7 +48,7 @@ function resolveBundled(name: string): string {
     if (!verifyBinaryIntegrity(bundled, name)) {
       throw new Error(
         `Bundled binary ${name} failed SHA-256 integrity check. ` +
-        `Refusing to run — reinstall the app to restore the verified binary.`
+        `Refusing to run. Reinstall the app to restore the verified binary.`
       )
     }
     return bundled
@@ -122,8 +123,13 @@ function isChildProxy(p: typeof activeProtocol): boolean {
   return p === 'v2ray' || p === 'xray' || p === 'hysteria2'
 }
 let activeConfigFile: string | null = null
+// The core's log file for the CURRENT spawn, so disconnect can remove it (it outlives
+// the session otherwise, and its contents are the user's browsing failures).
+let activeLogPath: string | null = null
 let v2rayStderr = ''
 let tunActive = false
+// The default route the tun2socks bypass route was pinned to at bring-up.
+let tunRoute: { gateway: string; iface: string } | null = null
 let v2rayExitCallback: (() => void) | null = null
 
 export function binaryExists(name: string): boolean {
@@ -155,7 +161,7 @@ export function isBinaryAvailable(name: string): boolean {
 export function protocolRuntimeError(protocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'): string | null {
   try {
     if (protocol === 'wireguard') {
-      return binaryExists('wg-quick') ? null : 'wg-quick is not installed — install the wireguard-tools package.'
+      return binaryExists('wg-quick') ? null : 'wg-quick is not installed. Install the wireguard-tools package.'
     }
     if (protocol === 'amneziawg') {
       resolveAmneziaWgBinDir()
@@ -416,6 +422,8 @@ async function bringUpTun(): Promise<void> {
 
   console.log(`[tun2socks] TUN interface ${TUN_IFACE} is up, routing configured`)
   tunActive = true
+  // The uplink this tunnel's bypass route was built against. See hasDefaultRouteChanged.
+  tunRoute = defaultRoute
 }
 
 /** Bring down tun2socks TUN interface and restore routing */
@@ -428,6 +436,28 @@ async function bringDownTun(): Promise<void> {
     // Best-effort
   }
   tunActive = false
+  tunRoute = null
+}
+
+/**
+ * Has the physical default route moved since the TUN was brought up?
+ *
+ * tun2socks does NOT replace the default route (it adds the two /1 halves plus a
+ * host route to the node via the gateway that existed at bring-up), so
+ * `ip route show default` keeps reporting the real uplink and this comparison stays
+ * meaningful for as long as the tunnel is up. When it changes — Wi-Fi to wired, a
+ * resume onto a different network — the node bypass route points at a gateway that no
+ * longer exists and the tunnel is dead, while the xray process and the TUN both look
+ * perfectly healthy.
+ *
+ * Returns false when there is nothing to compare or the route can't be read: a
+ * tunnel must never be torn down because `ip route` hiccuped.
+ */
+export function hasDefaultRouteChanged(): boolean {
+  if (!tunActive || !tunRoute) return false
+  const now = getDefaultRoute()
+  if (!now) return false
+  return now.gateway !== tunRoute.gateway || now.iface !== tunRoute.iface
 }
 
 // Cached major version per binary path. The bundled binary is pinned (its hash is
@@ -458,6 +488,12 @@ function v2rayArgs(bin: string, configFile: string): string[] {
   return v2rayRunArgs(major, configFile)
 }
 
+/** V2RAY/XRAY_LOCATION_ASSET so a core can find geoip/geosite if bundled alongside it. */
+function coreEnv(bin: string): NodeJS.ProcessEnv {
+  const binDir = join(bin, '..')
+  return { ...process.env, V2RAY_LOCATION_ASSET: binDir, XRAY_LOCATION_ASSET: binDir }
+}
+
 /**
  * Spawn the proxy child (v2ray by default; xray when overridden) and monitor it.
  * xray reuses this whole lifecycle — same stdout/stderr capture, log file, and
@@ -472,14 +508,10 @@ function spawnV2Ray(
   const args = opts?.args ?? v2rayArgs(bin, configFile)
   const logName = opts?.logName ?? 'v2ray.log'
 
-  // Set V2RAY/XRAY_LOCATION_ASSET so the core can find geoip/geosite if bundled alongside
-  const binDir = join(bin, '..')
-  const env = { ...process.env, V2RAY_LOCATION_ASSET: binDir, XRAY_LOCATION_ASSET: binDir }
-
   // Capture both stdout and stderr — V2Ray v4 outputs errors to stdout
   const child = spawn(bin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env,
+    env: coreEnv(bin),
   })
 
   // Persist the core's own output to a stable, user-readable file. The in-memory
@@ -488,6 +520,7 @@ function spawnV2Ray(
   // the node wedged) never exits, so the file is the only way to see why.
   // Truncated per spawn so it always holds the current session.
   const logPath = join(app.getPath('userData'), logName)
+  activeLogPath = logPath
   try {
     writeFileSync(logPath, `# ${logName} session started ${new Date().toISOString()}\n`, { mode: 0o600 })
   } catch { /* logging is best-effort */ }
@@ -711,7 +744,7 @@ function resolveOpenVpnBinary(): string {
   for (const candidate of ['/usr/sbin/openvpn', '/sbin/openvpn', '/usr/bin/openvpn']) {
     if (existsSync(candidate)) return candidate
   }
-  throw new Error('openvpn is not installed — install the openvpn package.')
+  throw new Error('openvpn is not installed. Install the openvpn package.')
 }
 
 /** Check if our OpenVPN interface (sntl-ovpn) is currently up */
@@ -871,6 +904,111 @@ export function connectXRayFromConfig(configString: string, dohResolverIp?: stri
 }
 
 /**
+ * Where the entry-only provisioning proxy listens. Deliberately not 1080: that is the
+ * live tunnel's listener, and although the UI refuses to build a chain while connected,
+ * a fixed separate port means the two can never fight over it even if that changes.
+ */
+export const PROVISION_SOCKS_PORT = 1081
+const PROVISION_READY_TIMEOUT_MS = 8000
+
+/** A running provisioning proxy. `stop()` is idempotent and must always be called. */
+export interface ProvisioningProxy {
+  port: number
+  stop: () => void
+}
+
+/**
+ * Start a SHORT-LIVED xray whose only job is to relay a handful of HTTPS requests
+ * through the entry hop, so the exit hop is graded, preflighted and handshaked without
+ * ever seeing the user's address (see buildEntryOnlyConfig).
+ *
+ * Deliberately NOT registered as the active connection: it never touches activeChild,
+ * activeProtocol, activeConfigFile or activeMode. Registering it would make
+ * getConnectionStatus() report "connected" and isVpnActive() return true while a chain
+ * is still being bought — which would, among other things, make the app treat the chain
+ * as unreachable and serve cached balances mid-purchase.
+ *
+ * It also has its own spawn rather than reusing spawnV2Ray: it wants none of that
+ * function's lifecycle (no shared log file, no shared stderr ring buffer, and above all
+ * no exit handler that tears the TUN down). Its output is captured locally and attached
+ * to the failure, which is the only place it is useful.
+ *
+ * Runs on the xray binary for the same reason a chain does: xray-core is a strict
+ * superset of what the builder emits, so one runtime covers a v2ray or an xray entry.
+ */
+export async function startProvisioningProxy(configString: string): Promise<ProvisioningProxy> {
+  const bin = resolveXRayBinary()
+  if (bin === 'xray' && !binaryExists('xray')) {
+    throw new Error('xray binary not found. The bundled binary is missing and no system xray is installed.')
+  }
+
+  // Same untrusted-node-config treatment the real connect path applies: pin the entry
+  // endpoint to an IP (this one MUST resolve locally — it is the hop we dial directly),
+  // force diagnostics to stderr, then validate before spawning.
+  const cfg = pinV2RayNodeAddresses(withV2RayDiagnosticLog(JSON.parse(configString)), resolveHostToIPv4)
+  assertSafeV2RayConfig(cfg)
+
+  const configFile = join(SECURE_TMPDIR, 'provision.json')
+  writeFileSync(configFile, JSON.stringify(cfg, null, 2), { mode: 0o600 })
+
+  const child = spawn(bin, ['run', '-c', configFile], { stdio: ['ignore', 'pipe', 'pipe'], env: coreEnv(bin) })
+  let output = ''
+  const collect = (chunk: Buffer): void => {
+    output += chunk.toString()
+    if (output.length > 4096) output = output.slice(-4096)
+  }
+  child.stdout?.on('data', collect)
+  child.stderr?.on('data', collect)
+
+  let stopped = false
+  const stop = (): void => {
+    if (stopped) return
+    stopped = true
+    try { child.kill('SIGTERM') } catch { /* already gone */ }
+    try { if (existsSync(configFile)) unlinkSync(configFile) } catch { /* best-effort */ }
+  }
+
+  try {
+    await waitForListener(PROVISION_SOCKS_PORT, child, PROVISION_READY_TIMEOUT_MS)
+  } catch (err) {
+    stop()
+    const detail = output.trim().slice(0, 500)
+    throw new Error(
+      `Could not start the entry hop for provisioning: ${err instanceof Error ? err.message : String(err)}` +
+      (detail ? `\n\nxray output:\n${detail}` : ''),
+    )
+  }
+
+  return { port: PROVISION_SOCKS_PORT, stop }
+}
+
+/**
+ * Resolve once the proxy is accepting connections, reject if it dies or never listens.
+ * Polling a real TCP connect rather than sleeping a fixed interval: this sits in front
+ * of a purchase, so being slower than necessary costs the user time and being faster
+ * than the listener costs a false failure.
+ */
+function waitForListener(port: number, child: ChildProcess, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  return new Promise((resolve, reject) => {
+    const attempt = (): void => {
+      if (child.exitCode !== null) {
+        reject(new Error(`xray exited with code ${child.exitCode} before it began listening`))
+        return
+      }
+      const probe = netConnect({ host: '127.0.0.1', port })
+      probe.once('connect', () => { probe.destroy(); resolve() })
+      probe.once('error', () => {
+        probe.destroy()
+        if (Date.now() > deadline) reject(new Error(`nothing listening on 127.0.0.1:${port} after ${timeoutMs}ms`))
+        else setTimeout(attempt, 150)
+      })
+    }
+    attempt()
+  })
+}
+
+/**
  * Connect a Hysteria2 (QUIC) tunnel from a config string. The hysteria client exposes
  * a loopback SOCKS5 listener that tun2socks routes through — the same path as
  * v2ray/xray — so only the binary (`hysteria client -c`) and the config shape differ.
@@ -955,6 +1093,16 @@ export async function disconnect(): Promise<void> {
   if (existsSync(V2RAY_CONFIG)) {
     try { unlinkSync(V2RAY_CONFIG) } catch { /* ignore */ }
   }
+
+  // And the core's log. It is only diagnostic while the tunnel is up (getV2RayError
+  // reads the in-memory ring buffer, not this file), but at `loglevel: warning` xray
+  // records dial failures and the destinations behind them — for a chain, both hops'
+  // addresses and the sites that failed to load. Leaving that on disk after the
+  // session is over is a record of where the user went, kept by a VPN client.
+  if (activeLogPath && existsSync(activeLogPath)) {
+    try { unlinkSync(activeLogPath) } catch { /* ignore */ }
+  }
+  activeLogPath = null
 
   activeProtocol = null
   activeMode = 'tunnel'

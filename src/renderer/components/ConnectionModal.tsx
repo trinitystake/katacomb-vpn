@@ -350,7 +350,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
           )}
           {node.type === 2 && isCleartextConnection(node.connection) && (
             <div className="text-danger text-xs">
-              Unencrypted at the proxy layer — VLess without TLS.
+              Unencrypted at the proxy layer: VLess without TLS.
             </div>
           )}
           <div className="flex justify-between">
@@ -364,7 +364,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
             <div className="text-text-tertiary text-xs">
               {nodeStatus.detail}
               {nodeStatus.state === 'unhealthy' && (
-                <> Reported by the node list, not measured here — the latency below is this
+                <> Reported by the node list, not measured here. The latency below is this
                 client's own probe of the node's API port, so a node can answer that and still
                 fail to build a tunnel.</>
               )}
@@ -379,8 +379,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
             ) : probeResult ? (
               <span className={`font-mono ${probeResult.reachable ? 'text-success' : 'text-danger'}`}>
                 {probeResult.reachable
-                  ? `${probeResult.latencyMs}ms — Reachable`
-                  : `Unreachable${probeResult.error ? ` — ${probeResult.error}` : ''}`}
+                  ? `${probeResult.latencyMs}ms, reachable`
+                  : `Unreachable${probeResult.error ? `: ${probeResult.error}` : ''}`}
               </span>
             ) : (
               <span className="text-text-tertiary">—</span>
@@ -400,10 +400,10 @@ export default function ConnectionModal({ node, onClose }: Props) {
                   <li key={i}>
                     {v.name}{v.iface ? ` (${v.iface})` : ''}
                     {v.type === 'wireguard' && (
-                      <span className="text-danger ml-2">— will be disconnected</span>
+                      <span className="text-danger ml-2">(will be disconnected)</span>
                     )}
                     {v.type !== 'wireguard' && (
-                      <span className="text-warning ml-2">— may cause routing conflicts</span>
+                      <span className="text-warning ml-2">(may cause routing conflicts)</span>
                     )}
                   </li>
                 ))}
@@ -563,7 +563,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
                 <p className="text-text-tertiary text-xs">
                   {mode === 'tunnel'
                     ? 'Routes your whole device through the node (needs admin rights).'
-                    : 'Runs a SOCKS5 proxy on 127.0.0.1:1080 — no admin password, but only apps you point at it are tunneled. No kill switch.'}
+                    : 'Runs a SOCKS5 proxy on 127.0.0.1:1080. No admin password, but only apps you point at it are tunneled. No kill switch.'}
                 </p>
               </div>
             )}
@@ -573,7 +573,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
               <div className="bg-warning-subtle border border-warning p-3 rounded-md space-y-2">
                 <p className="text-warning text-xs">
                   This node last failed the network health check, so connecting is disabled by
-                  default. That check runs elsewhere and can be hours out of date — the node may
+                  default. That check runs elsewhere and can be hours out of date. The node may
                   well be working.
                 </p>
                 <label className="flex items-start gap-2 cursor-pointer text-xs text-text-secondary">
@@ -606,7 +606,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             {!isProtocolSupported(node.type) && (
               <div className="text-xs text-warning text-center pt-1">
-                {protocolMeta(node.type).label} isn't supported by this client yet — this node is shown for filtering only.
+                {protocolMeta(node.type).label} isn't supported by this client yet. This node is shown for filtering only.
               </div>
             )}
 
@@ -670,7 +670,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             {proxyCapable && mode === 'proxy' ? (
               <p className="text-text-tertiary text-sm">
-                SOCKS5 proxy at <span className="font-mono text-text-secondary">127.0.0.1:1080</span> — only apps
+                SOCKS5 proxy at <span className="font-mono text-text-secondary">127.0.0.1:1080</span>. Only apps
                 configured to use it are tunneled. The rest of your traffic still goes out directly.
               </p>
             ) : node.type === 1 ? (

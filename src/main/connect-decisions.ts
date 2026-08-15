@@ -17,11 +17,11 @@ export function sessionFailureMessage(opts: {
   policyRejected: boolean
 }): string {
   const preamble = opts.policyRejected
-    ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting`
+    ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds, not connecting`
     : `Could not establish the tunnel to "${opts.nodeMoniker}": ${trimTrailingStop(opts.reason)}`
   const tail = opts.refunded
     ? `The session was cancelled${opts.isDeposit ? ' and your deposit refunded' : ''}.`
-    : `Could not auto-cancel the session — open the Session tab and cancel session #${opts.sessionId} manually.`
+    : `Could not auto-cancel the session. Open the Session tab and cancel session #${opts.sessionId} manually.`
   return `${preamble}. ${tail}`
 }
 
@@ -78,7 +78,7 @@ export function chainFailureMessage(opts: {
 }): string {
   const where = opts.failedRole ? ` (${opts.failedRole} hop)` : ''
   const preamble = opts.policyRejected
-    ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds — not connecting${where}`
+    ? `Node "${opts.nodeMoniker}" only offers unencrypted (VLess-none) inbounds, not connecting${where}`
     : `Could not establish the two-hop chain${where}: ${trimTrailingStop(opts.reason)}`
 
   if (opts.refunds.length === 0) return `${preamble}. No sessions were created.`
@@ -91,7 +91,7 @@ export function chainFailureMessage(opts: {
   const list = stranded.join(' and ')
   const verb = stranded.length === 1 ? 'session' : 'sessions'
   return (
-    `${preamble}. Could not auto-cancel ${verb} ${list} — open the Session tab and ` +
+    `${preamble}. Could not auto-cancel ${verb} ${list}. Open the Session tab and ` +
     `cancel ${stranded.length === 1 ? 'it' : 'them'} manually.`
   )
 }
@@ -316,16 +316,16 @@ export function deadTunnelMessage(nodeIssuedFreshPeer: boolean, isChain = false)
       'nothing looks exactly like this. End both and build a chain with a different exit.'
   }
   if (nodeIssuedFreshPeer) {
-    return 'The tunnel came up but no traffic is getting through — the node is not carrying ' +
+    return 'The tunnel came up but no traffic is getting through. The node is not carrying ' +
       'traffic for the peer it just issued.\n\n' +
       'Your session is still open and paid for, so retry the connection. If it fails again, ' +
       'end the session and pick a different node.'
   }
-  return 'The tunnel came up but no traffic is getting through — the node has dropped this ' +
+  return 'The tunnel came up but no traffic is getting through. The node has dropped this ' +
     "session's tunnel peer.\n\n" +
     'It will not issue a replacement: the node still holds its own record of the session, and ' +
     'it only clears that once the session is gone from the chain. This session cannot be ' +
-    'reconnected — every attempt rebuilds the same dead tunnel. End it from the Sessions tab ' +
+    'reconnected. Every attempt rebuilds the same dead tunnel. End it from the Sessions tab ' +
     'and start a new session.'
 }
 

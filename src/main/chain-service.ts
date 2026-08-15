@@ -12,18 +12,20 @@ import {
   Wireguard,
   V2Ray,
 } from '@sentinel-official/sentinel-js-sdk'
-import { BrowserWindow, app, safeStorage } from 'electron'
+import { BrowserWindow, app, net, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import { readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { randomUUID } from 'crypto'
+import type https from 'node:https'
 import { join } from 'path'
-import { getRpcEndpoint, isSecureStorageAvailable } from './settings'
+import { getRpcEndpoint, isSecureStorageAvailable, loadSettings } from './settings'
 import { writeFileAtomic } from './fs-utils'
 import { withTimeout } from './async-utils'
 import { assertTxSucceeded, broadcastOrTimeout, isSessionNotActive } from './tx-utils'
-import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl } from './config-guard'
+import { filterV2RayMetadata, isAllCleartext, v2raySecurityBadge, isSafeNodeApiUrl, DOH_ENDPOINTS } from './config-guard'
 import { buildXRayConfig } from './xray-config'
 import { buildMultihopConfig, type HopSpec } from './multihop-config'
+import { buildHandshakeBody, postHandshake } from './node-handshake'
 import { buildHysteria2Config } from './hysteria-config'
 import { buildAmneziaWgConfig } from './amneziawg-config'
 import { buildOpenVpnConfig } from './openvpn-config'
@@ -34,6 +36,10 @@ const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 // to the handshake POST (the SDK's axios call has no timeout), which would wedge
 // the paid connect flow forever — bound the wait so it fails into the refund path.
 const HANDSHAKE_TIMEOUT_MS = 15_000
+// The same wait, for a handshake that crosses the entry hop on its way to the exit (see
+// handshakeChainExit). Failing this one costs a session that is already paid for, so it
+// is deliberately generous about latency we added ourselves.
+const PROXIED_HANDSHAKE_TIMEOUT_MS = 30_000
 // Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
 const RPC_CONNECT_TIMEOUT_MS = 10_000
 // Blocks of validity for a session-creating tx (~6s/block on chain → ~3 min).
@@ -41,11 +47,11 @@ const RPC_CONNECT_TIMEOUT_MS = 10_000
 // stopped polling (finding H2).
 const TX_TIMEOUT_HEIGHT_OFFSET = 30
 const SESSION_TX_TIMEOUT_MESSAGE =
-  'The transaction timed out before confirmation. It may still be processing — check ' +
+  'The transaction timed out before confirmation. It may still be processing. Check ' +
   'the Session tab shortly and cancel any unexpected session to reclaim your funds.'
 const END_SESSION_TX_TIMEOUT_MESSAGE =
-  'The cancel transaction timed out before confirmation. It may still be processing — ' +
-  'refresh the Session tab shortly to see whether the session ended.'
+  'The cancel transaction timed out before confirmation. It may still be processing. ' +
+  'Refresh the Session tab shortly to see whether the session ended.'
 
 // --- Session config persistence ---
 
@@ -656,15 +662,49 @@ export interface ChainHopParams {
 }
 
 /**
- * Announce which hop the next steps belong to.
+ * Announce which hop the next steps belong to, and WHICH PHASE of it.
  *
- * A chain runs the purchase sequence TWICE, so the shared 1/5..3/5 progress replays
- * from the start halfway through and reads as the connect having restarted. The
- * renderer keys off this to show the two hops as separate, independently tracked
- * stages instead.
+ * A chain runs the shared 1/5..3/5 sequence twice, so without a marker the progress
+ * list replays from the start halfway through and reads as the connect having
+ * restarted. The renderer keys off this to track the two hops as separate stages.
+ *
+ * The phase is load-bearing, not decoration. A chain buys both hops and only then
+ * handshakes both, so the roles are announced twice each in the order entry, exit,
+ * entry, exit. Keyed on the role alone, the renderer drove each hop's state straight
+ * off the last marker and the display went backwards mid-build: the exit returned to
+ * "pending" and the entry to "active" when the handshakes began. With the phase, each
+ * hop's stage only ever moves forward.
  */
-export function sendChainHopProgress(role: 'entry' | 'exit'): void {
-  sendProgress(`hop:${role}`, role === 'entry' ? 'Entry hop' : 'Exit hop')
+export function sendChainHopProgress(role: 'entry' | 'exit', phase: 'buy' | 'provision' | 'handshake'): void {
+  sendProgress(`hop:${role}:${phase}`, role === 'entry' ? 'Entry hop' : 'Exit hop')
+}
+
+/**
+ * Which hop of a chain an error came from. Recorded on the error object itself
+ * (non-enumerable, so it never shows up in a serialized log line) rather than by
+ * wrapping it, because the callers still need `err instanceof V2RayPolicyError` and
+ * the axios `response` body that describeHandshakeError reads.
+ *
+ * Without it every failure from performChainHandshake reached the caller untagged and
+ * was attributed to the entry hop: a cleartext EXIT produced `Node "<entry moniker>"
+ * only offers unencrypted (VLess-none) inbounds`, naming the wrong node to replace at
+ * the exact moment the user is deciding what to buy instead.
+ */
+const CHAIN_HOP_ROLE = 'chainHopRole'
+
+function tagChainHopRole<T>(err: T, role: 'entry' | 'exit'): T {
+  if (err !== null && typeof err === 'object') {
+    try {
+      Object.defineProperty(err, CHAIN_HOP_ROLE, { value: role, enumerable: false, configurable: true })
+    } catch { /* frozen error object — the message still carries the role */ }
+  }
+  return err
+}
+
+/** The hop an error was tagged with, or null when it wasn't hop-specific. */
+export function chainHopRoleOf(err: unknown): 'entry' | 'exit' | null {
+  const role = (err as Record<string, unknown> | null)?.[CHAIN_HOP_ROLE]
+  return role === 'entry' || role === 'exit' ? role : null
 }
 
 /**
@@ -678,74 +718,177 @@ async function handshakeChainHop(
   hop: ChainHopParams,
   privKey: Uint8Array,
   role: 'entry' | 'exit',
+  /**
+   * Route this hop's handshake through a proxy instead of dialling it directly. Set for
+   * the EXIT hop, whose request must appear to come from the entry node rather than from
+   * the user (see startProvisioningProxy). The SDK's own handshake cannot take an agent,
+   * so an agent means our own equivalent request — proven byte-identical to the SDK's in
+   * node-handshake.test.ts.
+   */
+  agent?: https.Agent,
 ): Promise<HopSpec> {
-  const keygen = new V2Ray()
-  const result = await withTimeout(
-    sdkHandshake(Long.fromString(hop.sessionId, true), { uuid: keygen.getKey() }, privKey, hop.remoteUrl),
-    HANDSHAKE_TIMEOUT_MS,
-    `${role} node handshake`,
-  )
+  try {
+    const keygen = new V2Ray()
+    const peerRequest = { uuid: keygen.getKey() }
+    const result = await withTimeout(
+      agent
+        ? postHandshake(
+            hop.remoteUrl,
+            await buildHandshakeBody(hop.sessionId, peerRequest, privKey),
+            { agent, timeoutMs: HANDSHAKE_TIMEOUT_MS },
+          )
+        : sdkHandshake(Long.fromString(hop.sessionId, true), peerRequest, privKey, hop.remoteUrl),
+      agent ? PROXIED_HANDSHAKE_TIMEOUT_MS : HANDSHAKE_TIMEOUT_MS,
+      `${role} node handshake`,
+    )
 
-  const handshakeData = parseHandshakeData(result)
-  const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
+    const handshakeData = parseHandshakeData(result)
+    const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
 
-  // Same encryption policy as single-hop, applied per hop so the failure names the
-  // offending node. buildMultihopConfig re-checks, but this throws the typed error
-  // the connect handlers already translate into a refund.
-  if (metadata.length > 0 && isAllCleartext(metadata)) {
-    throw new V2RayPolicyError(hop.nodeMoniker || hop.nodeAddress, v2raySecurityBadge(metadata))
-  }
+    // Same encryption policy as single-hop, applied per hop so the failure names the
+    // offending node. buildMultihopConfig re-checks, but this throws the typed error
+    // the connect handlers already translate into a refund.
+    if (metadata.length > 0 && isAllCleartext(metadata)) {
+      throw new V2RayPolicyError(hop.nodeMoniker || hop.nodeAddress, v2raySecurityBadge(metadata))
+    }
 
-  return {
-    protocol: hop.nodeType === 4 ? 'xray' : 'v2ray',
-    metadata,
-    addrs: Array.isArray(result.addrs) ? result.addrs : [],
-    uuid: keygen.uuid,
+    return {
+      protocol: hop.nodeType === 4 ? 'xray' : 'v2ray',
+      metadata,
+      addrs: Array.isArray(result.addrs) ? result.addrs : [],
+      uuid: keygen.uuid,
+    }
+  } catch (err) {
+    // Everything in here is attributable to ONE node, so say which before it reaches
+    // establishChainOrRefund, whose own failedRole only ever covers the two endpoint
+    // resolves (see chainHopRoleOf).
+    throw tagChainHopRole(err, role)
   }
 }
 
+// Where to resolve the EXIT hop's hostname, when the user has not picked a resolver
+// of their own. Any of DOH_ENDPOINTS would do; this is the app's existing default
+// (DEFAULT_KILLSWITCH_DNS).
+const DEFAULT_EXIT_DOH = DOH_ENDPOINTS['1.1.1.1']!
+const EXIT_RESOLVE_TIMEOUT_MS = 5000
+
 /**
- * Handshake BOTH hops of a multihop chain and build the single chained config.
+ * Resolve the EXIT hop's hostname over DNS-over-HTTPS, before the tunnel exists.
  *
- * Both sessions must already be paid for; the caller (establishChainOrRefund) is
- * responsible for cancelling BOTH if anything here throws. Nothing is persisted
- * until both hops have succeeded, so a half-built chain leaves no stale config.
+ * Nodes advertise themselves by hostname, and every outbound address has to be an
+ * IPv4 literal by the time xray runs: pinV2RayNodeAddresses does that with `getent`,
+ * i.e. the system resolver, i.e. the user's ISP. For the ENTRY that costs nothing (we
+ * are about to dial it directly, in the open). For the EXIT it hands the local network
+ * the one fact a chain is bought to hide: which exit was chosen. No packet is ever
+ * sent to that address directly, so the DNS query was the entire leak.
  *
- * The result is always run on the **xray** binary regardless of the hops' node
- * types: xray-core is a v2ray-core fork and a strict superset of what we emit
- * (vmess + vless, tcp/ws/grpc, tls + reality), so one runtime covers every
- * entry/exit combination and there is no v2ray-vs-xray binary decision to get
- * wrong at bring-up.
+ * Doing it here, rather than leaving the exit as a hostname for the entry node to
+ * resolve, is deliberate. Not pinning it would be the cleaner fix ONLY if xray never
+ * resolves a detoured destination locally; if it ever does, the query is emitted after
+ * the TUN is up, routes into the tunnel, and needs the exit reachable in order to
+ * resolve the exit. That is the v2ray DNS deadlock, on a path that has already spent
+ * two deposits, so this takes the version that cannot deadlock.
  *
- * The same chained config is saved under BOTH session ids: reconnect can then
- * rebuild the whole chain from either hop's record, and `SavedSessionConfig` stays
- * exactly as it is (one protocol, one config string, one node address per file).
+ * Best-effort by design: on any failure the address is left as a hostname and
+ * pinV2RayNodeAddresses resolves it the old way at connect time. A resolver the user
+ * chose is preferred over the default, and either way the query goes to a DoH provider
+ * over HTTPS rather than to the ISP in cleartext.
  */
-export async function performChainHandshake(params: {
+async function resolveExitHostPrivately(host: string): Promise<string | null> {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return host
+  // Bare hostname only. Anything else (a host:port, a URL, an IPv6 literal) is left
+  // alone for the existing path to deal with.
+  if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(host)) return null
+  const endpoint = DOH_ENDPOINTS[loadSettings().dnsResolver] ?? DEFAULT_EXIT_DOH
+  try {
+    const res = await net.fetch(`${endpoint.url}?name=${encodeURIComponent(host)}&type=A`, {
+      headers: { accept: 'application/dns-json' },
+      signal: AbortSignal.timeout(EXIT_RESOLVE_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    const body = await res.json() as { Answer?: { type?: number; data?: string }[] }
+    const answer = (body.Answer ?? []).find(
+      (a) => a.type === 1 && typeof a.data === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(a.data),
+    )
+    return answer?.data ?? null
+  } catch {
+    return null
+  }
+}
+
+/** The exit hop's addresses with any hostname replaced by a privately-resolved IPv4. */
+async function withPrivatelyResolvedAddrs(addrs: string[]): Promise<string[]> {
+  return Promise.all(addrs.map(async (a) => {
+    if (typeof a !== 'string' || a === '') return a
+    return (await resolveExitHostPrivately(a)) ?? a
+  }))
+}
+
+/**
+ * A chain's handshakes happen in THREE phases, not one, because the exit hop must never
+ * be contacted from the user's own address:
+ *
+ *   1. `handshakeChainEntry` — direct. The entry is the hop this device dials, so it
+ *      sees the address no matter what we do.
+ *   2. the caller stands up an entry-only proxy from that spec (see
+ *      buildEntryOnlyConfig / startProvisioningProxy)
+ *   3. `handshakeChainExit` — through that proxy, so the exit sees the ENTRY.
+ *   4. `finalizeChain` — build the chained config and persist it under both ids.
+ *
+ * They were one function until the exit's exposure was found; splitting them is what
+ * lets a live entry sit between the two. The caller (establishChainOrRefund) still owns
+ * cancelling whatever has been paid for if any phase throws, and nothing is persisted
+ * until `finalizeChain`, so a half-built chain leaves no stale config behind.
+ */
+export async function handshakeChainEntry(entry: ChainHopParams, privKey: Uint8Array): Promise<HopSpec> {
+  sendChainHopProgress('entry', 'handshake')
+  sendProgress('4/5', 'Handshaking entry node...')
+  return handshakeChainHop(entry, privKey, 'entry')
+}
+
+/**
+ * Handshake the exit THROUGH `agent`, which must be a proxy that egresses via the entry
+ * hop. Passing no agent would silently restore the leak this exists to close, so it is
+ * required rather than optional.
+ *
+ * `exitPrivKey` is the account that paid for the exit session: a node verifies the
+ * handshake against the session's own `accAddress`, so signing it with the entry's key
+ * is rejected outright once the hops are on separate wallets.
+ */
+export async function handshakeChainExit(
+  exit: ChainHopParams,
+  exitPrivKey: Uint8Array,
+  agent: https.Agent,
+): Promise<HopSpec> {
+  sendChainHopProgress('exit', 'handshake')
+  sendProgress('4/5', 'Handshaking exit node through the entry...')
+  return handshakeChainHop(exit, exitPrivKey, 'exit', agent)
+}
+
+/**
+ * Build the chained config from the two hop specs and save it under BOTH session ids, so
+ * a reconnect from either hop rebuilds the whole chain and `SavedSessionConfig` stays as
+ * it is (one protocol, one config string, one node address per file).
+ *
+ * The result always runs on the **xray** binary regardless of the hops' node types:
+ * xray-core is a v2ray-core fork and a strict superset of what we emit (vmess + vless,
+ * tcp/ws/grpc, tls + reality), so one runtime covers every entry/exit combination and
+ * there is no v2ray-vs-xray binary decision to get wrong at bring-up.
+ */
+export async function finalizeChain(params: {
   entry: ChainHopParams
   exit: ChainHopParams
-  /** Signs the ENTRY hop's handshake — the account that paid for that session. */
-  privKey: Uint8Array
-  /**
-   * Signs the EXIT hop's handshake. Defaults to `privKey` when both hops are on one
-   * wallet. A node verifies the handshake against the session's own `accAddress`, so
-   * signing the exit with the entry's key is rejected outright once the hops are on
-   * separate accounts.
-   */
-  exitPrivKey?: Uint8Array
+  entrySpec: HopSpec
+  exitSpec: HopSpec
 }): Promise<{ protocol: 'xray'; configString: string }> {
-  const { entry, exit, privKey } = params
-  const exitPrivKey = params.exitPrivKey ?? privKey
+  const { entry, exit, entrySpec, exitSpec } = params
 
-  sendChainHopProgress('entry')
-  sendProgress('4/5', 'Handshaking entry node...')
-  const entrySpec = await handshakeChainHop(entry, privKey, 'entry')
+  // The exit's address is resolved HERE, over DoH, so the ISP never sees a lookup for
+  // it (see resolveExitHostPrivately). The entry is left alone: it is dialled directly
+  // anyway, and the kill switch needs the same IP getent would return.
+  const exitPinned: HopSpec = { ...exitSpec, addrs: await withPrivatelyResolvedAddrs(exitSpec.addrs) }
 
-  sendChainHopProgress('exit')
-  sendProgress('4/5', 'Handshaking exit node...')
-  const exitSpec = await handshakeChainHop(exit, exitPrivKey, 'exit')
-
-  const configString = JSON.stringify(buildMultihopConfig(entrySpec, exitSpec), null, 2)
+  const configString = JSON.stringify(buildMultihopConfig(entrySpec, exitPinned), null, 2)
 
   for (const [hop, peer, role] of [[entry, exit, 'entry'], [exit, entry, 'exit']] as const) {
     saveSessionConfig({

@@ -30,7 +30,8 @@ import {
   logout,
   type SessionInfo,
 } from './wallet'
-import { subscribeToNode, performHandshake, performChainHandshake, sendChainHopProgress, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
+import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
+import type https from 'node:https'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
@@ -80,6 +81,10 @@ import {
   getOpenVpnRemoteHost,
   isWireGuardUp,
   isOpenVpnUp,
+  hasDefaultRouteChanged,
+  startProvisioningProxy,
+  PROVISION_SOCKS_PORT,
+  type ProvisioningProxy,
   binaryExists,
   isBinaryAvailable,
   protocolRuntimeError,
@@ -89,7 +94,8 @@ import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './c
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './traffic-stats'
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './node-tester'
-import { classifyHopEligibility, type HopMetadataEntry } from './multihop-config'
+import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './multihop-config'
+import { SocksHttpsAgent } from './socks-agent'
 import { onV2RayUnexpectedExit } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
@@ -111,6 +117,9 @@ const RECONNECT_MAX_ATTEMPTS = 5
 const REFUND_TIMEOUT_MS = 30_000
 // Bound the pre-payment protocol check — it blocks the connect button.
 const NODE_PROTOCOL_CHECK_TIMEOUT_MS = 10_000
+// The same check for a chain's EXIT hop, which is asked THROUGH the entry: one more hop
+// each way, and a timeout here strands an entry session that is already bought.
+const NODE_CHECK_VIA_PROXY_TIMEOUT_MS = 25_000
 // A node's advertised inbounds change only when its operator reconfigures it, so a
 // long TTL is safe and keeps the multihop picker from re-probing on every render.
 const CHAIN_ELIGIBILITY_TTL_MS = 10 * 60 * 1000
@@ -332,14 +341,39 @@ function isRootTunnelProtocol(p: typeof desiredProtocol): boolean {
   return p === 'wireguard' || p === 'amneziawg' || p === 'openvpn'
 }
 
+/**
+ * Tunnel liveness, on one timer for every protocol. Two different things are watched,
+ * because the two families fail differently:
+ *
+ *  - root protocols (wg/awg/openvpn): the interface itself can vanish, and there is no
+ *    child process to notice it for us.
+ *  - child-proxy protocols (v2ray/xray/hysteria2, so every multihop chain): the process
+ *    stays alive and the TUN stays up, but tun2socks' bypass route to the node is
+ *    pinned to the gateway and interface that existed at bring-up. Switch from Wi-Fi to
+ *    wired, or resume onto a different network, and that route points at a gateway that
+ *    is no longer there: traffic dies inside the tunnel with nothing reporting it. The
+ *    only thing that used to catch it was checkTunnelStalled, 64 KB and 90 s later, and
+ *    only if the user kept generating traffic. Nothing leaks (the packets die in the
+ *    TUN), but the UI says "connected" for up to two minutes.
+ *
+ * Proxy mode is excluded: it changes no routing, so the default route means nothing
+ * to it.
+ */
 function startRootTunnelMonitor(): void {
   if (wgMonitorTimer) return
   wgMonitorTimer = setInterval(() => {
-    if (!isRootTunnelProtocol(desiredProtocol) || isIntentionalDisconnect || reconnectAttempt > 0) return
+    if (isIntentionalDisconnect || reconnectAttempt > 0) return
     if (!activeSessionId) return
-    const up = desiredProtocol === 'openvpn' ? isOpenVpnUp() : isWireGuardUp()
-    if (!up) {
-      console.log(`[vpn] ${desiredProtocol} interface dropped, attempting reconnect...`)
+    if (isRootTunnelProtocol(desiredProtocol)) {
+      const up = desiredProtocol === 'openvpn' ? isOpenVpnUp() : isWireGuardUp()
+      if (!up) {
+        console.log(`[vpn] ${desiredProtocol} interface dropped, attempting reconnect...`)
+        attemptReconnect()
+      }
+      return
+    }
+    if (desiredProtocol !== null && desiredMode === 'tunnel' && hasDefaultRouteChanged()) {
+      console.log('[vpn] default route changed under the tunnel, attempting reconnect...')
       attemptReconnect()
     }
   }, 5000)
@@ -392,6 +426,8 @@ let lastExpiry: {
   nodeMoniker: string
   reason: 'time' | 'data' | 'stalled'
   trafficBlocked: boolean
+  /** MULTIHOP: which end of the chain ran out. Absent for an ordinary session. */
+  chainRole?: 'entry' | 'exit'
 } | null = null
 
 // Quota is coarse — the 5s interface poll is not a useful cadence for it.
@@ -460,19 +496,24 @@ function verdictFor(quota: ActiveQuota) {
 }
 
 /**
- * The binding quota verdict. With a multihop chain there are two paid sessions and
- * the tunnel dies when EITHER runs out, so the worst verdict wins — by level first,
- * then by how far through the cap it is.
+ * The binding quota verdict, and WHICH session produced it. With a multihop chain
+ * there are two paid sessions and the tunnel dies when EITHER runs out, so the worst
+ * verdict wins — by level first, then by how far through the cap it is.
+ *
+ * The session id travels with the verdict because the two hops are different nodes:
+ * reporting an expiry against the entry when it was the exit that ran out names the
+ * wrong node to replace.
  */
-function currentQuotaVerdict() {
-  const verdicts = [activeQuota, activeExitQuota]
+function currentQuotaVerdict(): { verdict: QuotaVerdict; sessionId: string } | null {
+  const scored = [activeQuota, activeExitQuota]
     .filter((q): q is ActiveQuota => q !== null)
-    .map(verdictFor)
-  if (verdicts.length === 0) return null
-  return verdicts.reduce((worst, v) =>
-    QUOTA_LEVEL_RANK[v.level] > QUOTA_LEVEL_RANK[worst.level] ||
-    (QUOTA_LEVEL_RANK[v.level] === QUOTA_LEVEL_RANK[worst.level] && quotaPct(v) > quotaPct(worst))
-      ? v
+    .map((q) => ({ verdict: verdictFor(q), sessionId: q.sessionId }))
+  if (scored.length === 0) return null
+  return scored.reduce((worst, s) =>
+    QUOTA_LEVEL_RANK[s.verdict.level] > QUOTA_LEVEL_RANK[worst.verdict.level] ||
+    (QUOTA_LEVEL_RANK[s.verdict.level] === QUOTA_LEVEL_RANK[worst.verdict.level] &&
+      quotaPct(s.verdict) > quotaPct(worst.verdict))
+      ? s
       : worst,
   )
 }
@@ -490,6 +531,17 @@ function startQuotaWatchdog(): void {
   if (activeSessionId && activeQuota?.sessionId !== activeSessionId) {
     setQuota((lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeSessionId))
   }
+  // MULTIHOP: the exit hop needs the identical repair, and for a stronger reason.
+  // The chain branch of CONNECTION_RECONNECT restores activeExitSessionId but has no
+  // quota to restore (the purchase that captured one was an earlier run), so without
+  // this a reconnected chain is scored on the ENTRY alone — currentQuotaVerdict reads
+  // 'ok' while the exit is exhausted, and the only thing left to notice is
+  // checkTunnelStalled, 64 KB and 90 s later. That is the whole "worst verdict wins"
+  // rule sitting inert on the path it matters most on.
+  if (activeExitSessionId && activeExitQuota?.sessionId !== activeExitSessionId) {
+    const exitRow = (lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeExitSessionId)
+    activeExitQuota = exitRow ? quotaFromSessionRow(exitRow) : null
+  }
   // Before the timer guard: an auto-reconnect re-enters here with the timer already
   // running, and the clock still has to start on the first bring-up of the session.
   connectedAtMs ??= Date.now()
@@ -506,10 +558,11 @@ function startQuotaWatchdog(): void {
       void standDownSession('stalled')
       return
     }
-    const verdict = currentQuotaVerdict()
-    if (!verdict) return
+    const scored = currentQuotaVerdict()
+    if (!scored) return
+    const verdict = scored.verdict
     if (verdict.level === 'expired') {
-      void standDownSession(verdict.reason)
+      void standDownSession(verdict.reason, scored.sessionId)
       return
     }
     if (verdict.level === 'warn' && !quotaWarned) {
@@ -651,10 +704,28 @@ function notify(title: string, body: string): void {
  * next launch, by design — that self-heal is load-bearing (it is what rescues a user
  * from a chain stranded by a crash) and must NOT be weakened to preserve this state.
  */
-async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<void> {
-  const sessionId = activeSessionId
-  if (!sessionId) return
-  const nodeMoniker = activeNodeInfo?.moniker || ''
+async function standDownSession(
+  reason: 'time' | 'data' | 'stalled',
+  /**
+   * MULTIHOP: the hop whose quota actually ran out, when that is known. Both hops are
+   * separate nodes on separate deposits, so reporting the entry's name for an exit
+   * expiry sends the user off to replace the wrong one. Absent for a stall, which
+   * nothing can attribute to an end: the report then falls back to the entry (the
+   * only hop a single-hop session has) and claims no role.
+   */
+  endedSessionId?: string,
+): Promise<void> {
+  if (!activeSessionId) return
+  const isExitHop = endedSessionId !== undefined && endedSessionId === activeExitSessionId
+  const sessionId = isExitHop ? endedSessionId : activeSessionId
+  const nodeMoniker = (isExitHop ? activeExitNodeInfo?.moniker : activeNodeInfo?.moniker) || ''
+  // Only claim a hop when one was actually identified. A stall carries no session id
+  // (nothing can attribute it to one end), and naming a hop there would be a guess
+  // dressed up as a fact.
+  const chainRole: 'entry' | 'exit' | undefined =
+    activeExitSessionId === null || endedSessionId === undefined
+      ? undefined
+      : isExitHop ? 'exit' : 'entry'
   console.log(
     reason === 'stalled'
       ? `[vpn] session #${sessionId} tunnel stopped carrying traffic — disconnecting`
@@ -706,7 +777,7 @@ async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<vo
     // idempotent click to clear) rather than under-reporting it (user stranded). If
     // arming truly failed, the Restore button runs killswitch-off (idempotent) and
     // everything self-corrects.
-    lastExpiry = { sessionId, nodeMoniker, reason, trafficBlocked: isKillSwitchArmed() }
+    lastExpiry = { sessionId, nodeMoniker, reason, trafficBlocked: isKillSwitchArmed(), chainRole }
     isIntentionalDisconnect = false
     sendStateChange('idle')
   })
@@ -716,11 +787,11 @@ async function standDownSession(reason: 'time' | 'data' | 'stalled'): Promise<vo
     'Katacomb VPN',
     reason === 'stalled'
       ? blocked
-        ? 'The tunnel stopped carrying traffic — disconnected. The kill switch is still blocking all traffic.'
-        : 'The tunnel stopped carrying traffic — disconnected.'
+        ? 'The tunnel stopped carrying traffic, so it was disconnected. The kill switch is still blocking all traffic.'
+        : 'The tunnel stopped carrying traffic, so it was disconnected.'
       : blocked
-        ? 'Session ended — VPN disconnected. The kill switch is still blocking all traffic.'
-        : 'Session ended — VPN disconnected.',
+        ? 'Session ended, VPN disconnected. The kill switch is still blocking all traffic.'
+        : 'Session ended, VPN disconnected.',
   )
 }
 
@@ -937,7 +1008,7 @@ function describeHandshakeError(err: unknown): string {
       detail = obj.error?.message ?? obj.error ?? obj.message ?? JSON.stringify(obj)
     }
     const detailStr = typeof detail === 'string' ? detail.trim().slice(0, 300) : ''
-    return `node returned HTTP ${response.status ?? '?'}${detailStr ? ` — ${detailStr}` : ''}`
+    return `node returned HTTP ${response.status ?? '?'}${detailStr ? `: ${detailStr}` : ''}`
   }
   return err instanceof Error ? err.message : String(err)
 }
@@ -959,12 +1030,21 @@ const NODE_TYPE_TO_PROTOCOL: Record<number, 'wireguard' | 'v2ray' | 'xray' | 'am
  *
  * Throws with an actionable message; never silently downgrades.
  */
-async function preflightConnect(nodeType: number, apiField: string): Promise<void> {
+async function preflightConnect(
+  nodeType: number,
+  apiField: string,
+  /**
+   * Ask the node through this proxy instead of directly. Set for a chain's EXIT hop, so
+   * the question arrives from the entry node rather than from the user (see
+   * establishChainOrRefund).
+   */
+  agent?: https.Agent,
+): Promise<void> {
   const protocol = NODE_TYPE_TO_PROTOCOL[nodeType]
   if (!protocol) throw new Error(`Unsupported nodeType ${nodeType}`)
 
   const runtimeError = protocolRuntimeError(protocol)
-  if (runtimeError) throw new Error(`Can't connect — not charged. ${runtimeError}`)
+  if (runtimeError) throw new Error(`Can't connect, not charged. ${runtimeError}`)
 
   // WireGuard/AmneziaWG/OpenVPN go up as root: without the daemon or the helper the
   // bring-up has no way to escalate and would fail after payment.
@@ -972,7 +1052,7 @@ async function preflightConnect(nodeType: number, apiField: string): Promise<voi
     if (!canEscalatePrivileges()) {
       const label = protocol === 'wireguard' ? 'WireGuard' : protocol === 'amneziawg' ? 'AmneziaWG' : 'OpenVPN'
       throw new Error(
-        `Can't connect — not charged. The privileged helper isn't installed, so ${label} can't be brought up. Restart the app and accept the helper setup prompt.`
+        `Can't connect, not charged. The privileged helper isn't installed, so ${label} can't be brought up. Restart the app and accept the helper setup prompt.`
       )
     }
   }
@@ -982,16 +1062,20 @@ async function preflightConnect(nodeType: number, apiField: string): Promise<voi
     // nodeFetch's own 8s timeout only covers socket inactivity, not the TCP
     // connect — a blackholed node hangs well past it (measured). This gate sits
     // in front of the connect button, so bound the whole wait.
-    reported = await withTimeout(fetchNodeServiceType(apiField), NODE_PROTOCOL_CHECK_TIMEOUT_MS, 'node protocol check')
+    reported = await withTimeout(
+      fetchNodeServiceType(apiField, agent),
+      agent ? NODE_CHECK_VIA_PROXY_TIMEOUT_MS : NODE_PROTOCOL_CHECK_TIMEOUT_MS,
+      'node protocol check',
+    )
   } catch (err) {
     const reason = err instanceof Error ? err.message : 'unknown error'
-    throw new Error(`Node is unreachable — not charged (${reason}). Pick another node.`)
+    throw new Error(`Node is unreachable, not charged (${reason}). Pick another node.`)
   }
 
   const actualType = serviceTypeToNodeType(reported)
   if (actualType !== nodeType) {
     throw new Error(
-      `Node protocol mismatch — not charged. The node reports "${reported}" but the node list says ` +
+      `Node protocol mismatch, not charged. The node reports "${reported}" but the node list says ` +
       `${protocol}. Refresh the node list and pick another node.`
     )
   }
@@ -1014,19 +1098,21 @@ async function preflightConnect(nodeType: number, apiField: string): Promise<voi
 async function assertChainEligible(
   hop: { nodeAddress: string; nodeMoniker: string; nodeType: number; apiField: string },
   role: 'entry' | 'exit',
+  /** Ask through this proxy rather than directly. Set for the EXIT hop. */
+  agent?: https.Agent,
 ): Promise<void> {
   const name = hop.nodeMoniker || hop.nodeAddress
   let metadata: HopMetadataEntry[]
   try {
     metadata = (await withTimeout(
-      fetchNodeServiceMetadata(hop.apiField),
-      NODE_PROTOCOL_CHECK_TIMEOUT_MS,
+      fetchNodeServiceMetadata(hop.apiField, agent),
+      agent ? NODE_CHECK_VIA_PROXY_TIMEOUT_MS : NODE_PROTOCOL_CHECK_TIMEOUT_MS,
       'node inbound listing',
     )) as HopMetadataEntry[]
   } catch (err) {
     const reason = err instanceof Error ? err.message : 'unknown error'
     throw new Error(
-      `Can't build the chain — not charged. The ${role} node "${name}" did not publish the ` +
+      `Can't build the chain, not charged. The ${role} node "${name}" did not publish the ` +
       `inbound list needed to check it (${reason}), so there is no way to confirm it can be ` +
       'wrapped in TLS before paying for it. Pick a node running 9.0.0 or later.',
     )
@@ -1034,7 +1120,7 @@ async function assertChainEligible(
   const graded = classifyHopEligibility(hop.nodeType === 4 ? 'xray' : 'v2ray', metadata)
   if (role === 'exit' ? graded.exit : graded.entry) return
   throw new Error(
-    `Can't build the chain — not charged. The ${role} node "${name}" serves ` +
+    `Can't build the chain, not charged. The ${role} node "${name}" serves ` +
     `${graded.transports.join(', ') || 'nothing usable'}, which does not meet the rule for a ` +
     `chain ${role}: ${role === 'exit'
       ? 'a plain-TCP inbound wrapped in TLS or Reality'
@@ -1217,7 +1303,15 @@ interface ChainSigner {
   wallet: NonNullable<ReturnType<typeof getWallet>>
   address: string
   privKey: Uint8Array
-  /** Undefined when this is the active wallet. */
+  /**
+   * Which wallet this is. Recorded on BOTH hops, including the active one: a saved
+   * record with no walletId means "whichever wallet is active", and that changes the
+   * moment the user switches — after which listSessionsOwnedByOtherWallets cannot see
+   * the hop the old wallet paid for, so it drops off the Sessions tab and its cancel
+   * is signed by an account x/session will reject, stranding the deposit. Only
+   * undefined when the active wallet has no id at all (no wallet loaded), which the
+   * caller has already ruled out.
+   */
   walletId?: string
 }
 
@@ -1228,13 +1322,29 @@ interface ChainSigner {
  * entry session is already on chain. bluecli's equivalent just prints an "orphan
  * session" notice; that is the behaviour this exists to avoid.
  *
- * Ordering is deliberate: buy entry, buy exit, then handshake both. Buying both
- * first means a handshake failure has a single uniform cleanup path, and the two
- * `nodeStartSession` broadcasts are the likeliest thing to fail — doing them
- * back-to-back keeps the window where only one deposit is locked as short as
- * possible. The two purchases MUST stay sequential (awaited, not raced): they are
- * signed by one account, so parallel broadcasts collide on the account sequence
- * number and the second is rejected. Only the endpoint resolves below are parallel.
+ * Ordering is deliberate, and it is NOT "buy both, then handshake both" any more.
+ * The exit hop must never be contacted from this device: its grade, its preflight and
+ * above all its signed handshake are session-bound and are followed seconds later by
+ * the user's traffic, so an exit that records who asked can join the two and the chain
+ * protects nothing (audit finding S1). So the entry is stood up FIRST, as a bare
+ * loopback proxy, and everything the exit ever hears comes through it.
+ *
+ *   buy entry -> handshake entry -> entry-only proxy -> [check + buy + handshake exit,
+ *   the node calls through the proxy] -> stop proxy -> build the chained config
+ *
+ * What that costs, accepted knowingly: the exit's eligibility gate now runs AFTER the
+ * entry is paid for, so a bad exit costs an entry refund rather than nothing. The
+ * picker already refuses an exit without positive evidence, so this gate is a backstop
+ * against a node that changed since it was graded, not the primary check.
+ *
+ * The exit PURCHASE is deliberately broadcast directly rather than through the proxy:
+ * it is a public on-chain transaction that tells the exit nothing its own session row
+ * does not already, and keeping CosmJS off the proxy keeps the blast radius small.
+ *
+ * The two purchases MUST stay sequential (awaited, not raced) when they share a wallet:
+ * parallel broadcasts collide on the account sequence number and the second is
+ * rejected. With per-hop wallets they are two accounts, but the order below is
+ * sequential anyway because the entry has to be LIVE before the exit is bought.
  *
  * `startSession` is injected so this stays agnostic about how each hop is funded;
  * today both hops are direct per-GB/per-hour purchases.
@@ -1253,47 +1363,58 @@ async function establishChainOrRefund(params: {
   // throw from the exit purchase itself.
   const paid: { sessionId: string; signer: ChainSigner }[] = []
   let failedRole: 'entry' | 'exit' | null = null
+  let proxy: ProvisioningProxy | null = null
 
   try {
     failedRole = 'entry'
-    sendChainHopProgress('entry')
+    sendChainHopProgress('entry', 'buy')
     const entrySessionId = await startSession(entry, entrySigner)
     paid.push({ sessionId: entrySessionId, signer: entrySigner })
 
+    const entryUrl = await resolveNodeRemoteUrl(entry.nodeAddress, entry.apiField)
+    const entryHop = { ...entry, sessionId: entrySessionId, remoteUrl: entryUrl, walletId: entrySigner.walletId }
+    const entrySpec = await handshakeChainEntry(entryHop, entrySigner.privKey)
+
+    // From here on the exit hears only from the entry node.
+    failedRole = null
+    sendChainHopProgress('exit', 'provision')
+    proxy = await startProvisioningProxy(JSON.stringify(buildEntryOnlyConfig(entrySpec, PROVISION_SOCKS_PORT), null, 2))
+    const agent = new SocksHttpsAgent(proxy.port)
+
     failedRole = 'exit'
-    sendChainHopProgress('exit')
+    // Same two pre-purchase checks the single-hop path makes, asked through the entry.
+    await preflightConnect(exit.nodeType, exit.apiField, agent)
+    await assertChainEligible(exit, 'exit', agent)
+
+    sendChainHopProgress('exit', 'buy')
     const exitSessionId = await startSession(exit, exitSigner)
     paid.push({ sessionId: exitSessionId, signer: exitSigner })
 
-    failedRole = null
-    const [entryUrl, exitUrl] = await Promise.all([
-      resolveNodeRemoteUrl(entry.nodeAddress, entry.apiField).catch((err) => {
-        failedRole = 'entry'
-        throw err
-      }),
-      resolveNodeRemoteUrl(exit.nodeAddress, exit.apiField).catch((err) => {
-        failedRole = 'exit'
-        throw err
-      }),
-    ])
+    const exitUrl = await resolveNodeRemoteUrl(exit.nodeAddress, exit.apiField)
+    const exitHop = { ...exit, sessionId: exitSessionId, remoteUrl: exitUrl, walletId: exitSigner.walletId }
+    const exitSpec = await handshakeChainExit(exitHop, exitSigner.privKey, agent)
 
-    const result = await performChainHandshake({
-      entry: { ...entry, sessionId: entrySessionId, remoteUrl: entryUrl, walletId: entrySigner.walletId },
-      exit: { ...exit, sessionId: exitSessionId, remoteUrl: exitUrl, walletId: exitSigner.walletId },
-      privKey: entrySigner.privKey,
-      exitPrivKey: exitSigner.privKey,
-    })
+    failedRole = null
+    const result = await finalizeChain({ entry: entryHop, exit: exitHop, entrySpec, exitSpec })
     return { ...result, entrySessionId, exitSessionId }
   } catch (err) {
     const refunds = await refundSessions(paid)
-    const moniker = (failedRole === 'exit' ? exit.nodeMoniker : entry.nodeMoniker) || ''
+    // The handshake tags its own errors with the hop they came from; failedRole only
+    // ever covers the purchases and the two endpoint resolves. Taking the tag first is
+    // what stops an exit-hop failure being reported against the entry node's name.
+    const brokenRole = chainHopRoleOf(err) ?? failedRole
+    const moniker = (brokenRole === 'exit' ? exit.nodeMoniker : entry.nodeMoniker) || ''
     throw new Error(chainFailureMessage({
       reason: describeHandshakeError(err),
       policyRejected: err instanceof V2RayPolicyError,
-      failedRole,
+      failedRole: brokenRole,
       nodeMoniker: moniker,
       refunds,
     }))
+  } finally {
+    // Always, on every path: this is an unregistered child process holding a listener,
+    // so nothing else in the app knows to clean it up.
+    proxy?.stop()
   }
 }
 
@@ -1670,9 +1791,10 @@ async function attemptReconnect(): Promise<void> {
     // the interface monitor fires first and burns through the attempts — so a
     // give-up this close to the cap is an expiry, and the user deserves the honest
     // reason rather than a generic connection failure.
-    const verdict = currentQuotaVerdict()
-    if (verdict && (verdict.level === 'expired' || (verdict.level === 'warn' && verdict.pct >= QUOTA_GIVE_UP_PCT))) {
-      await standDownSession(verdict.reason)
+    const scored = currentQuotaVerdict()
+    if (scored && (scored.verdict.level === 'expired' ||
+      (scored.verdict.level === 'warn' && scored.verdict.pct >= QUOTA_GIVE_UP_PCT))) {
+      await standDownSession(scored.verdict.reason, scored.sessionId)
       return
     }
     await teardownToIdle(true)
@@ -1758,7 +1880,9 @@ async function attemptReconnect(): Promise<void> {
         }
 
         desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
-        if (isRootTunnelProtocol(desiredProtocol)) startRootTunnelMonitor()
+        // Unconditional now: the monitor watches the interface for the root protocols
+        // and the default route for the tun2socks ones, and self-gates on proxy mode.
+        if (desiredMode !== 'proxy') startRootTunnelMonitor()
         startQuotaWatchdog()
 
         console.log('[reconnect] Success')
@@ -2077,7 +2201,7 @@ export function registerIpcHandlers(): void {
     // Ending a session needs the chain, which is unreachable while our own tunnel is
     // up (traffic routes to the node) — fail fast instead of hanging (finding M2).
     if (isVpnActive()) {
-      throw new Error('Disconnect the VPN before ending a session — the chain is unreachable through the tunnel.')
+      throw new Error('Disconnect the VPN before ending a session. The chain is unreachable through the tunnel.')
     }
     // A per-hop-wallet chain's exit session belongs to a SECOND account, and
     // x/session only accepts a cancel signed by the session's own account — so
@@ -2421,7 +2545,7 @@ export function registerIpcHandlers(): void {
       if (!/^\d+$/.test(hop.quoteValue)) throw new Error(`Invalid ${role}.quoteValue`)
       // Chaining is a v2ray-core feature (proxySettings.tag); no other protocol can do it.
       if (hop.nodeType !== 2 && hop.nodeType !== 4) {
-        throw new Error(`Multihop ${role} must be a V2Ray (2) or XRAY (4) node — no other protocol can be chained`)
+        throw new Error(`Multihop ${role} must be a V2Ray (2) or XRAY (4) node. No other protocol can be chained.`)
       }
     }
     if (params.entry.nodeAddress === params.exit.nodeAddress) {
@@ -2435,23 +2559,27 @@ export function registerIpcHandlers(): void {
       throw new Error('Wallet not loaded. Please re-import your mnemonic.')
     }
 
-    // Verify BOTH nodes and our runtime before spending anything. Doing this up front
-    // means a bad exit node costs nothing, rather than costing the entry deposit.
+    // Verify the ENTRY and our runtime before spending anything.
+    //
+    // The EXIT's two checks are deliberately NOT here any more: asking the exit node
+    // anything from this device is the leak the chain exists to prevent, so they run
+    // inside establishChainOrRefund, through the entry hop, once it is live. The cost
+    // is that a bad exit is discovered after the entry is paid for rather than before;
+    // the picker already refuses an exit without positive evidence, so what remains is
+    // a backstop against a node that changed since it was graded.
     await preflightConnect(params.entry.nodeType, params.entry.apiField)
-    await preflightConnect(params.exit.nodeType, params.exit.apiField)
-    // ...and verify the CHAIN policy too, which preflightConnect knows nothing about:
-    // it checks that a node runs the protocol the directory claims, not that the node
-    // can be an end of a chain. Without this a node that cannot be wrapped in TLS is
-    // bought first and refused at the handshake, which is a refund the user should
-    // never have needed. That is not hypothetical — a v8.3.1 entry did exactly this,
-    // and the refund of the pair then failed on its own bug.
+    // ...and the CHAIN policy too, which preflightConnect knows nothing about: it
+    // checks that a node runs the protocol the directory claims, not that the node can
+    // be an end of a chain. Without this a node that cannot be wrapped in TLS is bought
+    // first and refused at the handshake, which is a refund the user should never have
+    // needed. That is not hypothetical — a v8.3.1 entry did exactly this, and the
+    // refund of the pair then failed on its own bug.
     await assertChainEligible(params.entry, 'entry')
-    await assertChainEligible(params.exit, 'exit')
 
     const hopCost = (quoteValue: string): number =>
       params.denom === 'udvpn' ? parseInt(quoteValue, 10) * params.amount : 0
 
-    const activeSigner: ChainSigner = { wallet, address, privKey }
+    const activeSigner: ChainSigner = { wallet, address, privKey, walletId: getActiveWalletId() ?? undefined }
     // Per-hop wallets: paying for the two hops from two accounts is what stops
     // either node reading `Session.accAddress` and finding the other half of the
     // chain via the public SessionsForAccount query. The second wallet is only ever
@@ -2545,7 +2673,7 @@ export function registerIpcHandlers(): void {
     const saved = loadSessionConfig(params.sessionId)
     if (!saved) {
       throw new Error(
-        'No saved config for this session. The handshake config was not preserved — ' +
+        'No saved config for this session. The handshake config was not preserved, so ' +
         'this session cannot be reconnected. You will need to create a new subscription.'
       )
     }
@@ -2584,7 +2712,7 @@ export function registerIpcHandlers(): void {
       if (!peer) {
         throw new Error(
           `This session is one hop of a two-hop chain, but the other hop ` +
-          `(#${saved.chainPeerSessionId}) has no saved config — the chain cannot be ` +
+          `(#${saved.chainPeerSessionId}) has no saved config, so the chain cannot be ` +
           'rebuilt. End both sessions and build a new chain.',
         )
       }
@@ -2733,7 +2861,7 @@ export function registerIpcHandlers(): void {
     // the routing change — so the mode is meaningless (and unimplementable) for them.
     const proxyOnly = params.mode === 'proxy'
     if (proxyOnly && (params.protocol === 'wireguard' || params.protocol === 'amneziawg' || params.protocol === 'openvpn')) {
-      throw new Error('Local-proxy mode is not available for WireGuard, AmneziaWG or OpenVPN — they route the whole device.')
+      throw new Error('Local-proxy mode is not available for WireGuard, AmneziaWG or OpenVPN: they route the whole device.')
     }
     if (params.protocol !== 'wireguard' && params.protocol !== 'amneziawg' && params.protocol !== 'v2ray' && params.protocol !== 'xray' && params.protocol !== 'hysteria2' && params.protocol !== 'openvpn') {
       throw new Error('Invalid protocol: must be wireguard, amneziawg, openvpn, v2ray, xray or hysteria2')
@@ -2876,6 +3004,9 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'v2ray'
         desiredMode = proxyOnly ? 'proxy' : 'tunnel'
+        // Watches the default route under a tun2socks tunnel; a no-op in proxy mode,
+        // which changes no routing (see startRootTunnelMonitor).
+        if (!proxyOnly) startRootTunnelMonitor()
         startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'v2ray' }
@@ -2923,6 +3054,9 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'xray'
         desiredMode = proxyOnly ? 'proxy' : 'tunnel'
+        // Watches the default route under a tun2socks tunnel; a no-op in proxy mode,
+        // which changes no routing (see startRootTunnelMonitor).
+        if (!proxyOnly) startRootTunnelMonitor()
         startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'xray' }
@@ -2970,6 +3104,9 @@ export function registerIpcHandlers(): void {
 
         desiredProtocol = 'hysteria2'
         desiredMode = proxyOnly ? 'proxy' : 'tunnel'
+        // Watches the default route under a tun2socks tunnel; a no-op in proxy mode,
+        // which changes no routing (see startRootTunnelMonitor).
+        if (!proxyOnly) startRootTunnelMonitor()
         startQuotaWatchdog()
         sendStateChange('connected')
         return { protocol: 'hysteria2' }

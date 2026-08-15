@@ -74,6 +74,30 @@ export function normalizeXRayTlsPin(pin: string | undefined): string | null {
   }
 }
 
+/**
+ * Can this Reality entry build an outbound that xray will actually start on? Requires
+ * a `reality_public_key` that decodes to 32 bytes (an x25519 public key, base64url
+ * from `xray x25519`, standard base64 also accepted) and a non-empty
+ * `reality_server_name` (it becomes the outer ClientHello's SNI). `reality_short_id`
+ * is not required — empty is a valid server configuration.
+ *
+ * Duplicated from multihop-config.ts's isUsableReality for the same reason
+ * normalizeXRayTlsPin is; a test asserts the two agree.
+ */
+export function isUsableXRayReality(entry: XRayMetadataEntry): boolean {
+  const name = entry.reality_server_name
+  if (typeof name !== 'string' || name.trim() === '') return false
+  const key = entry.reality_public_key
+  if (typeof key !== 'string') return false
+  const trimmed = key.trim()
+  if (!/^[A-Za-z0-9+/_-]{42,44}={0,2}$/.test(trimmed)) return false
+  try {
+    return Buffer.from(trimmed.replace(/-/g, '+').replace(/_/g, '/'), 'base64').length === 32
+  } catch {
+    return false
+  }
+}
+
 const PROXY_VLESS = 1
 const SECURITY_TLS = 2
 const SECURITY_REALITY = 3
@@ -95,7 +119,14 @@ export function selectXRayEntry(metadata: XRayMetadataEntry[]): XRayMetadataEntr
   const usable = metadata.filter(
     (m) => m.proxy_protocol === PROXY_VLESS && TRANSPORT_NETWORK[m.transport_protocol] !== undefined,
   )
-  const reality = usable.find((m) => m.transport_security === SECURITY_REALITY)
+  // Reality entries are checked the same way TLS entries are: an entry whose keys
+  // can't build a working outbound must not be selected. It used to be taken on
+  // trust, and being PREFERRED meant a node advertising Reality with blank keys was
+  // chosen over a pinned TLS inbound on the same node, emitting `publicKey: ''` — a
+  // config xray rejects at spawn, which is after the session is paid for.
+  const reality = usable.find(
+    (m) => m.transport_security === SECURITY_REALITY && isUsableXRayReality(m),
+  )
   if (reality) return reality
   // A TLS entry without a usable pin is NOT selectable: the node's certificate is
   // self-signed, so with no pin there is nothing to verify it against and xray no

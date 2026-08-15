@@ -54,13 +54,18 @@ function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'
         {expired.reason === 'stalled' ? (
           <>
             The tunnel to <span className="font-medium">{node}</span> stopped carrying traffic and
-            was disconnected. Your session is still open — reconnect from the Sessions tab to renew
+            was disconnected. Your session is still open. Reconnect from the Sessions tab to renew
             the handshake with the node.
           </>
         ) : (
           <>
-            Your session on <span className="font-medium">{node}</span> ran out of {expired.reason} and
-            was disconnected.
+            Your session on <span className="font-medium">{node}</span>
+            {/* Which half of a chain ran out. Both hops are separate nodes on separate
+                deposits, so "your session ended" without naming one sends the user off
+                to replace whichever they happen to remember. */}
+            {expired.chainRole && ` (the ${expired.chainRole} hop of your chain)`} ran out of{' '}
+            {expired.reason} and was disconnected.
+            {expired.chainRole && ' The other hop is still open, and can be ended from the Sessions tab.'}
           </>
         )}
         {expired.trafficBlocked && ' The kill switch is still blocking all traffic.'}
@@ -229,7 +234,7 @@ function AppInner() {
         <div className="px-5 py-1.5 bg-danger-subtle border-b border-danger text-danger text-xs flex items-center gap-2">
           <span aria-hidden>⚠</span>
           <span>
-            The kill switch could not be turned off — all traffic may still be blocked.
+            The kill switch could not be turned off, so all traffic may still be blocked.
             If you have no internet, restart Katacomb VPN to restore it.
           </span>
         </div>

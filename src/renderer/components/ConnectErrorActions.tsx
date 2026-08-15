@@ -81,7 +81,7 @@ export default function ConnectErrorActions({
         <div className="space-y-2">
           <p className="text-text-tertiary text-xs">
             This system has no <span className="font-mono">resolvconf</span>, so the tunnel's DNS couldn't be
-            applied. You can connect anyway using your system DNS — but then DNS queries may leave the tunnel
+            applied. You can connect anyway using your system DNS, but then DNS queries may leave the tunnel
             and your provider can see which sites you look up.
           </p>
           <button onClick={onRetryWithoutDns} className="btn btn-primary w-full">
@@ -93,7 +93,7 @@ export default function ConnectErrorActions({
       {paidSessionId ? (
         <>
           <p className="text-text-tertiary text-xs">
-            Session {paidSessionId} is already paid for — retrying the connection won't charge you again.
+            Session {paidSessionId} is already paid for, so retrying the connection won't charge you again.
           </p>
           <button
             onClick={onRetryTunnel}

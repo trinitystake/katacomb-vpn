@@ -30,11 +30,15 @@ type BillingType = 'gigabytes' | 'hours'
 const MAX_ROWS = 300
 
 /**
- * Only v9.0.0 nodes publish the inbound listing the exit check reads, so on the
- * exit step they sort first. Otherwise the list opens on the cheapest nodes, which
- * are the oldest — every row reads "unknown" and the check looks broken. Older
- * nodes stay listed and stay pickable: they may well serve TCP, we just cannot know
- * before paying, and a chain that can't be built refunds both sessions.
+ * Only v9.0.0 nodes publish the inbound listing the chain checks read, so they sort
+ * first. Otherwise the list opens on the cheapest nodes, which are the oldest, every
+ * row reads "unknown" and the check looks broken.
+ *
+ * Older nodes stay LISTED but are not selectable (see the row's `refused`): with no
+ * listing to check, they cannot be graded before paying, and 485 of the 487 measured
+ * report no TLS at all, so picking one is a near-certain double refund rather than a
+ * gamble worth offering. Showing them is still worth it, so the list explains itself
+ * instead of silently hiding most of the network.
  */
 function majorVersion(node: SentNode): number {
   return parseInt((node.version || '').split('.')[0], 10) || 0
@@ -79,10 +83,17 @@ export default function MultihopModal({ onClose }: Props) {
   // not asked yet or asking.
   const [walletLink, setWalletLink] = useState<{ checked: boolean; linked: boolean } | null>(null)
 
+  // DNS is the one leak a chain cannot close by itself: with the resolver left on
+  // System Default and no kill switch, queries go to the LAN resolver, which is more
+  // specific than tun2socks' /1 halves and so never enters the tunnel. Read it here so
+  // the confirm step can say so before the money moves.
+  const [dnsResolver, setDnsResolver] = useState<string | null>(null)
+  const [dnsBusy, setDnsBusy] = useState(false)
+
   const [connecting, setConnecting] = useState(false)
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [currentDetail, setCurrentDetail] = useState<string | null>(null)
-  const [currentHop, setCurrentHop] = useState<'entry' | 'exit' | null>(null)
+  const [hopMarker, setHopMarker] = useState<HopMarker | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [paid, setPaid] = useState<{ entrySessionId: string; exitSessionId: string } | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
@@ -93,18 +104,29 @@ export default function MultihopModal({ onClose }: Props) {
   const tunnelStarted = currentStep === '5/5'
 
   useEffect(() => {
-    // `hop:entry` / `hop:exit` are markers, not steps: a chain runs the purchase
-    // sequence twice, and without them the shared 1/5..3/5 list replays from the
-    // start halfway through and looks like the connect restarted.
+    // `hop:<role>:<phase>` are markers, not steps: a chain runs the purchase sequence
+    // twice, and without them the shared 1/5..3/5 list replays from the start halfway
+    // through and looks like the connect restarted. The PHASE matters as much as the
+    // role: the entry is bought AND handshaked before the exit is touched at all, since
+    // the exit is reached through it (see MARKER_SEQUENCE).
     const unsub = window.api.onConnectionProgress((step, detail) => {
-      if (step === 'hop:entry' || step === 'hop:exit') {
-        setCurrentHop(step === 'hop:entry' ? 'entry' : 'exit')
+      if (step.startsWith('hop:')) {
+        const marker = parseHopMarker(step)
+        if (marker) setHopMarker(marker)
         return
       }
       setCurrentStep(step)
       setCurrentDetail(detail || null)
     })
     return unsub
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.settingsGet()
+      .then((s) => { if (!cancelled) setDnsResolver(s.dnsResolver) })
+      .catch(() => { /* the warning simply doesn't render */ })
+    return () => { cancelled = true }
   }, [])
 
   // Ask the chain whether the two accounts are already tied together by a transfer.
@@ -157,12 +179,28 @@ export default function MultihopModal({ onClose }: Props) {
   // sessions. A definite no is different — it is known before any money moves.
   const exitRefused = exitGrade !== undefined && exitGrade.reachable && !exitGrade.exit
 
+  /**
+   * Switch the app's resolver to encrypted DNS for this chain (and everything after).
+   * Not done silently: it is a global setting, so the user presses the button.
+   */
+  async function handleUseEncryptedDns() {
+    setDnsBusy(true)
+    try {
+      const updated = await window.api.settingsSet({ dnsResolver: '1.1.1.1' })
+      setDnsResolver(updated.dnsResolver)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the DNS setting')
+    } finally {
+      setDnsBusy(false)
+    }
+  }
+
   async function handleBuild() {
     if (!entry || !exit || entryPrice === null || exitPrice === null) return
     setConnecting(true)
     setError(null)
     setCurrentStep('1/5')
-    setCurrentHop('entry')
+    setHopMarker({ hop: 'entry', phase: 'buy' })
     try {
       const result = await window.api.connectionSubscribeChain({
         entry: {
@@ -327,19 +365,8 @@ export default function MultihopModal({ onClose }: Props) {
             <div className="space-y-2 text-sm border border-border rounded-md p-3">
               <HopRow label="Entry" hint="Sees your real IP. Never sees where you go." node={entry} price={entryPrice} billing={billing} />
               <div className="text-text-tertiary text-center text-xs">↓ tunnelled inside the entry hop</div>
-              <HopRow label="Exit" hint="Sees where you go. Never sees your IP." node={exit} price={exitPrice} billing={billing} />
+              <HopRow label="Exit" hint="Sees where you go. Reached only through the entry, setup included." node={exit} price={exitPrice} billing={billing} />
             </div>
-
-            {/* Pre-9.0.0 exits are never probed, so they have no grade to report.
-                Say why here too, or the confirm step is silent about the one thing
-                the user most needs to know before paying. */}
-            {!exitGrade && majorVersion(exit) < 9 && (
-              <div className="text-xs text-warning">
-                Exit not checked: this node runs {exit.version || 'a version older than 9.0.0'}, which
-                does not publish its inbound list. Whether it can be chained is only known after the
-                handshake. If it can't, both sessions are cancelled and refunded automatically.
-              </div>
-            )}
 
             {exitGrade && (
               <div className={`text-xs ${exitRefused ? 'text-danger' : exitGrade.reachable ? 'text-text-tertiary' : 'text-warning'}`}>
@@ -494,8 +521,10 @@ export default function MultihopModal({ onClose }: Props) {
                   </div>
                 ) : walletLink.checked ? (
                   <p className="text-text-tertiary text-xs">
-                    <span className="text-success">No transfer between these two accounts</span>, so
-                    nothing on chain joins them and neither node can look the other up.
+                    <span className="text-success">No direct transfer between these two accounts</span>, so
+                    neither node can pair them by following coins from one to the other. Only that one hop
+                    is checked: if both wallets were funded from the same third account, an exchange
+                    withdrawal for instance, that account still joins them.
                   </p>
                 ) : (
                   <p className="text-warning text-xs">
@@ -548,8 +577,22 @@ export default function MultihopModal({ onClose }: Props) {
               <p className="text-text-primary font-medium">Before you pay, what this does and doesn't do</p>
               <p className="text-text-secondary">
                 <span className="text-success">Protects against one dishonest node.</span> The entry sees your
-                IP but not your destinations; the exit sees your destinations but not your IP. Neither alone
-                has both.
+                IP but not your destinations; the exit sees your destinations, and your traffic reaches it
+                only through the entry. Neither alone watches both ends of your browsing.
+              </p>
+              <p className="text-text-secondary">
+                <span className="text-success">The exit is set up through the entry.</span> Buying a session
+                means asking a node for its keys, and for the exit that request is carried by the entry hop,
+                so the exit sees the entry's address and never yours. One thing it does not cover: while you
+                were choosing, this app asked candidate nodes what they support, directly. That question
+                carries no wallet and no session, but it did come from you.
+              </p>
+              <p className="text-text-secondary">
+                <span className="text-warning">Each hop authenticates itself with keys it sends you.</span>{' '}
+                Nodes use self-signed certificates and there is nothing on chain to check them against, so
+                whoever can intercept the setup request can answer it. That is the same trust every
+                single-hop connection here relies on, and worth knowing when the observer you are avoiding
+                is the network you are on.
               </p>
               <p className="text-text-secondary">
                 <span className="text-danger">Does not make you anonymous.</span>{' '}
@@ -561,6 +604,29 @@ export default function MultihopModal({ onClose }: Props) {
                 <span className="text-warning">Costs twice, and it is slow.</span> Two sessions, two deposits.
                 Measured on a live chain: roughly 20× the latency of a single hop.
               </p>
+              {/* The chain cannot close this one by itself. With the resolver on System
+                  Default and the kill switch off, DNS goes to the LAN resolver, which is
+                  a more specific route than tun2socks' /1 halves, so it never enters the
+                  tunnel: the ISP reads every domain while the user is paying twice to
+                  hide exactly that. Full tunnel only, since proxy mode routes nothing. */}
+              {mode === 'tunnel' && dnsResolver === 'system' && (
+                <div className="border border-warning bg-warning-subtle rounded-md p-2.5 space-y-1.5">
+                  <p className="text-warning">Your DNS would still go to your own network.</p>
+                  <p className="text-text-secondary">
+                    DNS is set to System Default, which is usually your router. That lookup is not
+                    routed through the chain, so your provider still sees every domain you visit even
+                    though your traffic does not go near them.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleUseEncryptedDns}
+                    disabled={dnsBusy}
+                    className="btn btn-secondary text-xs px-2.5 py-1 disabled:opacity-50"
+                  >
+                    {dnsBusy ? 'Applying…' : 'Use encrypted DNS (1.1.1.1)'}
+                  </button>
+                </div>
+              )}
               <label className="flex items-start gap-2 cursor-pointer text-text-secondary pt-1">
                 <input
                   type="checkbox"
@@ -592,7 +658,7 @@ export default function MultihopModal({ onClose }: Props) {
             <div className="space-y-2 text-sm border border-border rounded-md p-3 opacity-70">
               <HopRow label="Entry" hint="Sees your real IP. Never sees where you go." node={entry} price={entryPrice} billing={billing} />
               <div className="text-text-tertiary text-center text-xs">↓ tunnelled inside the entry hop</div>
-              <HopRow label="Exit" hint="Sees where you go. Never sees your IP." node={exit} price={exitPrice} billing={billing} />
+              <HopRow label="Exit" hint="Sees where you go. Reached only through the entry, setup included." node={exit} price={exitPrice} billing={billing} />
             </div>
             {/* Two hops, tracked separately. The generic 5-step list is wrong here: a
                 chain repeats steps 1-3 for the second purchase, so it counts up,
@@ -601,14 +667,14 @@ export default function MultihopModal({ onClose }: Props) {
               <HopProgress
                 label="Entry"
                 node={entry}
-                state={hopState('entry', currentHop, tunnelStarted)}
-                detail={currentHop === 'entry' && !tunnelStarted ? currentDetail : null}
+                stage={hopStage('entry', hopMarker, tunnelStarted)}
+                detail={hopMarker?.hop === 'entry' && !tunnelStarted ? currentDetail : null}
               />
               <HopProgress
                 label="Exit"
                 node={exit}
-                state={hopState('exit', currentHop, tunnelStarted)}
-                detail={currentHop === 'exit' && !tunnelStarted ? currentDetail : null}
+                stage={hopStage('exit', hopMarker, tunnelStarted)}
+                detail={hopMarker?.hop === 'exit' && !tunnelStarted ? currentDetail : null}
               />
               <div className="flex items-start gap-3 text-sm">
                 <span className={`status-dot mt-1.5 ${tunnelStarted ? 'status-dot-pending' : ''}`} />
@@ -631,12 +697,34 @@ export default function MultihopModal({ onClose }: Props) {
         {connecting && !(entry && exit) && <ProgressSteps currentStep={currentStep} error={error} />}
 
         {error && !connecting && (
-          <ConnectErrorActions
-            error={error}
-            paidSessionId={paid ? paid.entrySessionId : null}
-            onRetryTunnel={handleRetryTunnel}
-            onStartOver={() => { setError(null); setCurrentStep(null); setPaid(null); setStep('confirm') }}
-          />
+          <div className="space-y-3">
+            {/* Both hops are paid for and neither is named in the shared error pane,
+                which only carries one session id. Without this the two deposits are
+                invisible at exactly the moment the user is deciding what to do next. */}
+            {paid && (
+              <div className="border border-border rounded-md p-3 text-xs space-y-1">
+                <p className="text-text-primary">Both hops are bought and still open.</p>
+                <p className="text-text-secondary">
+                  Entry <span className="font-mono">#{paid.entrySessionId}</span>, exit{' '}
+                  <span className="font-mono">#{paid.exitSessionId}</span>. Retrying the connection
+                  does not charge you again. If you give up, end them from the Sessions tab, where
+                  they appear as one chain.
+                </p>
+              </div>
+            )}
+            <ConnectErrorActions
+              error={error}
+              paidSessionId={paid ? paid.entrySessionId : null}
+              onRetryTunnel={handleRetryTunnel}
+              // With two sessions already paid for, "start over" must NOT lead back to
+              // the confirm step: the Buy button there is live, and pressing it buys a
+              // SECOND pair while the first is still open and still charged. Close
+              // instead, and leave the chain where the user can see and end it.
+              onStartOver={paid
+                ? onClose
+                : () => { setError(null); setCurrentStep(null); setStep('confirm') }}
+            />
+          </div>
         )}
 
         {tunnelConnected && paid && entry && exit && (
@@ -676,36 +764,84 @@ export default function MultihopModal({ onClose }: Props) {
   )
 }
 
-/** Where a hop sits in the purchase sequence, given the hop main last announced. */
-function hopState(
-  role: 'entry' | 'exit',
-  current: 'entry' | 'exit' | null,
-  tunnelStarted: boolean,
-): 'pending' | 'active' | 'done' {
-  if (tunnelStarted) return 'done'
-  if (current === null) return 'pending'
-  if (current === role) return 'active'
-  // Only ever entry -> exit, so seeing the exit means the entry is finished.
-  return role === 'entry' ? 'done' : 'pending'
+type HopPhase = 'buy' | 'provision' | 'handshake'
+type HopMarker = { hop: 'entry' | 'exit'; phase: HopPhase }
+
+/** `hop:entry:buy` and friends. Anything else is ignored rather than guessed at. */
+function parseHopMarker(step: string): HopMarker | null {
+  const [, hop, phase] = step.split(':')
+  if (
+    (hop === 'entry' || hop === 'exit') &&
+    (phase === 'buy' || phase === 'provision' || phase === 'handshake')
+  ) {
+    return { hop, phase }
+  }
+  return null
 }
 
-function HopProgress({ label, node, state, detail }: {
+/**
+ * The order main announces these in. The whole entry is finished before the exit is
+ * touched, because the exit is reached THROUGH the entry: it is bought and handshaked
+ * over a proxy that the entry hop is already carrying.
+ */
+const MARKER_SEQUENCE: HopMarker[] = [
+  { hop: 'entry', phase: 'buy' },
+  { hop: 'entry', phase: 'handshake' },
+  { hop: 'exit', phase: 'provision' },
+  { hop: 'exit', phase: 'buy' },
+  { hop: 'exit', phase: 'handshake' },
+]
+
+type HopStage = 'pending' | 'buying' | 'routing' | 'handshaking' | 'done'
+
+/**
+ * Where a hop sits, given the marker main last sent. Scored off the position in
+ * MARKER_SEQUENCE rather than off the role alone, which is what keeps each hop's own
+ * stage moving in one direction only: an earlier version read the role and made both
+ * hops jump backwards halfway through the build.
+ */
+function hopStage(role: 'entry' | 'exit', marker: HopMarker | null, tunnelStarted: boolean): HopStage {
+  if (tunnelStarted) return 'done'
+  const at = marker === null
+    ? -1
+    : MARKER_SEQUENCE.findIndex((s) => s.hop === marker.hop && s.phase === marker.phase)
+  if (at < 0) return 'pending'
+  const stages: Record<'entry' | 'exit', HopStage[]> = {
+    entry: ['buying', 'handshaking', 'done', 'done', 'done'],
+    exit: ['pending', 'pending', 'routing', 'buying', 'handshaking'],
+  }
+  return stages[role][at]
+}
+
+const HOP_STAGE_LABEL: Record<HopStage, string | null> = {
+  pending: null,
+  buying: 'Buying the session on chain.',
+  // The step this whole flow exists for, so it says what it is buying the user.
+  routing: 'Connecting through the entry, so this node never sees your address.',
+  handshaking: 'Handshaking with the node.',
+  done: 'Bought and handshaked.',
+}
+
+function HopProgress({ label, node, stage, detail }: {
   label: string
   node: SentNode | null
-  state: 'pending' | 'active' | 'done'
+  stage: HopStage
   detail: string | null
 }) {
+  const busy = stage === 'buying' || stage === 'handshaking'
   return (
     <div className="flex items-start gap-3 text-sm">
       <span className={`status-dot mt-1.5 ${
-        state === 'done' ? 'status-dot-active' : state === 'active' ? 'status-dot-pending' : ''
+        stage === 'done' ? 'status-dot-active' : stage === 'pending' ? '' : 'status-dot-pending'
       }`} />
       <span className="min-w-0">
-        <span className={state === 'pending' ? 'text-text-tertiary' : 'text-text-primary'}>
+        <span className={stage === 'pending' ? 'text-text-tertiary' : 'text-text-primary'}>
           {label} hop{node ? ` · ${node.moniker || node.country}` : ''}
         </span>
-        {detail && <span className="block text-text-tertiary text-xs">{detail}</span>}
-        {state === 'done' && <span className="block text-text-tertiary text-xs">Bought and handshaked.</span>}
+        {busy && detail && <span className="block text-text-tertiary text-xs">{detail}</span>}
+        {HOP_STAGE_LABEL[stage] && (
+          <span className="block text-text-tertiary text-xs">{HOP_STAGE_LABEL[stage]}</span>
+        )}
       </span>
     </div>
   )
@@ -773,8 +909,8 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
         return grade?.reachable === true && (role === 'exit' ? grade.exit : grade.entry)
       })
       // Confirmed exits first, then the rest cheapest-first. Sorting by price alone
-      // buried the usable ones: only 50 rows render, so a verified exit priced above
-      // the 50th cheapest node was unreachable no matter how far you scrolled.
+      // buried the usable ones: only MAX_ROWS render, so a verified exit priced above
+      // that many cheaper nodes was unreachable no matter how far you scrolled.
       .sort((a, b) => {
         const rank = (n: SentNode) => {
           const grade = eligibility.results.get(n.address)
@@ -792,7 +928,7 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
 
   // Grade every CHECKABLE candidate, not just the rows on screen. Two reasons, both
   // found the hard way:
-  //   - only MAX_ROWS render, so grading just those made everything past row 50
+  //   - only MAX_ROWS render, so grading just those made everything past the last row
   //     permanently ungraded, and the sort above could never lift a verified exit
   //     into view.
   //   - "Verified exits only" filters on the grades, so with only the visible rows
@@ -801,8 +937,23 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
   // they publish no inbound list, so the request can only fail. That is most of the
   // network (487 of 726 healthy V2Ray/XRAY nodes), so skipping them is also what
   // keeps this affordable.
+  //
+  // VISIBLE ROWS FIRST, though. probe() walks its argument in order, so putting the
+  // rendered rows at the front settles the part of the list the user is looking at in
+  // the first chunk or two, instead of after every node in the country they didn't
+  // pick. It also means an early close probes far fewer nodes: each probe is an HTTPS
+  // request from the user's own address, so a picker opened and abandoned should not
+  // announce itself to a couple of hundred operators.
   const { probe } = eligibility
-  const checkable = useMemo(() => matches.filter((n) => majorVersion(n) >= 9), [matches])
+  const checkable = useMemo(() => {
+    const onScreen = new Set(visible.map((n) => n.address))
+    return [
+      ...visible.filter((n) => majorVersion(n) >= 9),
+      ...matches.filter((n) => majorVersion(n) >= 9 && !onScreen.has(n.address)),
+    ]
+    // `visible` is derived from `matches`, so one dependency covers both.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matches])
   // Sorted, because grades arriving change the list ORDER and an order-sensitive
   // key would retrigger this effect on every one of them.
   const visibleKey = checkable.map((n) => n.address).sort().join(',')
@@ -826,8 +977,9 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
           </>
         ) : (
           <>
-            The exit node is reached through the entry, so it never sees your IP. Sites see its
-            location instead. It must also serve plain TCP, because grpc and websocket bring their
+            The exit node is reached through the entry, both for your traffic and for the request
+            that sets it up, so your packets never arrive at it directly and sites see its location
+            instead of yours. It must also serve plain TCP, because grpc and websocket bring their
             own dialer and break when chained.
           </>
         )}
@@ -843,7 +995,8 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
         <span className="text-success">Reality</span>, which is stricter than an ordinary connection.
         A VMess hop without TLS is still encrypted, but it is recognisable as a proxy to anyone
         watching the wire, and that is the thing a chain is bought to avoid. Nodes older than 9.0.0
-        publish nothing to check, so they are shown but will almost certainly be refused and refunded.
+        publish nothing to check against that rule, so they are listed for context but cannot be
+        picked.
       </p>
 
       <div className="flex items-center gap-2 flex-wrap shrink-0">

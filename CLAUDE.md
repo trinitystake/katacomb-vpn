@@ -689,11 +689,55 @@ xray-core is a strict superset of what the builder emits, so it lands in
   a chain bought under older rules still reconnects, because the money is already spent.
 - Dual quota: both hops meter the same stream, so **worst verdict wins** — but they
   settle independently and can land far apart, so the Sessions card scores off the worse
-  hop and the sooner expiry.
-- **Progress is per hop.** A chain runs the purchase sequence TWICE, so the shared
-  1/5..3/5 steps replay from the start halfway through and read as a restart.
-  `sendChainHopProgress` emits `hop:entry`/`hop:exit` markers and the modal tracks the
-  two hops as separate stages rather than reusing `ProgressSteps`.
+  hop and the sooner expiry. `currentQuotaVerdict` returns WHICH session lost, so the
+  expiry banner names the right node. **`startQuotaWatchdog` must repair BOTH quotas**
+  from `lastKnownSessions`: a Sessions-tab reconnect restores `activeExitSessionId` with
+  no quota behind it, and scoring the entry alone leaves an exhausted exit to be caught
+  only by `checkTunnelStalled`, 64 KB and 90 s later.
+- **Progress is per hop AND per phase.** A chain runs the purchase sequence TWICE, so the
+  shared 1/5..3/5 steps replay from the start halfway through and read as a restart.
+  `sendChainHopProgress` emits `hop:<role>:<phase>` (buy | handshake) and the modal maps
+  the four markers to a monotonic per-hop stage. The phase is load-bearing: both hops are
+  bought before either is handshaked, so keying off the role alone drove each hop's state
+  BACKWARDS at the halfway point.
+- **The EXIT hop is provisioned THROUGH the entry, and must stay that way.** Its
+  eligibility gate, its preflight and its handshake are all session-bound and are
+  followed seconds later by the user's traffic, so an exit that logs who asked could
+  join the two — which is the one thing a chain is bought to prevent. So
+  `establishChainOrRefund` runs: buy entry → handshake entry → `startProvisioningProxy`
+  (an entry-only xray on 1081, `buildEntryOnlyConfig`, deliberately NOT registered as
+  the active connection or `isVpnActive()` would lie mid-purchase) → check + buy +
+  handshake the exit with a `SocksHttpsAgent` → stop the proxy → build the chain.
+  Consequences to keep: the exit's gate now runs AFTER the entry is paid for (the
+  picker's grade is the primary check, this is the backstop); the exit PURCHASE is
+  broadcast directly on purpose (a public tx tells the exit nothing new, and it keeps
+  CosmJS off the proxy); proxied calls get their own longer timeouts, because a
+  timeout there strands a paid entry. **Never add a direct call to the exit node.**
+- **The SDK cannot handshake through a proxy**, so `node-handshake.ts` rebuilds that one
+  POST (checked against 2.1.0's published `dist/utils.js`; the Go SDK's node client is
+  the same, `WithInsecure`/`WithTimeout` only). The SDK still owns every DIRECT
+  handshake. `node-handshake.test.ts` captures what the real SDK puts on the wire and
+  asserts ours is byte-identical — that test is the whole safety argument for the
+  reimplementation, so it must never be weakened to a hand-written fixture.
+- **The picker's bulk grading is still direct, and that is the accepted residual.** It
+  carries no wallet and no session and goes to hundreds of nodes, so what a node learns
+  is "an address looked at me" with nothing to attach it to. The modal says so.
+- **Key material is validated before an inbound is selected, on both protocols.** TLS
+  needs a `tls_pin` that normalises; Reality needs a 32-byte `reality_public_key` AND a
+  non-empty `reality_server_name` (`isUsableReality`, mirrored in `xray-config.ts` with a
+  cross-check test). Reality is preferred first, so an unusable Reality entry used to
+  shadow a good TLS one on the same node and emit `publicKey: ''` — a config xray rejects
+  at SPAWN, which is after `establishChainOrRefund` returns, so nothing refunds it. Keep
+  the check out of `classifyHopEligibility`: the public listing blanks those fields.
+- **The exit's address is resolved over DoH** in `performChainHandshake`, before the
+  tunnel exists, because `pinV2RayNodeAddresses` would otherwise hand the ISP the one
+  fact a chain buys: which exit was chosen. Do NOT "simplify" this by leaving the exit a
+  hostname for the entry to resolve unless it is proven that xray never resolves a
+  detoured destination locally: if it does, the lookup happens through the tunnel and
+  needs the exit to reach the exit. Falls back to the old `getent` pin on any failure.
+- **Record `walletId` on BOTH hops**, including the active wallet's. Absent means
+  "whichever wallet is active now", so switching wallets hid a hop from the Sessions tab
+  and made its cancel unsignable (x/session only accepts the session's own account).
 - Measured cost: ~20x latency vs single-hop on a long chain (ES→TR 1.75s), ~0.95s AU→JP,
   ~2-3 MB/s. Chains are for privacy, not speed.
 

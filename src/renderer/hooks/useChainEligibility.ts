@@ -57,22 +57,7 @@ export function useChainEligibility() {
     }
   }, [results, record])
 
-  /** Probe one node and hand the answer back, for the pre-purchase gate. */
-  const probeOne = useCallback(async (node: SentNode): Promise<ChainEligibility | null> => {
-    const known = results.get(node.address)
-    if (known) return known
-    try {
-      const [result] = await window.api.nodeChainEligibility([
-        { nodeAddress: node.address, remoteUrl: node.api, nodeType: node.type },
-      ])
-      if (result) record([result])
-      return result ?? null
-    } catch {
-      return null
-    }
-  }, [results, record])
-
   const cancel = useCallback(() => { cancelled.current = true }, [])
 
-  return { results, progress, probe, probeOne, cancel }
+  return { results, progress, probe, cancel }
 }

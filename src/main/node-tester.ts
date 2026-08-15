@@ -6,12 +6,22 @@ import { IPC } from '../shared/ipc-channels'
 // dVPN nodes use self-signed TLS certificates, so we need a custom agent
 const insecureAgent = new https.Agent({ rejectUnauthorized: false })
 
-/** Fetch a URL accepting self-signed certs (for node probes). */
-function nodeFetch(url: string, timeoutMs: number): Promise<{ status: number; body: string }> {
+/**
+ * Fetch a URL accepting self-signed certs (for node probes).
+ *
+ * `agent` overrides the direct one, which is how the multihop path asks a node about
+ * itself THROUGH the entry hop instead of from the user's own address (see
+ * socks-agent.ts). It must carry its own rejectUnauthorized:false.
+ */
+function nodeFetch(
+  url: string,
+  timeoutMs: number,
+  agent?: https.Agent,
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const isHttps = url.startsWith('https')
     const mod = isHttps ? https : http
-    const options = isHttps ? { agent: insecureAgent } : {}
+    const options = isHttps ? { agent: agent ?? insecureAgent } : {}
     const req = mod.get(url, options, (res) => {
       let data = ''
       res.on('data', (chunk: Buffer) => { data += chunk.toString() })
@@ -135,8 +145,8 @@ export async function probeNode(remoteUrl: string, nodeAddress: string): Promise
  * Throws when the node is unreachable or the response isn't the expected shape,
  * so the caller can tell "mismatch" apart from "couldn't ask".
  */
-export async function fetchNodeServiceType(remoteUrl: string): Promise<string | number> {
-  const serviceType = (await fetchNodeRoot(remoteUrl)).service_type
+export async function fetchNodeServiceType(remoteUrl: string, agent?: https.Agent): Promise<string | number> {
+  const serviceType = (await fetchNodeRoot(remoteUrl, agent)).service_type
   if (serviceType === undefined) throw new Error('Node did not report a service type')
   return serviceType
 }
@@ -151,8 +161,8 @@ export async function fetchNodeServiceType(remoteUrl: string): Promise<string | 
  * and `tls_pin: ""` here, because both are minted per session and only appear in
  * the handshake response. `classifyHopEligibility` is written to that shape.
  */
-export async function fetchNodeServiceMetadata(remoteUrl: string): Promise<NodeInboundListing[]> {
-  const metadata = (await fetchNodeRoot(remoteUrl)).service_metadata
+export async function fetchNodeServiceMetadata(remoteUrl: string, agent?: https.Agent): Promise<NodeInboundListing[]> {
+  const metadata = (await fetchNodeRoot(remoteUrl, agent)).service_metadata
   if (!Array.isArray(metadata)) throw new Error('this node runs a version older than 9.0.0, which publishes no inbound list')
   return metadata
 }
@@ -170,17 +180,67 @@ interface NodeRootInfo {
   service_metadata?: NodeInboundListing[]
 }
 
-async function fetchNodeRoot(remoteUrl: string): Promise<NodeRootInfo> {
+/**
+ * In-flight/just-finished root reads, so back-to-back questions about the SAME node
+ * cost one request. The pre-purchase gate asks two of them within milliseconds
+ * (`preflightConnect` wants `service_type`, `assertChainEligible` wants
+ * `service_metadata`, both from this one document), and for a chain that was four
+ * requests with a 10s timeout each in front of the connect button.
+ *
+ * Deliberately tiny and success-only: this must not turn into the answer cache that
+ * `chainEligibilityCache` already is, and a node that failed has to be retried, not
+ * remembered. Long enough to span one connect attempt, short enough that nothing else
+ * can observe a stale reading.
+ */
+const ROOT_MEMO_MS = 5000
+const rootMemo = new Map<string, { at: number; info: NodeRootInfo }>()
+
+/**
+ * A stable id per agent, so the memo below can be keyed by ROUTE as well as URL.
+ *
+ * Load-bearing for multihop privacy, not just tidiness: the picker probes candidate
+ * exits directly, and the purchase-time checks then ask the same node the same question
+ * through the entry hop. Keyed on the URL alone, that direct answer would satisfy the
+ * proxied read and the request that was supposed to come from the entry would simply
+ * never be made — the fix would look like it worked while changing nothing.
+ */
+const agentIds = new WeakMap<https.Agent, number>()
+let nextAgentId = 1
+function routeKey(agent?: https.Agent): string {
+  if (!agent) return 'direct'
+  let id = agentIds.get(agent)
+  if (id === undefined) {
+    id = nextAgentId++
+    agentIds.set(agent, id)
+  }
+  return `via${id}`
+}
+
+async function fetchNodeRoot(remoteUrl: string, agent?: https.Agent): Promise<NodeRootInfo> {
   if (typeof remoteUrl !== 'string' || remoteUrl.trim() === '') {
     throw new Error('Node has no API endpoint')
   }
   const normalizedUrl = remoteUrl.startsWith('http') ? remoteUrl : `https://${remoteUrl}`
-  const response = await nodeFetch(normalizedUrl.replace(/\/+$/, '') + '/', 8000)
+  const url = normalizedUrl.replace(/\/+$/, '') + '/'
+  const now = Date.now()
+  const memoKey = `${routeKey(agent)} ${url}`
+  const memo = rootMemo.get(memoKey)
+  if (memo && now - memo.at < ROOT_MEMO_MS) return memo.info
+
+  // Through a proxy this request crosses an extra hop before it reaches the node, so
+  // the direct budget is not the right one. Being mean here would fail a chain whose
+  // ENTRY session is already paid for, over latency we introduced ourselves.
+  const response = await nodeFetch(url, agent ? 15000 : 8000, agent)
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`Node returned HTTP ${response.status}`)
   }
   const json = JSON.parse(response.body) as { result?: NodeRootInfo }
-  return json.result ?? {}
+  const info = json.result ?? {}
+  // Bounded by time, but also by size, so a long picker session probing hundreds of
+  // nodes can't grow this without limit.
+  if (rootMemo.size > 200) rootMemo.clear()
+  rootMemo.set(memoKey, { at: now, info })
+  return info
 }
 
 export async function probeBatch(

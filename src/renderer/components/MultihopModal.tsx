@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { SentNode, TunnelProtocol, WalletEntry } from '../types'
 import { useNodesContext } from '../contexts/NodesContext'
 import { useBalance } from '../hooks/useBalance'
@@ -9,6 +9,7 @@ import { checkFunds, formatP2p, insufficientFundsMessage } from '../../shared/fu
 import { protocolMeta } from '../utils/protocols'
 import { COUNTRY_CODES } from '../utils/country-codes'
 import ConnectErrorActions from './ConnectErrorActions'
+import InfoTip from './InfoTip'
 import InsufficientFunds from './InsufficientFunds'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
@@ -375,28 +376,43 @@ export default function MultihopModal({ onClose }: Props) {
               <HopRow label="Exit" hint="Sees where you go. Reached only through the entry, setup included." node={exit} price={exitPrice} billing={billing} />
             </div>
 
+            {/* One line per outcome, reasoning behind the "?". The refused variant keeps
+                its full first sentence visible: it is the one that blocks the Buy button,
+                so the user needs to know what to change without hovering anything. */}
             {exitGrade && (
-              <div className={`text-xs ${exitRefused ? 'text-danger' : exitGrade.reachable ? 'text-text-tertiary' : 'text-warning'}`}>
+              <div className={`text-xs flex items-start justify-between gap-2 ${exitRefused ? 'text-danger' : exitGrade.reachable ? 'text-text-tertiary' : 'text-warning'}`}>
                 {exitRefused ? (
                   <>
-                    This node serves {exitGrade.transports.join(', ') || 'no usable transport'} and no plain TCP,
-                    so it cannot be the exit. Only TCP survives being carried inside the entry hop.
-                    Pick another exit; this node is still fine as an entry.
+                    <p>
+                      Cannot be the exit: serves {exitGrade.transports.join(', ') || 'no usable transport'} and
+                      no plain TCP. Still fine as an entry.
+                    </p>
+                    <InfoTip label="Why this node cannot be the exit">
+                      Only plain TCP survives being carried inside the entry hop: grpc and websocket
+                      bring their own dialer. Pick another exit.
+                    </InfoTip>
                   </>
                 ) : exitGrade.reachable ? (
                   <>
-                    Exit checked: this node serves plain TCP, so it can be chained, and the hop will
-                    be wrapped in{' '}
-                    <span className="text-success">
-                      {exitGrade.exitSecurity === 'reality' ? 'Reality' : 'TLS, with the node\'s certificate pinned'}
-                    </span>.
-                    {exitGrade.transports.length > 1 && ` It also offers ${exitGrade.transports.filter((t) => t !== 'tcp').join(', ')}, which cannot be chained.`}
+                    <p>
+                      Exit verified: plain TCP, wrapped in{' '}
+                      <span className="text-success">
+                        {exitGrade.exitSecurity === 'reality' ? 'Reality' : 'TLS'}
+                      </span>.
+                    </p>
+                    <InfoTip label="What was verified on this exit">
+                      This node serves plain TCP, so it can be chained, and the hop will be wrapped in{' '}
+                      {exitGrade.exitSecurity === 'reality' ? 'Reality' : "TLS, with the node's certificate pinned"}.
+                      {exitGrade.transports.length > 1 && ` It also offers ${exitGrade.transports.filter((t) => t !== 'tcp').join(', ')}, which cannot be chained.`}
+                    </InfoTip>
                   </>
                 ) : (
                   <>
-                    Exit not checked: {exitGrade.error ?? 'the node did not answer'}. Whether it can be chained
-                    is unknown until the handshake. If it can't, both sessions are cancelled and refunded
-                    automatically.
+                    <p>Exit not checked: {exitGrade.error ?? 'the node did not answer'}.</p>
+                    <InfoTip label="What happens if this exit cannot be chained">
+                      Whether it can be chained is unknown until the handshake. If it can't, both
+                      sessions are cancelled and refunded automatically.
+                    </InfoTip>
                   </>
                 )}
               </div>
@@ -404,28 +420,32 @@ export default function MultihopModal({ onClose }: Props) {
 
             {issues.length > 0 && (
               <div className={`border p-3 rounded-md space-y-2 ${operatorOverlap ? 'bg-danger-subtle border-danger' : 'bg-warning-subtle border-warning'}`}>
-                <p className={`text-sm font-medium ${operatorOverlap ? 'text-danger' : 'text-warning'}`}>
-                  {operatorOverlap ? 'These two hops may belong to one operator' : 'Both hops are in one country'}
-                </p>
+                {/* The observations and the override stay visible: they ARE the decision.
+                    Only the "why that matters" sentence moves behind the "?". */}
+                <div className="flex items-start justify-between gap-2">
+                  <p className={`text-sm font-medium ${operatorOverlap ? 'text-danger' : 'text-warning'}`}>
+                    {operatorOverlap ? 'These two hops may belong to one operator' : 'Both hops are in one country'}
+                  </p>
+                  {operatorOverlap && (
+                    <InfoTip label="Why one operator holding both hops matters">
+                      One operator holding both hops sees your IP at one end and your destinations at
+                      the other, so the chain protects nothing and you pay twice.
+                    </InfoTip>
+                  )}
+                </div>
                 <ul className="text-text-secondary text-xs space-y-1 list-disc list-inside">
                   {issues.map((i) => <li key={i.key}>{i.label}</li>)}
                 </ul>
                 {operatorOverlap && (
-                  <>
-                    <p className="text-text-tertiary text-xs">
-                      One operator holding both hops sees your IP at one end and your destinations at the
-                      other, so the chain protects nothing and you pay twice.
-                    </p>
-                    <label className="flex items-start gap-2 cursor-pointer text-xs text-text-secondary">
-                      <input
-                        type="checkbox"
-                        checked={overrideDiversity}
-                        onChange={(e) => setOverrideDiversity(e.target.checked)}
-                        className="accent-accent mt-0.5"
-                      />
-                      <span>These are different operators. Build it anyway.</span>
-                    </label>
-                  </>
+                  <label className="flex items-start gap-2 cursor-pointer text-xs text-text-secondary">
+                    <input
+                      type="checkbox"
+                      checked={overrideDiversity}
+                      onChange={(e) => setOverrideDiversity(e.target.checked)}
+                      className="accent-accent mt-0.5"
+                    />
+                    <span>These are different operators. Build it anyway.</span>
+                  </label>
                 )}
               </div>
             )}
@@ -464,7 +484,7 @@ export default function MultihopModal({ onClose }: Props) {
                   lasts as long as its SHORTER half — buying different amounts per hop
                   would just strand the difference. One amount, applied to both. */}
               <p className="text-text-tertiary text-xs">
-                Bought on both hops. The chain ends when either half runs out.
+                Ends when either half runs out.
               </p>
               {balance !== null && (
                 <div className="text-sm text-text-secondary">
@@ -508,49 +528,62 @@ export default function MultihopModal({ onClose }: Props) {
                   <option key={w.id} value={w.id}>{w.name} · {w.address.slice(0, 12)}…{w.address.slice(-6)}</option>
                 ))}
               </select>
+              {/* One line per state. The two that must never read as a pass keep their own
+                  colour and their own wording: `linked` stays a danger card, and
+                  `checked: false` stays amber and says it could not check, never nothing. */}
               {exitWalletId ? (
                 walletLink === null ? (
                   <p className="text-text-tertiary text-xs flex items-center gap-1.5">
-                    <Spinner className="text-accent" /> Checking whether these two accounts are already
-                    linked on chain…
+                    <Spinner className="text-accent" /> Checking whether these accounts are linked…
                   </p>
                 ) : walletLink.linked ? (
-                  <div className="bg-danger-subtle border border-danger p-3 rounded-md space-y-1">
-                    <p className="text-danger text-xs font-medium">
-                      These two wallets are already linked on chain
-                    </p>
-                    <p className="text-text-secondary text-xs">
-                      There is a transfer between this wallet and your active one, and transfers are
-                      public. Anyone who sees both hops can follow it back and join them, so paying
-                      the hops separately buys you nothing here. To get the benefit, the exit wallet
-                      needs funds that never touched the other account.
-                    </p>
+                  <div className="bg-danger-subtle border border-danger p-3 rounded-md">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-danger text-xs font-medium">
+                        These two wallets are already linked on chain, so paying separately buys
+                        nothing
+                      </p>
+                      <InfoTip label="Why a transfer between the wallets undoes this">
+                        There is a transfer between this wallet and your active one, and transfers are
+                        public. Anyone who sees both hops can follow it back and join them. To get the
+                        benefit, the exit wallet needs funds that never touched the other account.
+                      </InfoTip>
+                    </div>
                   </div>
                 ) : walletLink.checked ? (
-                  <p className="text-text-tertiary text-xs">
-                    <span className="text-success">No direct transfer between these two accounts</span>, so
-                    neither node can pair them by following coins from one to the other. Only that one hop
-                    is checked: if both wallets were funded from the same third account, an exchange
-                    withdrawal for instance, that account still joins them.
+                  <p className="text-text-tertiary text-xs flex items-start justify-between gap-2">
+                    <span className="text-success">No direct transfer between these accounts.</span>
+                    <InfoTip label="What this check does and does not cover">
+                      Neither node can pair them by following coins from one to the other. Only that
+                      one hop is checked: if both wallets were funded from the same third account, an
+                      exchange withdrawal for instance, that account still joins them.
+                    </InfoTip>
                   </p>
                 ) : (
-                  <p className="text-warning text-xs">
-                    Couldn't check whether these two accounts are linked (the RPC did not answer, or
-                    keeps no transaction index). If you funded this wallet from the other one, that
-                    transfer is public and the hops are still joined.
+                  <p className="text-warning text-xs flex items-start justify-between gap-2">
+                    <span>Couldn't check whether these accounts are linked.</span>
+                    <InfoTip label="Why the link check could not run">
+                      The RPC did not answer, or keeps no transaction index. If you funded this wallet
+                      from the other one, that transfer is public and the hops are still joined.
+                    </InfoTip>
                   </p>
                 )
               ) : wallets.filter((w) => w.address !== activeAddress).length === 0 ? (
-                <p className="text-text-tertiary text-xs">
-                  You have one wallet, so both hops are paid from it and either node can find the
-                  other by looking up your account on chain. Import a second wallet, funded from
-                  somewhere other than this one, to close that.
+                <p className="text-text-tertiary text-xs flex items-start justify-between gap-2">
+                  <span>Both hops paid from this wallet, so either node can find the other.</span>
+                  <InfoTip label="How to pay the hops from separate wallets">
+                    A session's account is public on chain, so either node can look your address up
+                    and find the other hop. Import a second wallet, funded from somewhere other than
+                    this one, to close that.
+                  </InfoTip>
                 </p>
               ) : (
-                <p className="text-warning text-xs">
-                  Both hops paid from one account: either node can read your address off its own
-                  session and find the other hop with a public query. Pick a second wallet to
-                  prevent that.
+                <p className="text-warning text-xs flex items-start justify-between gap-2">
+                  <span>Both hops on one account: either node can find the other.</span>
+                  <InfoTip label="Why one account links the two hops">
+                    Either node can read your address off its own session and find the other hop with
+                    a public query. Pick a second wallet to prevent that.
+                  </InfoTip>
                 </p>
               )}
             </div>
@@ -571,46 +604,59 @@ export default function MultihopModal({ onClose }: Props) {
                   </label>
                 ))}
               </div>
-              <p className="text-text-tertiary text-xs">
-                {mode === 'tunnel'
-                  ? 'Routes your whole device through the chain (needs admin rights).'
-                  : 'Runs a SOCKS5 proxy on 127.0.0.1:1080. No admin password, but only apps you point at it use the chain, and there is no kill switch.'}
+              <p className="text-text-tertiary text-xs flex items-start justify-between gap-2">
+                <span>
+                  {mode === 'tunnel'
+                    ? 'Routes your whole device through the chain. Needs admin rights.'
+                    : 'SOCKS5 on 127.0.0.1:1080. Only apps you point at it use the chain, and there is no kill switch.'}
+                </span>
+                {mode === 'proxy' && (
+                  <InfoTip label="More about local proxy mode">
+                    No admin password is needed, because nothing about your routing changes.
+                    Everything you do not point at the proxy leaves your device as normal.
+                  </InfoTip>
+                )}
               </p>
             </div>
 
             {/* The honest part. Every claim here is measured or verified on chain —
-                see the multihop threat model. Do not soften it into "anonymity". */}
+                see the multihop threat model. Do not soften it into "anonymity".
+
+                Five paragraphs became five rows because ~250 words of undifferentiated
+                grey right before two deposits is text nobody reads. Each row keeps its
+                paragraph VERBATIM behind the "?", and the glyph carries the same
+                success/warning/danger grading each paragraph used to open with — this is
+                a demotion, not a cut. Anything measured (the 20x) stays visible, because
+                a number is what the decision turns on. */}
             <div className="border border-border rounded-md p-3 space-y-2 text-xs">
-              <p className="text-text-primary font-medium">Before you pay, what this does and doesn't do</p>
-              <p className="text-text-secondary">
-                <span className="text-success">Protects against one dishonest node.</span> The entry sees your
-                IP but not your destinations; the exit sees your destinations, and your traffic reaches it
-                only through the entry. Neither alone watches both ends of your browsing.
-              </p>
-              <p className="text-text-secondary">
-                <span className="text-success">The exit is set up through the entry.</span> Buying a session
-                means asking a node for its keys, and for the exit that request is carried by the entry hop,
-                so the exit sees the entry's address and never yours. One thing it does not cover: while you
-                were choosing, this app asked candidate nodes what they support, directly. That question
-                carries no wallet and no session, but it did come from you.
-              </p>
-              <p className="text-text-secondary">
-                <span className="text-warning">Each hop authenticates itself with keys it sends you.</span>{' '}
-                Nodes use self-signed certificates and there is nothing on chain to check them against, so
-                whoever can intercept the setup request can answer it. That is the same trust every
-                single-hop connection here relies on, and worth knowing when the observer you are avoiding
-                is the network you are on.
-              </p>
-              <p className="text-text-secondary">
-                <span className="text-danger">Does not make you anonymous.</span>{' '}
+              <p className="text-text-primary font-medium">Before you pay</p>
+              <ThreatRow tone="success" text="No one node sees both ends" label="How the two hops split what they can see">
+                The entry sees your IP but not your destinations; the exit sees your destinations,
+                and your traffic reaches it only through the entry. Neither alone watches both ends
+                of your browsing.
+              </ThreatRow>
+              <ThreatRow tone="success" text="The exit is set up through the entry" label="How the exit is provisioned">
+                Buying a session means asking a node for its keys, and for the exit that request is
+                carried by the entry hop, so the exit sees the entry's address and never yours. One
+                thing it does not cover: while you were choosing, this app asked candidate nodes what
+                they support, directly. That question carries no wallet and no session, but it did
+                come from you.
+              </ThreatRow>
+              <ThreatRow tone="warning" text="Each hop vouches for its own keys" label="What the node keys are checked against">
+                Nodes use self-signed certificates and there is nothing on chain to check them
+                against, so whoever can intercept the setup request can answer it. That is the same
+                trust every single-hop connection here relies on, and worth knowing when the observer
+                you are avoiding is the network you are on.
+              </ThreatRow>
+              <ThreatRow tone="danger" text="This is not anonymity" label="What a chain still does not hide">
                 {exitWalletId
                   ? 'Two operators working together can still match the traffic itself, since the same bytes cross both hops at the same moments. Paying each hop from a different account stops them pairing you on chain; it does not stop them comparing notes.'
                   : "Both sessions are paid from this one wallet, and a session's account is public on chain, so either node can look up the other and pair them. Two operators working together can also match the traffic itself, since the same bytes cross both hops."}
-              </p>
-              <p className="text-text-secondary">
-                <span className="text-warning">Costs twice, and it is slow.</span> Two sessions, two deposits.
-                Measured on a live chain: roughly 20× the latency of a single hop.
-              </p>
+              </ThreatRow>
+              <ThreatRow tone="warning" text="Two deposits, and about 20x slower" label="What a chain costs">
+                Two sessions, two deposits, and each is billed separately. The latency figure is
+                measured on a live chain, not estimated.
+              </ThreatRow>
               {/* The chain cannot close this one by itself. With the resolver on System
                   Default and the kill switch off, DNS goes to the LAN resolver, which is
                   a more specific route than tun2socks' /1 halves, so it never enters the
@@ -618,12 +664,14 @@ export default function MultihopModal({ onClose }: Props) {
                   hide exactly that. Full tunnel only, since proxy mode routes nothing. */}
               {mode === 'tunnel' && dnsResolver === 'system' && (
                 <div className="border border-warning bg-warning-subtle rounded-md p-2.5 space-y-1.5">
-                  <p className="text-warning">Your DNS would still go to your own network.</p>
-                  <p className="text-text-secondary">
-                    DNS is set to System Default, which is usually your router. That lookup is not
-                    routed through the chain, so your provider still sees every domain you visit even
-                    though your traffic does not go near them.
-                  </p>
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-warning">Your DNS would still go to your own network.</p>
+                    <InfoTip label="Why DNS escapes the chain">
+                      DNS is set to System Default, which is usually your router. That lookup is not
+                      routed through the chain, so your provider still sees every domain you visit
+                      even though your traffic does not go near them.
+                    </InfoTip>
+                  </div>
                   <button
                     type="button"
                     onClick={handleUseEncryptedDns}
@@ -641,7 +689,7 @@ export default function MultihopModal({ onClose }: Props) {
                   onChange={(e) => setAcknowledged(e.target.checked)}
                   className="accent-accent mt-0.5"
                 />
-                <span>I've read this.</span>
+                <span>I understand what a chain does and does not hide.</span>
               </label>
             </div>
 
@@ -696,8 +744,8 @@ export default function MultihopModal({ onClose }: Props) {
               </div>
             </div>
             <p className="text-text-tertiary text-xs">
-              Buying both hops takes two transactions. Leave this open: if anything fails after a
-              session is paid for, it is cancelled automatically.
+              Leave this open. If anything fails after a session is paid for, it is cancelled
+              automatically.
             </p>
           </div>
         )}
@@ -854,6 +902,34 @@ function HopProgress({ label, node, stage, detail }: {
   )
 }
 
+/**
+ * One line of the "Before you pay" card: a graded glyph, a short claim, and the full
+ * paragraph behind a "?".
+ *
+ * The tone is the same success/warning/danger grading the paragraphs used to carry as a
+ * coloured opening phrase, so nothing about the honesty of the block changes — only how
+ * much of it is on screen at rest.
+ */
+function ThreatRow({ tone, text, label, children }: {
+  tone: 'success' | 'warning' | 'danger'
+  text: string
+  label: string
+  children: ReactNode
+}) {
+  const glyph = tone === 'success' ? '✓' : tone === 'warning' ? '!' : '✕'
+  const color = tone === 'success' ? 'text-success' : tone === 'warning' ? 'text-warning' : 'text-danger'
+  return (
+    <div className="flex items-start gap-2">
+      <span className={`${color} w-3 shrink-0 text-center leading-5`}>{glyph}</span>
+      <span className="text-text-secondary flex-1 leading-5">{text}</span>
+      {/* Optically centred against the 20px line rather than top-aligned to it. */}
+      <span className="mt-[3px]">
+        <InfoTip label={label}>{children}</InfoTip>
+      </span>
+    </div>
+  )
+}
+
 function HopRow({ label, hint, node, price, billing }: {
   label: string
   hint: string
@@ -983,36 +1059,53 @@ function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibilit
     // h-full + a flex-1 list, so the rows fill whatever the fixed-height modal
     // leaves rather than stopping short of it.
     <div className="space-y-3 h-full flex flex-col">
-      <p className="text-text-secondary text-xs shrink-0">
-        {role === 'entry' ? (
-          <>
-            The entry node is the one your device dials directly, so it sees your real IP and nothing
-            about where you go. It is also the hop your own network and ISP can see, which is why it
-            has to be wrapped.
-          </>
-        ) : (
-          <>
-            The exit node is reached through the entry, both for your traffic and for the request
-            that sets it up, so your packets never arrive at it directly and sites see its location
-            instead of yours. It must also serve plain TCP, because grpc and websocket bring their
-            own dialer and break when chained.
-          </>
-        )}
-      </p>
-      {/* The enforced rule is "not cleartext", which is narrower than "TLS only":
+      {/* One line, with the reasoning behind the "?". Both roles used to open with a
+          paragraph, and the second one (the TLS rule below) was word-for-word the same
+          on each, so choosing two nodes meant reading it twice. */}
+      <div className="flex items-start justify-between gap-2 shrink-0">
+        <p className="text-text-secondary text-xs">
+          {role === 'entry'
+            ? 'Your device dials this node directly, so it sees your IP and not where you go.'
+            : 'Reached only through the entry, setup included, so sites see its location instead of yours.'}
+        </p>
+        <InfoTip label={`More about the ${role} node`}>
+          {role === 'entry' ? (
+            <>
+              It is also the hop your own network and ISP can see, which is why it has to be
+              wrapped.
+            </>
+          ) : (
+            <>
+              It must also serve plain TCP: grpc and websocket bring their own dialer and break
+              when carried inside another hop.
+            </>
+          )}
+        </InfoTip>
+      </div>
+      {/* A legend, not a paragraph. The rule it replaced ran 72 words to explain four
+          badges that already carry their own per-node `title`, and the badges are what
+          the user actually reads.
+
+          The enforced rule is "not cleartext", which is narrower than "TLS only":
           VMess carries its own AEAD cipher, so VMess without TLS is accepted while
           VLess without TLS is refused. Every exit-capable node measured on
           2026-08-14 (138 of them) served TLS or Reality, but that is a fact about
           today's network and not something to promise, so the badge reports each
           node's actual security instead. */}
-      <p className="text-text-tertiary text-xs shrink-0">
-        Both hops of a chain must be wrapped in <span className="text-success">TLS</span> or{' '}
-        <span className="text-success">Reality</span>, which is stricter than an ordinary connection.
-        A VMess hop without TLS is still encrypted, but it is recognisable as a proxy to anyone
-        watching the wire, and that is the thing a chain is bought to avoid. Nodes older than 9.0.0
-        publish nothing to check against that rule, so they are listed for context but cannot be
-        picked.
-      </p>
+      <div className="flex items-start justify-between gap-2 text-text-tertiary text-xs shrink-0">
+        <p>
+          <span className="text-success">TLS</span> or <span className="text-success">Reality</span>{' '}
+          chainable · <span className="text-danger">no TLS</span> not eligible ·{' '}
+          <span className="text-text-tertiary">v8.x</span> too old to check
+        </p>
+        <InfoTip label="Why both hops need TLS or Reality">
+          Both hops of a chain must be wrapped in TLS or Reality, which is stricter than an
+          ordinary connection. A VMess hop without TLS is still encrypted, but it is
+          recognisable as a proxy to anyone watching the wire, and that is the thing a chain is
+          bought to avoid. Nodes older than 9.0.0 publish nothing to check against that rule, so
+          they are listed for context but cannot be picked.
+        </InfoTip>
+      </div>
 
       <div className="flex items-center gap-2 flex-wrap shrink-0">
         <input

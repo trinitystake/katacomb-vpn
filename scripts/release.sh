@@ -8,7 +8,8 @@
 # It stops before anything leaves this machine: it never pushes and never creates
 # a GitHub release. The last thing it prints is the exact commands for those.
 #
-# Produces in dist/:
+# Produces in dist/, which it WIPES first (along with out/) so that what is left
+# afterwards is exactly this build:
 #     katacomb-vpn_<version>_amd64.deb
 #     katacomb-vpn-<version>.AppImage
 #     SHA256SUMS       checksums of exactly those two files
@@ -16,6 +17,60 @@
 #
 # The version bump is committed and tagged only if every earlier step passed; if
 # a later one fails the bump is rolled back, so a re-run starts from a clean tree.
+#
+# ---------------------------------------------------------------------------
+# THE WHOLE RELEASE, of which this script is only step 1. The order is not
+# cosmetic — every one of these was learned by getting it wrong on 1.0.0.
+#
+#   0. notes      Rewrite RELEASE_NOTES.md. Preflight refuses a heading naming
+#                 another version, but it cannot tell you the BODY is stale.
+#                 Then decide whether step 2 applies:
+#                     git diff --stat v<PREV>..HEAD -- electron-builder.yml resources/linux/
+#                 Any output means packaging changed and step 2 is required.
+#
+#   1. cut        ./scripts/release.sh <version> --dry-run     (preflight is real)
+#                 ./scripts/release.sh <version>
+#
+#   2. packaging  sudo ./scripts/verify-deb-portability.sh fullcycle
+#                 ONLY when step 0 found packaging changes. Must run AFTER the
+#                 cut: it picks its deb by mtime, so run first it tests the
+#                 PREVIOUS release (or dies, if dist/ is empty). It ends with the
+#                 package UNINSTALLED, which is why step 3 exists.
+#
+#   3. install    sudo apt install ./dist/katacomb-vpn_<version>_amd64.deb
+#
+#   4. reboot     NOT a logout. postrm runs `groupdel katacomb-vpn`, so step 2
+#                 destroyed the group and step 3 recreated it: any login you did
+#                 earlier is stale. A logout that silently fails to start a new
+#                 session looks identical to one that worked — check with
+#                 `loginctl show-session <id> -p Timestamp` against
+#                 `stat -c %y /etc/group` if you skip the reboot anyway.
+#
+#   5. precondition   id -nG | grep katacomb
+#                 Must print the group BEFORE you read anything into step 6.
+#
+#   6. test       Connect, then disconnect. Neither should prompt for a password.
+#                 "No prompt" only means the daemon worked if step 5 passed AND a
+#                 privileged call actually ran: the app adopts a tunnel that is
+#                 already up and asks root for nothing, which looks the same.
+#                 If this release touched connect/disconnect, also test on the
+#                 pkexec path (before step 4, while you still lack the group) —
+#                 the polkit dialog holds the tunnel half-built for as long as you
+#                 leave it open, which is the only comfortable way to watch that
+#                 window.
+#
+#   7. publish    git push origin main && git push origin v<version>
+#                 gh release create v<version> --notes-file RELEASE_NOTES.md \
+#                     dist/katacomb-vpn_<version>_amd64.deb \
+#                     dist/katacomb-vpn-<version>.AppImage \
+#                     dist/SHA256SUMS dist/SHA256SUMS.asc
+#                 The tag has to land before the release, or GitHub cannot attach
+#                 the assets to it.
+#
+# Nothing is public until step 7, so anything that fails before it unwinds with:
+#     git tag -d v<version> && git reset --hard HEAD~1   # release commit is HEAD
+#     git rebase --onto <before-release> <release-commit>  # if work sits on top
+# ---------------------------------------------------------------------------
 
 set -euo pipefail
 
@@ -25,7 +80,7 @@ set -euo pipefail
 SIGNING_KEY=7315246A6E67F3C6
 RELEASE_BRANCH=main
 MIN_NODE_MAJOR=22                 # `npm test` needs native TS type stripping
-TOTAL=8
+TOTAL=9
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -130,18 +185,36 @@ else
   info "no $NOTES yet, the GitHub release will need its notes typed by hand"
 fi
 
-# --- 2. bump ----------------------------------------------------------------
-step 2 "bump package.json to $VERSION"
+# --- 2. clean build outputs -------------------------------------------------
+# After preflight, so a refused release (stale notes, dirty tree, existing tag)
+# never destroys anything. dist/ otherwise accumulates every past release, and
+# both of its consumers are blind to that: verify-deb-portability.sh picks its
+# deb with `ls -t`, and `npm run checksums` globs every version into one file.
+# Wiping first means what is in dist/ afterwards is exactly this build. The
+# artifacts of past releases live on their GitHub release, not here.
+step 2 "clean build outputs"
+for d in dist out; do
+  if [ -d "$d" ]; then
+    info "$d ($(find "$d" -type f | wc -l) files, $(du -sh "$d" | cut -f1))"
+    run rm -rf "$d"
+  else
+    info "$d (absent)"
+  fi
+done
+[ "$DRY_RUN" = 1 ] || ok "dist/ and out/ removed"
+
+# --- 3. bump ----------------------------------------------------------------
+step 3 "bump package.json to $VERSION"
 run npm version "$VERSION" --no-git-tag-version
 [ "$DRY_RUN" = 1 ] || { BUMPED=1; ok "package.json and package-lock.json at $VERSION"; }
 
-# --- 3. verify --------------------------------------------------------------
-step 3 "typecheck and unit tests"
+# --- 4. verify --------------------------------------------------------------
+step 4 "typecheck and unit tests"
 run npm run typecheck
 run npm test
 
-# --- 4. build ---------------------------------------------------------------
-step 4 "build both artifacts (this takes a few minutes)"
+# --- 5. build ---------------------------------------------------------------
+step 5 "build both artifacts (this takes a few minutes)"
 run npm run dist
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -153,10 +226,10 @@ else
   ok "$APPIMAGE_NAME ($(du -h "dist/$APPIMAGE_NAME" | cut -f1))"
 fi
 
-# --- 5. checksums -----------------------------------------------------------
+# --- 6. checksums -----------------------------------------------------------
 # Named explicitly rather than through `npm run checksums`, whose glob would fold
 # every older build still sitting in dist/ into this release's SHA256SUMS.
-step 5 "checksums"
+step 6 "checksums"
 if [ "$DRY_RUN" = 1 ]; then
   info "would write dist/SHA256SUMS over $DEB_NAME and $APPIMAGE_NAME"
 else
@@ -164,22 +237,22 @@ else
   ok "dist/SHA256SUMS"
 fi
 
-# --- 6. sign ----------------------------------------------------------------
+# --- 7. sign ----------------------------------------------------------------
 # No --batch: the key is passphrase-protected and pinentry needs to be able to ask.
-step 6 "sign with $SIGNING_KEY"
+step 7 "sign with $SIGNING_KEY"
 run gpg --yes --armor --local-user "$SIGNING_KEY" \
         --detach-sign --output dist/SHA256SUMS.asc dist/SHA256SUMS
 run gpg --verify dist/SHA256SUMS.asc dist/SHA256SUMS
 [ "$DRY_RUN" = 1 ] || ok "dist/SHA256SUMS.asc verifies"
 
-# --- 7. commit --------------------------------------------------------------
-step 7 "commit the version bump"
+# --- 8. commit --------------------------------------------------------------
+step 8 "commit the version bump"
 run git add package.json package-lock.json
 run git commit -q -m "Release $TAG"
 [ "$DRY_RUN" = 1 ] || { COMMITTED=1; ok "$(git log --oneline -1)"; }
 
-# --- 8. tag -----------------------------------------------------------------
-step 8 "tag $TAG"
+# --- 9. tag -----------------------------------------------------------------
+step 9 "tag $TAG"
 run git tag -a "$TAG" -m "Katacomb VPN $VERSION"
 [ "$DRY_RUN" = 1 ] || ok "$TAG -> $(git rev-parse --short "$TAG")"
 

@@ -258,6 +258,28 @@ The connect path spends real on-chain funds, so these are enforced and must hold
     not a fault. It stands down through `standDownSession('stalled')` rather than
     `attemptReconnect` — with auto-reconnect off, that gate returns silently and
     leaves the dead tunnel up, which is the state being detected.
+- **…and a live child proxy is not a tunnel either. Two predicates, two questions.**
+  `getConnectionStatus().connected` means *traffic is being carried*;
+  `isProxyChildAlive()` means *the spawned core survived startup*. They were one
+  predicate, and that is a lie in exactly one window. In PROXY mode the core is the
+  whole connection, but in TUNNEL mode the redirection **is** tun2socks, and
+  `connectV2Ray`/`connectXRay`/`connectHysteria2` spawn the core and only THEN await
+  `tun-up` through polkit. So for as long as the password dialog stands open the child
+  is alive, no TUN exists, and every packet still leaves by the physical NIC. Live on
+  1.0.0: green "Connected" banner, session card badged live, and the user's real home
+  IP on screen, before the password was typed. `IpDisplay` made it stick — it refetches
+  1.5 s after `connected` flips and then stops polling while connected, so it cached the
+  untunneled answer until a manual refresh. The pure `isChildProxyCarryingTraffic`
+  (`connect-decisions.ts`, unit-tested) is the gate; `isVpnActive()` keeps its
+  documented meaning, "system traffic is redirected", which is FALSE in that window.
+  **It was invisible until `runPrivileged` went async** (the fix for the disconnect
+  freeze): while it was `execFileSync` the main process could not turn the event loop
+  during the dialog, so the 3 s status poll never observed the gap. WireGuard was never
+  affected, its branch checks for the interface. **And the four sites that spawn the
+  core, wait 1500 ms and ask whether it survived** (the reconnect body plus the
+  v2ray/xray/hysteria2 connect branches) MUST use `isProxyChildAlive()` — pointed at
+  the traffic predicate they fail *every* tunnel-mode connect with "process exited
+  immediately after starting", which is worse than the bug.
 - **Reconnect re-handshakes first, and a 409 back means the node kept the RECORD —
   it says nothing about the PEER.** `CONNECTION_RECONNECT` calls `performHandshake`
   for the session before falling back to `SavedSessionConfig.configString`. Read

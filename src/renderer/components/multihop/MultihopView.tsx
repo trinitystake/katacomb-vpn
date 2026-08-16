@@ -10,6 +10,7 @@ import {
   isCheckable,
   isVerifiedFor,
   udvpnPrice,
+  type BillingType,
   type ChainRole,
 } from '../../utils/chain-node'
 import { formatP2p } from '../../../shared/funds'
@@ -88,7 +89,7 @@ const TONE_CLASS = {
 export default function MultihopView() {
   const { status, disconnect } = useConnection()
   const { results: testResults, testing: testingNodes, batchProgress, testBatch, cancelBatch, testNode } = useNodeTest()
-  const { entry, exit, activeSlot, setActiveSlot, setSlot, billing, eligibility } = useChainDraft()
+  const { entry, exit, activeSlot, setActiveSlot, setSlot, clear, eligibility } = useChainDraft()
 
   const [verifiedOnly, setVerifiedOnly] = useState(false)
   const [reviewing, setReviewing] = useState(false)
@@ -152,7 +153,13 @@ export default function MultihopView() {
   // announce itself to hundreds of operators. probe's identity is stable (it reads
   // results from a ref), so this timer is only reset by a real change of role or filter.
   useEffect(() => {
-    if (checkable.length === 0) return
+    // Called even when there is NOTHING to grade, which is what abandons the sweep in
+    // flight. Abandonment happens inside probe() (it owns the run key), so an
+    // `if (checkable.length === 0) return` here skipped it precisely when the user had
+    // narrowed hardest: measured 2026-08-16, a search matching no rows left the previous
+    // run to completion, 211 further nodes probed over 26 s, every one of them excluded
+    // by the filter the user had just typed, with "Checking n/m" still counting up
+    // against the old total. probe() handles an empty list by standing the sweep down.
     // The key tells probe() whether this is the set it is already working or a new one
     // to switch to. Role is in it because the two ends are graded against different rules.
     const timer = setTimeout(() => { void probe(checkable, `${activeSlot}:${probeKey}`) }, PROBE_SETTLE_MS)
@@ -170,11 +177,17 @@ export default function MultihopView() {
   })
 
   const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
-  const entryPrice = entry ? udvpnPrice(entry, billing) : null
-  const exitPrice = exit ? udvpnPrice(exit, billing) : null
-  const chainCost = entry && exit && entryPrice !== null && exitPrice !== null
-    ? entryPrice + exitPrice
-    : null
+  // What the pair costs in BOTH units. Which one you are billed in is chosen in the
+  // review modal, so quoting only one here reads as the price and is wrong half the
+  // time. Either can be absent: a node need not quote udvpn for both.
+  const pairPrice = (t: BillingType): number | null => {
+    if (!entry || !exit) return null
+    const a = udvpnPrice(entry, t)
+    const b = udvpnPrice(exit, t)
+    return a === null || b === null ? null : a + b
+  }
+  const perGb = pairPrice('gigabytes')
+  const perHour = pairPrice('hours')
 
   return (
     <div className="h-full flex flex-col">
@@ -182,8 +195,11 @@ export default function MultihopView() {
         <div className="flex items-start justify-between gap-4">
           <div className="text-sm">
             <p className="text-text-primary">Two hops: your device → entry → exit → the internet.</p>
+            {/* "on its own" is load-bearing. The claim is about what ONE node can see,
+                which is exactly what the two hops split. Two operators comparing notes
+                still defeat it, and the review modal says so before any money moves. */}
             <p className="text-text-tertiary text-xs mt-0.5">
-              Neither node sees both who you are and where you go.
+              Neither node on its own sees both who you are and where you go.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -232,8 +248,6 @@ export default function MultihopView() {
             role="entry"
             node={entry}
             active={activeSlot === 'entry'}
-            price={entryPrice}
-            billing={billing}
             onActivate={() => setActiveSlot('entry')}
             onClear={() => setSlot('entry', null)}
           />
@@ -242,19 +256,34 @@ export default function MultihopView() {
             role="exit"
             node={exit}
             active={activeSlot === 'exit'}
-            price={exitPrice}
-            billing={billing}
             onActivate={() => setActiveSlot('exit')}
             onClear={() => setSlot('exit', null)}
           />
-          <div className="w-[180px] shrink-0 border border-border rounded-sm px-3 py-2 flex flex-col justify-between gap-1">
-            <div className="text-xs text-text-secondary">
-              Both hops
-              {chainCost === null ? (
-                <span className="block text-text-tertiary">Pick two nodes.</span>
+          <div className="w-[190px] shrink-0 border border-border rounded-sm px-3 py-2 flex flex-col justify-between gap-1">
+            <div className="text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-text-secondary">Both hops</span>
+                {/* Empties the whole draft. The per-slot ✕ replaces one hop; this is the
+                    way out of a pair you no longer want, and it is what takes the count
+                    off the tab. */}
+                {(entry || exit) && (
+                  <button
+                    onClick={clear}
+                    className="text-text-tertiary hover:text-danger transition-colors"
+                    title="Clear both hops"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {perGb === null && perHour === null ? (
+                <span className="block text-text-tertiary">
+                  {entry && exit ? 'No P2P price quoted.' : 'Pick two nodes.'}
+                </span>
               ) : (
-                <span className="block font-mono text-text-primary">
-                  {formatP2p(chainCost)} P2P/{billing === 'gigabytes' ? 'GB' : 'hr'}
+                <span className="block font-mono text-text-primary leading-tight">
+                  {perGb !== null && <span className="block">{formatP2p(perGb)} P2P/GB</span>}
+                  {perHour !== null && <span className="block">{formatP2p(perHour)} P2P/hr</span>}
                 </span>
               )}
             </div>
@@ -478,12 +507,14 @@ function formatPrice(prices: { denom: string; value: string }[] | null | undefin
   return val.toLocaleString('en', { maximumFractionDigits: 2 })
 }
 
-function HopSlot({ role, node, active, price, billing, onActivate, onClear }: {
+/**
+ * One hop of the rail. Identity only, no price: the row it came from carries both the
+ * per-GB and per-hour figure, and the pair's total is quoted once, next to Review.
+ */
+function HopSlot({ role, node, active, onActivate, onClear }: {
   role: ChainRole
   node: SentNode | null
   active: boolean
-  price: number | null
-  billing: 'gigabytes' | 'hours'
   onActivate: () => void
   onClear: () => void
 }) {
@@ -518,7 +549,6 @@ function HopSlot({ role, node, active, price, billing, onActivate, onClear }: {
           <div className="text-text-tertiary text-xs truncate">
             {node.country}{node.city ? `, ${node.city}` : ''}
             {node.asn ? ` · AS${node.asn}` : ''}
-            {price !== null && ` · ${formatP2p(price)}/${billing === 'gigabytes' ? 'GB' : 'hr'}`}
           </div>
         </>
       ) : (

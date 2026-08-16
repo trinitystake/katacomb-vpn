@@ -24,9 +24,10 @@
 #
 #   0. notes      Rewrite RELEASE_NOTES.md. Preflight refuses a heading naming
 #                 another version, but it cannot tell you the BODY is stale.
-#                 Then decide whether step 2 applies:
-#                     git diff --stat v<PREV>..HEAD -- electron-builder.yml resources/linux/
-#                 Any output means packaging changed and step 2 is required.
+#                 You do NOT have to work out whether step 2 applies: preflight
+#                 diffs electron-builder.yml and resources/linux/ against the last
+#                 tag and says so, and the closing output prints the steps that
+#                 follow from its answer.
 #
 #   1. cut        ./scripts/release.sh <version> --dry-run     (preflight is real)
 #                 ./scripts/release.sh <version>
@@ -176,6 +177,27 @@ ok "node $(node -v) at $(command -v node)"
 gpg --list-secret-keys "$SIGNING_KEY" >/dev/null 2>&1 || die "no secret key $SIGNING_KEY in the keyring, import it with: gpg --import private.asc"
 ok "signing key $SIGNING_KEY present"
 
+# Does this release need the packaging verification? The rule (CLAUDE.md) is
+# "after touching electron-builder.yml, either maintainer script, or the systemd
+# unit", and resources/linux/ holds the latter three. Decided here rather than
+# left to memory, because the cost of forgetting is the whole reason that script
+# exists: the AppArmor defect shipped while the config read perfectly, and only
+# installing and launching the package could have caught it. Informational, not a
+# refusal - the run itself needs root, a GUI, and the build this is about to make.
+PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+PACKAGING_CHANGED=0
+if [ -z "$PREV_TAG" ]; then
+  PACKAGING_CHANGED=1
+  info "no previous release tag, so treat all packaging as changed"
+elif [ -n "$(git diff --name-only "$PREV_TAG"..HEAD -- electron-builder.yml resources/linux/)" ]; then
+  PACKAGING_CHANGED=1
+  info "packaging changed since $PREV_TAG, verify-deb-portability.sh is REQUIRED:"
+  git diff --stat "$PREV_TAG"..HEAD -- electron-builder.yml resources/linux/ \
+    | sed 's/^/          /'
+else
+  ok "packaging unchanged since $PREV_TAG, verify-deb-portability.sh can be skipped"
+fi
+
 # Publishing the previous release's notes is easy to do and hard to take back, so
 # the heading has to name the version being cut. Absent is fine, stale is not.
 if [ -f "$NOTES" ]; then
@@ -263,17 +285,43 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
+if [ "$PACKAGING_CHANGED" = 1 ]; then
+  cat <<EOF
+
+$(printf '\033[1mTest this build BEFORE publishing it.\033[0m') Packaging changed since
+${PREV_TAG:-the last release}, so the portability run is required, and it has to happen
+now: it picks its deb by mtime, and it ends with the package uninstalled.
+
+    sudo ./scripts/verify-deb-portability.sh fullcycle
+    sudo apt install ./dist/$DEB_NAME
+    sudo reboot                     # postrm ran groupdel, so any earlier login is stale
+    id -nG | grep katacomb          # must print the group before you trust the next line
+    then connect and disconnect: neither should ask for a password
+EOF
+else
+  cat <<EOF
+
+$(printf '\033[1mTest this build BEFORE publishing it.\033[0m') Packaging is unchanged
+since ${PREV_TAG:-the last release}, so the portability run can be skipped, but the
+build still wants installing once:
+
+    sudo apt install ./dist/$DEB_NAME
+    id -nG | grep katacomb          # must print the group before you trust the next line
+    then connect and disconnect: neither should ask for a password
+EOF
+fi
+
 cat <<EOF
 
 $(printf '\033[1mRelease %s is ready, and entirely local.\033[0m' "$TAG")
 
-Push, when you want to:
+Push, when that passes:
     git push origin $RELEASE_BRANCH
     git push origin $TAG
 
 Then publish the four files, either at
 https://github.com/trinitystake/katacomb-vpn/releases/new?tag=$TAG
-or with the gh CLI (not installed here: sudo apt install gh && gh auth login):
+or with the gh CLI:
 
     gh release create $TAG \\
       --notes-file RELEASE_NOTES.md \\

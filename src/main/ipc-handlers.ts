@@ -72,6 +72,7 @@ import {
   connectHysteria2FromConfig,
   disconnect,
   getConnectionStatus,
+  isProxyChildAlive,
   isVpnActive,
   detectOtherVpn,
   getV2RayError,
@@ -1884,8 +1885,7 @@ async function attemptReconnect(): Promise<void> {
             }
           }
           await new Promise((r) => setTimeout(r, 1500))
-          const status = getConnectionStatus()
-          if (!status.connected) {
+          if (!isProxyChildAlive()) {
             throw new Error('Proxy failed to start on reconnect')
           }
           if (!proxyOnly) await bringUpV2RayTunnel()
@@ -3001,8 +3001,7 @@ export function registerIpcHandlers(): void {
 
         // Wait briefly and verify the v2ray process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
-        const status = getConnectionStatus()
-        if (!status.connected) {
+        if (!isProxyChildAlive()) {
           const errMsg = getV2RayError()
           // When replaying a saved config (reconnect), a failure to start usually
           // means the node changed its configuration (e.g. switched protocols) or
@@ -3059,8 +3058,7 @@ export function registerIpcHandlers(): void {
 
         // Wait briefly and verify the xray process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
-        const status = getConnectionStatus()
-        if (!status.connected) {
+        if (!isProxyChildAlive()) {
           const errMsg = getV2RayError()
           const fromSavedConfig = !activeXrayConfig && !!params.configString
           const hint = fromSavedConfig
@@ -3109,8 +3107,7 @@ export function registerIpcHandlers(): void {
 
         // Wait briefly and verify the hysteria process didn't crash on startup
         await new Promise((r) => setTimeout(r, 1500))
-        const status = getConnectionStatus()
-        if (!status.connected) {
+        if (!isProxyChildAlive()) {
           const errMsg = getV2RayError()
           const fromSavedConfig = !activeHysteria2Config && !!params.configString
           const hint = fromSavedConfig

@@ -373,3 +373,30 @@ export function decideFirewallAction(input: {
   if (!input.armed && input.killSwitch && input.tunnelActive) return 'arm'
   return 'none'
 }
+
+/**
+ * Is a child-proxy protocol (v2ray/xray/hysteria2) actually carrying the user's
+ * traffic? A live child process is NOT the same question.
+ *
+ * In PROXY mode it is: the spawned core is the whole connection, nothing is
+ * routed, and only apps pointed at the SOCKS listener are tunneled.
+ *
+ * In TUNNEL mode the child is only half of it. The redirection IS tun2socks, so
+ * until its interface exists nothing the user does goes through the node. That
+ * gap is not theoretical: `connectV2Ray` spawns the core, THEN awaits
+ * `tun-up` through polkit, so the whole time the password dialog is open the
+ * child is alive and traffic is still going out of the physical NIC. Reporting
+ * "connected" there put a green banner and the user's own home IP on screen at
+ * the same time, and the egress-IP check cached the untunneled answer.
+ *
+ * It stayed hidden until `runPrivileged` stopped being synchronous: while the
+ * call blocked the main process the status poll could not run inside the gap.
+ */
+export function isChildProxyCarryingTraffic(input: {
+  childAlive: boolean
+  proxyMode: boolean
+  tunUp: boolean
+}): boolean {
+  if (!input.childAlive) return false
+  return input.proxyMode || input.tunUp
+}

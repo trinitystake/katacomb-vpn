@@ -1,6 +1,42 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+
+// --- isChildProxyCarryingTraffic (the spawn-to-tun-up window) ---
+
+test('isChildProxyCarryingTraffic: tunnel mode needs the tun, not just a live child', () => {
+  // The live regression: between spawnV2Ray() and a successful tun-up the child
+  // is alive and NOTHING is redirected, because the polkit dialog is still open.
+  // Reporting connected there showed the user their own IP under a green banner.
+  assert.equal(
+    isChildProxyCarryingTraffic({ childAlive: true, proxyMode: false, tunUp: false }),
+    false,
+  )
+  assert.equal(
+    isChildProxyCarryingTraffic({ childAlive: true, proxyMode: false, tunUp: true }),
+    true,
+  )
+})
+
+test('isChildProxyCarryingTraffic: proxy mode is carried by the child alone', () => {
+  // Proxy mode changes no routing by design, so there is no tun to wait for.
+  assert.equal(
+    isChildProxyCarryingTraffic({ childAlive: true, proxyMode: true, tunUp: false }),
+    true,
+  )
+})
+
+test('isChildProxyCarryingTraffic: a dead child is never carrying traffic', () => {
+  for (const proxyMode of [true, false]) {
+    for (const tunUp of [true, false]) {
+      assert.equal(
+        isChildProxyCarryingTraffic({ childAlive: false, proxyMode, tunUp }),
+        false,
+        `dead child, proxyMode=${proxyMode} tunUp=${tunUp}`,
+      )
+    }
+  }
+})
 
 // --- chainFailureMessage (multihop: TWO deposits can be in flight) ---
 

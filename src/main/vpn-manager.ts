@@ -21,6 +21,7 @@ import {
   extractOpenVpnRemoteHost,
 } from './config-guard'
 import { verifyBinaryIntegrity } from './binary-integrity'
+import { isChildProxyCarryingTraffic } from './connect-decisions'
 import { runPrivileged } from './privileged'
 import { loadSettings } from './settings'
 import { parseDefaultRoute, v2rayRunArgs, firstIPv4FromGetent } from './vpn-parse'
@@ -1111,26 +1112,47 @@ export async function disconnect(): Promise<void> {
   activeChild = null
 }
 
+/**
+ * Is the spawned child proxy (v2ray/xray/hysteria2) still running?
+ *
+ * Deliberately NOT the same question as `getConnectionStatus().connected`, which
+ * means "traffic is actually being carried". The connect paths spawn the core,
+ * wait, and need to know only whether it survived startup: at that point, in
+ * tunnel mode, tun2socks has not been brought up yet and nothing is flowing by
+ * design. Conflating the two made every tunnel-mode connect report the core as
+ * having exited immediately.
+ */
+export function isProxyChildAlive(): boolean {
+  return isChildProxy(activeProtocol) && !!activeChild && activeChild.exitCode === null
+}
+
 export function getConnectionStatus(): {
   connected: boolean
   protocol: string | null
   proxyMode: boolean
   socksAddr?: string
 } {
-  // V2Ray/Xray/Hysteria2: the spawned process IS the connection. In local-proxy
-  // mode that's the whole check — there is no TUN interface to look for.
-  if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) {
-    const proxyMode = activeMode === 'proxy'
-    return {
-      connected: true,
-      protocol: activeProtocol,
-      proxyMode,
-      ...(proxyMode ? { socksAddr: SOCKS_ADDR } : {}),
-    }
-  }
-
-  // Proxy process exited unexpectedly — clean up stale state
+  // V2Ray/Xray/Hysteria2: the spawned process is the connection in local-proxy
+  // mode, but in tunnel mode it is only half of one — see
+  // isChildProxyCarryingTraffic. Until tun2socks' interface exists the child is
+  // running and the user's traffic is still leaving by the physical NIC.
   if (isChildProxy(activeProtocol)) {
+    const childAlive = !!activeChild && activeChild.exitCode === null
+    if (childAlive) {
+      const proxyMode = activeMode === 'proxy'
+      // Bring-up still in flight (typically the polkit dialog for tun-up). Not
+      // connected, and deliberately no state cleanup: the child is fine.
+      if (!isChildProxyCarryingTraffic({ childAlive, proxyMode, tunUp: isTunUp() })) {
+        return { connected: false, protocol: null, proxyMode: false }
+      }
+      return {
+        connected: true,
+        protocol: activeProtocol,
+        proxyMode,
+        ...(proxyMode ? { socksAddr: SOCKS_ADDR } : {}),
+      }
+    }
+    // Proxy process exited unexpectedly — clean up stale state
     activeProtocol = null
     activeMode = 'tunnel'
     activeConfigFile = null
@@ -1163,11 +1185,12 @@ export function isVpnActive(): boolean {
   if (isWireGuardUp()) return true
   if (isTunUp()) return true
   if (isOpenVpnUp()) return true
-  // Local-proxy mode deliberately leaves system routing alone, so the RPC
-  // endpoint stays reachable — callers use this to decide whether to fall back
-  // to cached chain data, and in proxy mode they shouldn't.
-  if (activeMode === 'proxy') return false
-  if (isChildProxy(activeProtocol) && activeChild && activeChild.exitCode === null) return true
+  // Nothing else redirects system traffic, which is all this function means.
+  // Local-proxy mode deliberately leaves routing alone, so the RPC endpoint stays
+  // reachable — callers use this to decide whether to fall back to cached chain
+  // data, and in proxy mode they shouldn't. A child-proxy TUNNEL is the tun2socks
+  // interface already checked above, so a live child without it is a bring-up
+  // still in flight, not an active VPN.
   return false
 }
 

@@ -97,7 +97,11 @@ export default function MultihopView() {
   const { entry, exit, activeSlot, setActiveSlot, setSlot, clear, eligibility } = useChainDraft()
 
   const [verifiedOnly, setVerifiedOnly] = useState(false)
-  const [reviewing, setReviewing] = useState(false)
+  // The pair under review, captured when Review is pressed rather than read live off
+  // the draft. That is what lets the draft be cleared the moment the chain comes up:
+  // rendered off the draft, clearing it would unmount the modal mid-success and take
+  // the two session ids with it.
+  const [reviewing, setReviewing] = useState<{ entry: SentNode; exit: SentNode } | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
 
   const latencyMap = useMemo(() => {
@@ -196,6 +200,9 @@ export default function MultihopView() {
   })
 
   const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
+  // `chainExit` is set only while a two-hop chain is up, so it is what tells this
+  // page's own product apart from any other tunnel.
+  const chainActive = alreadyConnected && status.chainExit !== undefined
   // What the pair costs in BOTH units. Which one you are billed in is chosen in the
   // review modal, so quoting only one here reads as the price and is wrong half the
   // time. Either can be absent: a node need not quote udvpn for both.
@@ -233,14 +240,36 @@ export default function MultihopView() {
           </div>
         </div>
 
+        {/* Two different facts, and reporting them the same way was alarming: the
+            moment a chain came up, the page behind the success modal warned that a
+            tunnel was in the way, about the chain the user had just paid for. A chain
+            of our own is reported as the good news it is; anything else keeps the
+            warning, because it really does have to go first. */}
         {alreadyConnected && (
-          <div className="bg-warning-subtle border border-warning p-3 rounded-md flex items-center justify-between gap-4">
+          <div className={`border p-3 rounded-md flex items-center justify-between gap-4 ${
+            chainActive ? 'bg-success-subtle border-success' : 'bg-warning-subtle border-warning'
+          }`}>
             <div>
-              <p className="text-warning text-sm">A tunnel is already up.</p>
-              <p className="text-text-secondary text-xs">
-                Building a chain replaces it. Disconnect first. The current session stays paid and
-                can be reconnected from the Sessions tab.
-              </p>
+              {chainActive ? (
+                <>
+                  <p className="text-success text-sm flex items-center gap-2">
+                    <span className="status-dot status-dot-active" />
+                    Your chain is connected.
+                  </p>
+                  <p className="text-text-secondary text-xs">
+                    {status.nodeMoniker || status.nodeCountry} → {status.chainExit?.moniker || status.chainExit?.country}
+                    . Both hops are in the Sessions tab. Building another chain replaces this one.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-warning text-sm">A tunnel is already up.</p>
+                  <p className="text-text-secondary text-xs">
+                    Building a chain replaces it. Disconnect first. The current session stays paid and
+                    can be reconnected from the Sessions tab.
+                  </p>
+                </>
+              )}
             </div>
             <button
               onClick={async () => {
@@ -307,7 +336,7 @@ export default function MultihopView() {
               )}
             </div>
             <button
-              onClick={() => setReviewing(true)}
+              onClick={() => { if (entry && exit) setReviewing({ entry, exit }) }}
               disabled={!entry || !exit}
               className="btn btn-primary text-xs px-3 py-1 w-full disabled:opacity-30 disabled:cursor-not-allowed"
             >
@@ -506,8 +535,12 @@ export default function MultihopView() {
       </div>
       )}
 
-      {reviewing && entry && exit && (
-        <ChainReviewModal entry={entry} exit={exit} onClose={() => setReviewing(false)} />
+      {reviewing && (
+        <ChainReviewModal
+          entry={reviewing.entry}
+          exit={reviewing.exit}
+          onClose={() => setReviewing(null)}
+        />
       )}
     </div>
   )

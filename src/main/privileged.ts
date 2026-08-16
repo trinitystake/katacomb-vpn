@@ -7,12 +7,28 @@
 // own, 0600) config file and send its CONTENT — the daemon writes its own
 // root-owned copy, so no user-controlled path ever reaches root.
 
-import { execFileSync } from 'child_process'
+import { execFile } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
+import { promisify } from 'util'
 import { isDaemonAvailable, daemonRequest, DaemonUnreachableError } from './daemon-client'
 import { LAN_SHARING_ARG } from './config-guard'
 
 const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
+
+/**
+ * ASYNC, and that is load-bearing. This used to be `execFileSync`, which blocks the
+ * Electron main process for as long as the call takes — and on this path the call is
+ * a polkit password dialog, so "as long as it takes" is however long the user stares
+ * at it, up to the 60s timeout. Nothing else in main runs meanwhile: no IPC, no status
+ * poll, no window. Measured on a bare `sleep 2`, the event loop turned ZERO times.
+ * Live symptom: pressing Disconnect froze the whole app, then reported that the kill
+ * switch could not be turned off, leaving no internet and no way to retry.
+ *
+ * `runPrivileged` already returned a Promise and every caller already awaited it, so
+ * the sync call was buying nothing. Keep the parent as the long-lived Electron process
+ * (polkit's auth cache is keyed to it) and keep the shell out of it.
+ */
+const execFileAsync = promisify(execFile)
 
 /**
  * Is there any route to root right now — the daemon socket or the installed
@@ -41,7 +57,7 @@ export async function runPrivileged(args: string[]): Promise<void> {
   }
   // No shell (see vpn-manager history): keep pkexec's parent the long-lived
   // Electron process so polkit's auth cache persists on the fallback path.
-  execFileSync('pkexec', [HELPER_PATH, ...args], { stdio: 'pipe', timeout: 60000 })
+  await execFileAsync('pkexec', [HELPER_PATH, ...args], { timeout: 60000 })
 }
 
 async function runViaDaemon(args: string[]): Promise<void> {

@@ -124,7 +124,13 @@ helper (one cached prompt).
 - `daemon-client.ts` (`isDaemonAvailable`/`daemonRequest`) + `privileged.ts`
   (`runPrivileged` routes to the daemon if its socket exists, else `pkexec`).
   The privileged call tree (`vpn-manager`, `kill-switch`, `ipc-handlers`) is
-  **async** because of the socket round-trip.
+  **async** because of the socket round-trip — and the `pkexec` fallback must stay
+  async too. It was `execFileSync`, which blocks the Electron main process for the
+  whole call, and on that path the call is a polkit dialog: nothing in main runs
+  until the user answers it or the 60 s timeout fires (measured: zero event-loop
+  ticks over a bare `sleep 2`). Live symptom, 2026-08-16: Disconnect froze the
+  entire app, then reported the kill switch could not be turned off, leaving no
+  internet and no way to retry. Never make a privileged call synchronous.
 - Packaging: `postinstall.sh` installs+enables the unit and a space-free
   `/opt/katacomb-vpn` → `/opt/Katacomb VPN` symlink (the unit ExecStart uses it
   + the `katacomb-vpn` binary name). `postrm.sh` tears down any tunnel then

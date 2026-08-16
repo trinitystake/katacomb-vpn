@@ -196,6 +196,11 @@ export default function ChainReviewModal({ entry, exit, onClose }: Props) {
       ...(mode === 'proxy' ? { mode: 'proxy' as const } : {}),
     })
     setTunnelConnected(true)
+    // Spent the instant it becomes a live chain, not when this window is closed. The
+    // page behind is visible around this modal, and leaving two nodes sitting in the
+    // rail next to a "2/2" badge invites buying the same pair twice. This modal holds
+    // its own copy of the pair, so clearing here does not disturb the pane below.
+    clear()
   }
 
   async function handleRetryTunnel() {

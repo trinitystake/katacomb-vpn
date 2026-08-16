@@ -100,6 +100,47 @@ function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'
 }
 
 /**
+ * The DROP-all chain is still installed after a failed teardown, so the user has no
+ * internet at all until it comes down. Restarting the app does fix it (the startup
+ * self-heal reverts a stranded chain), but it is a poor only-option: the teardown
+ * usually fails because a polkit prompt was dismissed or missed, and one more press
+ * is all it takes.
+ *
+ * Retry is just `connectionDisconnect()` again. The armed MARKER is only cleared on a
+ * confirmed teardown, so `revertPostConnectSettings` still sees the chain as installed
+ * and tries again. Same call the expiry banner's "Restore internet" makes.
+ */
+function KillSwitchStuckBanner() {
+  const [retrying, setRetrying] = useState(false)
+  return (
+    <div className="px-5 py-1.5 bg-danger-subtle border-b border-danger text-danger text-xs flex items-center gap-2">
+      <span aria-hidden>⚠</span>
+      <span className="flex-1">
+        The kill switch could not be turned off, so all traffic may still be blocked.
+        Try again, and allow the password prompt if one appears. If that fails, restart
+        Katacomb VPN to restore it.
+      </span>
+      <button
+        onClick={async () => {
+          setRetrying(true)
+          try {
+            await window.api.connectionDisconnect()
+          } catch {
+            // The banner is still up; the state it reports has not changed.
+          } finally {
+            setRetrying(false)
+          }
+        }}
+        disabled={retrying}
+        className="btn btn-danger text-xs px-2 py-0.5 disabled:opacity-40"
+      >
+        {retrying ? <Spinner /> : 'Try again'}
+      </button>
+    </div>
+  )
+}
+
+/**
  * Written out rather than capitalized from the tab id: "multihop" would render as
  * "Multihop", and the hyphen is what makes it read as two hops rather than a word.
  */
@@ -249,15 +290,7 @@ function AppInner() {
       {/* Keyed by session so a dismissal never hides the NEXT session's expiry. */}
       <SessionExpiredBanner key={connStatus.expired?.sessionId} expired={connStatus.expired} />
 
-      {connStatus.killSwitchTeardownFailed && (
-        <div className="px-5 py-1.5 bg-danger-subtle border-b border-danger text-danger text-xs flex items-center gap-2">
-          <span aria-hidden>⚠</span>
-          <span>
-            The kill switch could not be turned off, so all traffic may still be blocked.
-            If you have no internet, restart Katacomb VPN to restore it.
-          </span>
-        </div>
-      )}
+      {connStatus.killSwitchTeardownFailed && <KillSwitchStuckBanner />}
 
       {/* Main tabs. Provider is hidden until this wallet opts in (Settings → General)
           or already has a provider registered on chain. */}

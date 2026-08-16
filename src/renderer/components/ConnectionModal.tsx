@@ -287,11 +287,11 @@ export default function ConnectionModal({ node, onClose }: Props) {
             <h2 className="text-text-primary text-base font-semibold">
               {title}
             </h2>
-            {/* Names this as one half of a pair. Without it the Multi-hop button in
-                the filter bar reads as an unrelated feature rather than the
-                alternative to what this modal does. */}
+            {/* Names this as one half of a pair, in the same sentence shape the
+                Multi-hop tab uses for the other half, so the two define each other
+                rather than reading as unrelated features. */}
             <p className="text-text-tertiary text-xs mt-0.5">
-              Single hop: your device connects straight to this node.
+              Single hop: your device → this node → the internet.
             </p>
           </div>
           {!connecting && (

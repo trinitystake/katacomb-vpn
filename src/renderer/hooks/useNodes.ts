@@ -74,10 +74,25 @@ function compareNodes(
 
 const EMPTY_LATENCY_MAP: Map<string, number | null> = new Map()
 
-export function useNodes(latencyMap: Map<string, number | null> = EMPTY_LATENCY_MAP) {
+/**
+ * @param prefilter Narrows the universe this consumer sees, BEFORE anything else.
+ *   The Multi-hop tab passes `isChainable`. Applied here rather than to the result so
+ *   that the country and city dropdowns, and the total, describe the same universe as
+ *   the table: filtered afterwards, they would offer places with no chainable node in
+ *   them. Pass a stable (module-level) function, or the memo below recomputes forever.
+ */
+export function useNodes(
+  latencyMap: Map<string, number | null> = EMPTY_LATENCY_MAP,
+  prefilter?: (n: SentNode) => boolean,
+) {
   // Raw node state is owned by the NodesProvider so Map + Nodes tabs share
   // a single fetch + a single in-memory cache (seeded from disk on startup).
-  const { allNodes, lastFetched, loading, error, refresh, bookmarks, toggleBookmark } = useNodesContext()
+  const { allNodes: universe, lastFetched, loading, error, refresh, bookmarks, toggleBookmark } = useNodesContext()
+
+  const allNodes = useMemo(
+    () => (prefilter ? universe.filter(prefilter) : universe),
+    [universe, prefilter],
+  )
 
   // Per-consumer filter/sort state — Map and Nodes can hold independent filters.
   const [filter, setFilter] = useState<NodeFilter>(DEFAULT_FILTER)

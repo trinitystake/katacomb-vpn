@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useState, ReactNode } from 'react'
 
-export type MainTab = 'map' | 'nodes' | 'plans' | 'sessions' | 'provider'
+export type MainTab = 'map' | 'nodes' | 'multihop' | 'plans' | 'sessions' | 'provider'
 export type SettingsTab = 'general' | 'network' | 'wallets'
 
 interface NavigationContextValue {

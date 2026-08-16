@@ -1,0 +1,531 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { useNodes } from '../../hooks/useNodes'
+import { useConnection } from '../../hooks/useConnection'
+import { useNodeTest } from '../../hooks/useNodeTest'
+import { useChainDraft } from '../../contexts/ChainDraftContext'
+import {
+  chainRowState,
+  isChainable,
+  isCheckable,
+  isVerifiedFor,
+  udvpnPrice,
+  type ChainRole,
+} from '../../utils/chain-node'
+import { formatP2p } from '../../../shared/funds'
+import { COUNTRY_CODES } from '../../utils/country-codes'
+import { nodeStatusMeta } from '../../utils/node-status'
+import { protocolMeta } from '../../utils/protocols'
+import NodeFilters from '../NodeFilters'
+import ChainReviewModal from './ChainReviewModal'
+import InfoTip from '../InfoTip'
+import Spinner from '../Spinner'
+import type { SentNode } from '../../types'
+
+/**
+ * How long the filter must hold still before its nodes are graded. Long enough that
+ * typing a city name is one sweep rather than one per letter, short enough that
+ * choosing a country feels immediate.
+ */
+const PROBE_SETTLE_MS = 250
+
+/**
+ * How many rows off the front of the sorted list are graded first. Every node in the
+ * filtered set is graded (see `checkable`), this only decides the order, so that the
+ * part of the list the user is looking at settles in the first chunk or two instead
+ * of after every node in the country they didn't pick.
+ *
+ * A fixed count rather than "what is on screen": the list is virtualized, so the
+ * visible set changes on every scroll and would restart the sweep continuously.
+ */
+const PROBE_HEAD = 50
+
+/** Only v2ray and xray can be chained, so the protocol filter offers only those. */
+const CHAIN_PROTOCOL_OPTIONS = [
+  { value: 2, label: 'V2Ray' },
+  { value: 4, label: 'XRAY' },
+] as const
+
+const CACHE_TTL = 10 * 60 * 1000
+
+type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'latency' | 'status'
+
+/**
+ * The Nodes tab's columns minus Peers (a chain hop is picked on eligibility, not on
+ * how busy the node is) plus the eligibility badge, which is the column this whole
+ * page turns on. Eligibility has no sort key on purpose: "Verified only" plus the
+ * ordinary column sorts already reach every usable node now that the list is
+ * virtualized and nothing is truncated.
+ */
+const COLUMNS: { key: SortKey | null; label: string; width: string }[] = [
+  { key: 'country', label: 'Country', width: 'w-[160px]' },
+  { key: 'city', label: 'City', width: 'w-[120px]' },
+  { key: 'moniker', label: 'Moniker', width: 'flex-1 min-w-[140px]' },
+  { key: 'type', label: 'Type', width: 'w-[80px]' },
+  { key: null, label: 'Elig.', width: 'w-[110px]' },
+  { key: 'priceGb', label: 'P2P/GB', width: 'w-[80px]' },
+  { key: 'priceHr', label: 'P2P/Hr', width: 'w-[80px]' },
+  { key: 'latency', label: 'Latency', width: 'w-[70px] justify-center' },
+  { key: 'status', label: 'Status', width: 'w-[60px] justify-center' },
+]
+
+const TONE_CLASS = {
+  success: 'text-success',
+  warning: 'text-warning',
+  danger: 'text-danger',
+  muted: 'text-text-tertiary',
+}
+
+/**
+ * Choose the two nodes of a chain: this host -> entry -> exit -> internet.
+ *
+ * A tab rather than a modal, and deliberately the same shape as the Nodes tab — a page
+ * to choose on, a modal to commit in. Picking two nodes out of hundreds, each graded by
+ * a probe that streams in over seconds, is a page-scale task, and it runs on the same
+ * node data, the same filter bar and the same latency testing as a single hop rather
+ * than a weaker copy of them.
+ */
+export default function MultihopView() {
+  const { status, disconnect } = useConnection()
+  const { results: testResults, testing: testingNodes, batchProgress, testBatch, cancelBatch, testNode } = useNodeTest()
+  const { entry, exit, activeSlot, setActiveSlot, setSlot, billing, eligibility } = useChainDraft()
+
+  const [verifiedOnly, setVerifiedOnly] = useState(false)
+  const [reviewing, setReviewing] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
+
+  const latencyMap = useMemo(() => {
+    const map = new Map<string, number | null>()
+    for (const [addr, result] of testResults) {
+      map.set(addr, result.reachable ? result.latencyMs : null)
+    }
+    return map
+  }, [testResults])
+
+  const {
+    nodes: matches,
+    totalCount,
+    filter,
+    updateFilter,
+    sortKey,
+    sortDir,
+    toggleSort,
+    loading,
+    lastFetched,
+    error,
+    countries,
+    cities,
+    refresh,
+    bookmarks,
+    toggleBookmark,
+  } = useNodes(latencyMap, isChainable)
+
+  // Display only. The grading below deliberately runs on `matches`, not on this:
+  // "Verified only" filters ON the grades, so probing what it leaves would freeze the
+  // list at whatever happened to be graded when it was ticked and silently hide every
+  // verified node outside that.
+  const rows = useMemo(
+    () => (verifiedOnly
+      ? matches.filter((n) => isVerifiedFor(eligibility.results.get(n.address), activeSlot))
+      : matches),
+    [matches, verifiedOnly, eligibility.results, activeSlot],
+  )
+
+  // Grade every CHECKABLE node in the filtered set, head of the list first. Pre-9.0.0
+  // nodes are skipped rather than probed and reported unknown: they publish no inbound
+  // list, so the request can only fail. That is most of the network, so skipping them
+  // is also what keeps this affordable.
+  const checkable = useMemo(() => {
+    const head = matches.slice(0, PROBE_HEAD).filter(isCheckable)
+    const inHead = new Set(head.map((n) => n.address))
+    return [...head, ...matches.filter((n) => isCheckable(n) && !inHead.has(n.address))]
+  }, [matches])
+  // Sorted, because grades arriving change the list ORDER and an order-sensitive key
+  // would retrigger the sweep on every one of them.
+  const probeKey = useMemo(() => checkable.map((n) => n.address).sort().join(','), [checkable])
+
+  const { probe } = eligibility
+  // Settle before probing. The search box filters on every keystroke, and each new set
+  // abandons the sweep in flight and starts one for the new one — so typing "toronto"
+  // unthrottled would fire a chunk of 30 requests per letter. Each probe is an HTTPS
+  // request from the user's own address, so a page opened and abandoned must not
+  // announce itself to hundreds of operators. probe's identity is stable (it reads
+  // results from a ref), so this timer is only reset by a real change of role or filter.
+  useEffect(() => {
+    if (checkable.length === 0) return
+    // The key tells probe() whether this is the set it is already working or a new one
+    // to switch to. Role is in it because the two ends are graded against different rules.
+    const timer = setTimeout(() => { void probe(checkable, `${activeSlot}:${probeKey}`) }, PROBE_SETTLE_MS)
+    return () => clearTimeout(timer)
+    // probeKey stands in for `checkable`, which is a fresh array every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlot, probeKey, probe])
+
+  const parentRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 36,
+    overscan: 20,
+  })
+
+  const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
+  const entryPrice = entry ? udvpnPrice(entry, billing) : null
+  const exitPrice = exit ? udvpnPrice(exit, billing) : null
+  const chainCost = entry && exit && entryPrice !== null && exitPrice !== null
+    ? entryPrice + exitPrice
+    : null
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="border-b border-border bg-bg-secondary px-4 py-3 space-y-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="text-sm">
+            <p className="text-text-primary">Two hops: your device → entry → exit → the internet.</p>
+            <p className="text-text-tertiary text-xs mt-0.5">
+              Neither node sees both who you are and where you go.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-text-secondary text-sm">{totalCount} chainable</span>
+            <InfoTip label="Why both hops need TLS or Reality">
+              Both hops of a chain must be wrapped in TLS or Reality, which is stricter than an
+              ordinary connection. A VMess hop without TLS is still encrypted, but it is
+              recognisable as a proxy to anyone watching the wire, and that is the thing a chain is
+              bought to avoid. Nodes older than 9.0.0 publish nothing to check against that rule, so
+              they are listed for context but cannot be picked.
+            </InfoTip>
+          </div>
+        </div>
+
+        {alreadyConnected && (
+          <div className="bg-warning-subtle border border-warning p-3 rounded-md flex items-center justify-between gap-4">
+            <div>
+              <p className="text-warning text-sm">A tunnel is already up.</p>
+              <p className="text-text-secondary text-xs">
+                Building a chain replaces it. Disconnect first. The current session stays paid and
+                can be reconnected from the Sessions tab.
+              </p>
+            </div>
+            <button
+              onClick={async () => {
+                setDisconnecting(true)
+                try {
+                  await disconnect()
+                } finally {
+                  setDisconnecting(false)
+                }
+              }}
+              disabled={disconnecting}
+              className="btn btn-danger text-xs px-3 py-1 disabled:opacity-50 shrink-0"
+            >
+              {disconnecting ? 'Disconnecting…' : 'Disconnect'}
+            </button>
+          </div>
+        )}
+
+        {/* The hop rail. It holds what the wizard's step rail held — which hop you are
+            on, and what is picked — but stays beside the list you pick from instead of
+            replacing it. */}
+        <div className="flex items-stretch gap-2">
+          <HopSlot
+            role="entry"
+            node={entry}
+            active={activeSlot === 'entry'}
+            price={entryPrice}
+            billing={billing}
+            onActivate={() => setActiveSlot('entry')}
+            onClear={() => setSlot('entry', null)}
+          />
+          <div className="flex items-center text-text-tertiary text-sm">→</div>
+          <HopSlot
+            role="exit"
+            node={exit}
+            active={activeSlot === 'exit'}
+            price={exitPrice}
+            billing={billing}
+            onActivate={() => setActiveSlot('exit')}
+            onClear={() => setSlot('exit', null)}
+          />
+          <div className="w-[180px] shrink-0 border border-border rounded-sm px-3 py-2 flex flex-col justify-between gap-1">
+            <div className="text-xs text-text-secondary">
+              Both hops
+              {chainCost === null ? (
+                <span className="block text-text-tertiary">Pick two nodes.</span>
+              ) : (
+                <span className="block font-mono text-text-primary">
+                  {formatP2p(chainCost)} P2P/{billing === 'gigabytes' ? 'GB' : 'hr'}
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => setReviewing(true)}
+              disabled={!entry || !exit}
+              className="btn btn-primary text-xs px-3 py-1 w-full disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Review
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <NodeFilters
+        filter={filter}
+        updateFilter={updateFilter}
+        countries={countries}
+        cities={cities}
+        totalCount={totalCount}
+        filteredCount={rows.length}
+        lastFetched={lastFetched}
+        loading={loading}
+        onRefresh={refresh}
+        batchProgress={batchProgress}
+        onTestBatch={() => {
+          testBatch(rows.map((n) => ({ nodeAddress: n.address, remoteUrl: n.api })))
+        }}
+        onCancelBatch={cancelBatch}
+        protocolOptions={CHAIN_PROTOCOL_OPTIONS}
+      />
+
+      <div className="border-b border-border px-4 py-2 flex items-center justify-between gap-4 text-xs">
+        <div className="flex items-center gap-2 text-text-secondary">
+          <span className="text-text-primary">
+            Choosing the {activeSlot} node
+          </span>
+          <span className="text-text-tertiary">
+            {activeSlot === 'entry'
+              ? 'Your device dials it directly, so it sees your IP and not where you go.'
+              : 'Reached only through the entry, setup included, so sites see its location instead of yours.'}
+          </span>
+        </div>
+        <div className="flex items-center gap-4 shrink-0">
+          {eligibility.progress && (
+            <span className="flex items-center gap-1.5 text-text-secondary">
+              <Spinner className="text-accent" />
+              Checking {eligibility.progress.done}/{eligibility.progress.total}
+            </span>
+          )}
+          <label className="flex items-center gap-1.5 text-text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={verifiedOnly}
+              onChange={(e) => setVerifiedOnly(e.target.checked)}
+              className="accent-[var(--color-accent)]"
+            />
+            Verified {activeSlot === 'exit' ? 'exits' : 'entries'} only
+          </label>
+        </div>
+      </div>
+
+      {/* With a list in hand a failed refresh only makes it stale — the filter bar's
+          timestamp already says so, and blanking the table would be worse. */}
+      {!lastFetched ? (
+        error ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="max-w-sm text-center flex flex-col items-center gap-3">
+              <div className="text-text-primary text-sm">Couldn't load the node directory</div>
+              <div className="text-text-secondary text-xs break-words">{error}</div>
+              <button onClick={refresh} disabled={loading} className="btn btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 flex items-center gap-1.5">
+                {loading && <Spinner />}
+                Retry
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-text-secondary text-sm flex items-center gap-2">
+              <Spinner />
+              Loading nodes...
+            </div>
+          </div>
+        )
+      ) : (
+      <div ref={parentRef} className="flex-1 overflow-auto">
+        <div className="sticky top-0 z-10 flex items-center px-4 py-2 border-b border-border bg-bg-secondary text-text-secondary text-xs font-medium uppercase tracking-wide select-none">
+          <div className="w-[28px] shrink-0" />
+          {COLUMNS.map((col) => (
+            col.key === null ? (
+              <div key={col.label} className={`${col.width} shrink-0`}>{col.label}</div>
+            ) : (
+              <button
+                key={col.key}
+                onClick={() => toggleSort(col.key!)}
+                className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
+              >
+                {col.label}
+                {sortKey === col.key && (
+                  <span className="text-accent">{sortDir === 'asc' ? '▲' : '▼'}</span>
+                )}
+              </button>
+            )
+          ))}
+        </div>
+
+        <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+          {virtualizer.getVirtualItems().map((virtualRow) => {
+            const node = rows[virtualRow.index]
+            if (!node) return null
+            const code = COUNTRY_CODES[node.country] || ''
+            const nodeStatus = nodeStatusMeta(node)
+            const otherHop = activeSlot === 'entry' ? exit : entry
+            const takenByOtherHop = otherHop?.address === node.address
+            const picked = (activeSlot === 'entry' ? entry : exit)?.address === node.address
+            const state = chainRowState(node, eligibility.results.get(node.address), activeSlot)
+            const selectable = state.selectable && !takenByOtherHop
+
+            return (
+              <div
+                key={node.address}
+                onClick={() => { if (selectable) setSlot(activeSlot, node) }}
+                className={`absolute left-0 w-full flex items-center px-4 text-sm border-b transition-colors ${
+                  picked
+                    ? 'bg-success-subtle border-success'
+                    : 'border-border'
+                } ${
+                  selectable ? 'cursor-pointer hover:bg-bg-hover' : 'opacity-40 cursor-not-allowed'
+                }`}
+                style={{
+                  height: `${virtualRow.size}px`,
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+              >
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleBookmark(node.address) }}
+                  className={`w-[28px] shrink-0 text-center transition-colors ${
+                    bookmarks.has(node.address) ? 'text-warning' : 'text-text-tertiary hover:text-text-secondary'
+                  }`}
+                  title={bookmarks.has(node.address) ? 'Remove bookmark' : 'Bookmark node'}
+                >
+                  {bookmarks.has(node.address) ? '★' : '☆'}
+                </button>
+                <div className="w-[160px] shrink-0 flex items-center gap-2 truncate">
+                  {code && <span className={`fi fi-${code}`} style={{ fontSize: '12px', lineHeight: 1 }} />}
+                  <span className="truncate">{node.country || '—'}</span>
+                </div>
+                <div className="w-[120px] shrink-0 truncate text-text-secondary">
+                  {node.city || '—'}
+                </div>
+                <div className="flex-1 min-w-[140px] truncate text-text-primary">
+                  {node.moniker || '—'}
+                </div>
+                <div className="w-[80px] shrink-0">
+                  <span className={protocolMeta(node.type).color}>{protocolMeta(node.type).short}</span>
+                </div>
+                <div className={`w-[110px] shrink-0 truncate text-xs ${
+                  takenByOtherHop ? 'text-text-tertiary' : TONE_CLASS[state.tone]
+                }`} title={takenByOtherHop ? undefined : state.title}>
+                  {takenByOtherHop
+                    ? `picked as the ${activeSlot === 'entry' ? 'exit' : 'entry'}`
+                    : state.badge}
+                </div>
+                <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
+                  {formatPrice(node.gigabytePrices)}
+                </div>
+                <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
+                  {formatPrice(node.hourlyPrices)}
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); testNode(node.address, node.api) }}
+                  disabled={testingNodes.has(node.address)}
+                  className="w-[70px] shrink-0 text-center font-mono text-xs transition-colors hover:text-accent disabled:pointer-events-none"
+                  title="Test node latency"
+                >
+                  {(() => {
+                    if (testingNodes.has(node.address)) return <span className="text-text-tertiary">...</span>
+                    const probeResult = testResults.get(node.address)
+                    if (!probeResult) return <span className="text-text-tertiary">⏱</span>
+                    const stale = Date.now() - probeResult.timestamp > CACHE_TTL
+                    if (probeResult.reachable && probeResult.latencyMs !== null) {
+                      return <span className={stale ? 'text-text-tertiary' : 'text-success'}>{probeResult.latencyMs}ms</span>
+                    }
+                    return <span className={stale ? 'text-text-tertiary' : 'text-danger'}>Fail</span>
+                  })()}
+                </button>
+                <div className="w-[60px] shrink-0 flex justify-center">
+                  <span
+                    className={`status-dot ${nodeStatus.dotClass}`}
+                    title={`${nodeStatus.label}: ${nodeStatus.detail}`}
+                  />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {rows.length === 0 && !loading && (
+          <div className="flex items-center justify-center h-32 text-text-secondary text-sm">
+            {verifiedOnly
+              ? 'No node here has been verified for this hop yet.'
+              : 'No nodes match your filters'}
+          </div>
+        )}
+      </div>
+      )}
+
+      {reviewing && entry && exit && (
+        <ChainReviewModal entry={entry} exit={exit} onClose={() => setReviewing(false)} />
+      )}
+    </div>
+  )
+}
+
+function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
+  if (!prices) return '—'
+  const p = prices.find((x) => x.denom === 'udvpn')
+  if (!p) return '—'
+  const val = parseInt(p.value, 10) / 1e6
+  if (val >= 1000) return val.toLocaleString('en', { maximumFractionDigits: 0 })
+  return val.toLocaleString('en', { maximumFractionDigits: 2 })
+}
+
+function HopSlot({ role, node, active, price, billing, onActivate, onClear }: {
+  role: ChainRole
+  node: SentNode | null
+  active: boolean
+  price: number | null
+  billing: 'gigabytes' | 'hours'
+  onActivate: () => void
+  onClear: () => void
+}) {
+  const code = node ? COUNTRY_CODES[node.country] || '' : ''
+  return (
+    <div
+      onClick={onActivate}
+      className={`flex-1 min-w-0 border rounded-sm px-3 py-2 cursor-pointer transition-colors ${
+        active ? 'border-accent' : 'border-border hover:border-border-focus'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className={`text-xs uppercase tracking-wide ${active ? 'text-accent' : 'text-text-secondary'}`}>
+          {role === 'entry' ? '1. Entry' : '2. Exit'}
+        </span>
+        {node && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onClear() }}
+            className="text-text-tertiary hover:text-danger transition-colors text-xs px-1"
+            title={`Clear the ${role} node`}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      {node ? (
+        <>
+          <div className="flex items-center gap-2 min-w-0">
+            {code && <span className={`fi fi-${code} shrink-0`} style={{ fontSize: '12px', lineHeight: 1 }} />}
+            <span className="text-text-primary text-sm truncate">{node.moniker || node.address}</span>
+          </div>
+          <div className="text-text-tertiary text-xs truncate">
+            {node.country}{node.city ? `, ${node.city}` : ''}
+            {node.asn ? ` · AS${node.asn}` : ''}
+            {price !== null && ` · ${formatP2p(price)}/${billing === 'gigabytes' ? 'GB' : 'hr'}`}
+          </div>
+        </>
+      ) : (
+        <div className="text-text-tertiary text-xs py-1">
+          {active ? 'Pick a node below.' : 'Not picked yet.'}
+        </div>
+      )}
+    </div>
+  )
+}

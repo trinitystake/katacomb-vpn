@@ -24,7 +24,11 @@ interface Props {
   batchProgress: { done: number; total: number } | null
   onTestBatch: () => void
   onCancelBatch: () => void
-  onBuildChain: () => void
+  /**
+   * Which protocols the select offers. Defaults to all of them; the Multi-hop tab
+   * narrows it to the two that can be chained.
+   */
+  protocolOptions?: readonly { value: ProtocolType; label: string }[]
 }
 
 export default function NodeFilters({
@@ -40,7 +44,7 @@ export default function NodeFilters({
   batchProgress,
   onTestBatch,
   onCancelBatch,
-  onBuildChain,
+  protocolOptions = PROTOCOL_FILTER_OPTIONS,
 }: Props) {
   const [connOpen, setConnOpen] = useState(false)
   const connRef = useRef<HTMLDivElement | null>(null)
@@ -101,7 +105,7 @@ export default function NodeFilters({
           className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus min-w-[140px]"
         >
           <option value="all">All Protocols</option>
-          {PROTOCOL_FILTER_OPTIONS.map((p) => (
+          {protocolOptions.map((p) => (
             <option key={p.value} value={p.value}>{p.label}</option>
           ))}
         </select>
@@ -142,20 +146,6 @@ export default function NodeFilters({
             )}
           </div>
         )}
-
-        {/* Last of the left-hand group, AFTER the V2Ray connection sub-filter: that
-            one appears only when the protocol filter is V2Ray, and anywhere earlier
-            put this button between two controls that belong together. It stays on
-            this side rather than in the action cluster because it is the alternative
-            to clicking a row in the table below, and needs to be seen next to it.
-            Bordered so it reads as an action, not another filter. */}
-        <button
-          onClick={onBuildChain}
-          className="border border-border text-text-secondary hover:border-accent hover:text-accent text-sm px-2.5 py-1.5 rounded-sm transition-colors"
-          title="Multi-hop: buy two sessions and chain them, so your device reaches the internet through an entry node and then an exit node. Neither node sees both who you are and where you go."
-        >
-          Multi-hop
-        </button>
 
         <div className="flex-1" />
 

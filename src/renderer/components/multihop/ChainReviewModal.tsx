@@ -1,84 +1,38 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { SentNode, TunnelProtocol, WalletEntry } from '../types'
-import { useNodesContext } from '../contexts/NodesContext'
-import { useBalance } from '../hooks/useBalance'
-import { useConnection } from '../hooks/useConnection'
-import { useChainEligibility } from '../hooks/useChainEligibility'
-import { chainDiversityIssues, hasOperatorOverlap } from '../utils/chain-diversity'
-import { checkFunds, formatP2p, insufficientFundsMessage } from '../../shared/funds'
-import { protocolMeta } from '../utils/protocols'
-import { COUNTRY_CODES } from '../utils/country-codes'
-import ConnectErrorActions from './ConnectErrorActions'
-import InfoTip from './InfoTip'
-import InsufficientFunds from './InsufficientFunds'
-import ProgressSteps from './ProgressSteps'
-import Spinner from './Spinner'
+import { useEffect, useState, type ReactNode } from 'react'
+import type { SentNode, TunnelProtocol, WalletEntry } from '../../types'
+import { useBalance } from '../../hooks/useBalance'
+import { useConnection } from '../../hooks/useConnection'
+import { useChainDraft } from '../../contexts/ChainDraftContext'
+import { chainDiversityIssues, hasOperatorOverlap } from '../../utils/chain-diversity'
+import { udvpnPrice, type BillingType } from '../../utils/chain-node'
+import { checkFunds, formatP2p, insufficientFundsMessage } from '../../../shared/funds'
+import { protocolMeta } from '../../utils/protocols'
+import { COUNTRY_CODES } from '../../utils/country-codes'
+import ConnectErrorActions from '../ConnectErrorActions'
+import InfoTip from '../InfoTip'
+import InsufficientFunds from '../InsufficientFunds'
+import Spinner from '../Spinner'
 
 interface Props {
+  entry: SentNode
+  exit: SentNode
   onClose: () => void
 }
 
-type Step = 'entry' | 'exit' | 'confirm'
-type BillingType = 'gigabytes' | 'hours'
-
 /**
- * Rows rendered before the list asks you to narrow the search. Set above the number
- * of nodes that can actually serve as an exit (138 of 726 healthy V2Ray/XRAY nodes,
- * measured 2026-08-14) so that every verified exit is reachable by scrolling. At 50
- * it was not: the list is sorted cheapest-first within each rank, so a verified exit
- * priced above the 50th row simply did not exist as far as the UI was concerned.
- */
-const MAX_ROWS = 300
-
-/**
- * How long the filter must hold still before its nodes are graded. Long enough that
- * typing a city name is one sweep rather than one per letter, short enough that
- * choosing a country feels immediate.
- */
-const PROBE_SETTLE_MS = 250
-
-/**
- * Only v9.0.0 nodes publish the inbound listing the chain checks read, so they sort
- * first. Otherwise the list opens on the cheapest nodes, which are the oldest, every
- * row reads "unknown" and the check looks broken.
+ * Commit step for a two-hop chain: everything the user is about to pay for, then the
+ * two purchases and the bring-up.
  *
- * Older nodes stay LISTED but are not selectable (see the row's `refused`): with no
- * listing to check, they cannot be graded before paying, and 485 of the 487 measured
- * report no TLS at all, so picking one is a near-certain double refund rather than a
- * gamble worth offering. Showing them is still worth it, so the list explains itself
- * instead of silently hiding most of the network.
+ * A modal on purpose, and the exact counterpart of ConnectionModal for a single hop:
+ * the choosing happens on a page, the paying happens here. It is also why this is a
+ * separate file from the page — the page is mounted for as long as the tab is open,
+ * this only exists during a purchase.
  */
-function majorVersion(node: SentNode): number {
-  return parseInt((node.version || '').split('.')[0], 10) || 0
-}
-
-function udvpnPrice(node: SentNode, type: BillingType): number | null {
-  const prices = type === 'gigabytes' ? node.gigabytePrices : node.hourlyPrices
-  const p = prices?.find((x) => x.denom === 'udvpn')
-  if (!p) return null
-  const value = parseInt(p.value, 10)
-  return Number.isFinite(value) ? value : null
-}
-
-/**
- * Buy and connect a two-hop chain: this host -> entry -> exit -> internet.
- *
- * Deliberately a separate flow rather than a mode of ConnectionModal, which is
- * built around one `node` prop throughout (pricing, plan reuse, the already-on-this-
- * node guard). Chains have none of that: no plans, no allocations, two purchases in
- * one transaction sequence, and an eligibility rule that differs per END.
- */
-export default function MultihopModal({ onClose }: Props) {
-  const { allNodes } = useNodesContext()
-  const { status, disconnect: disconnectVpn } = useConnection()
+export default function ChainReviewModal({ entry, exit, onClose }: Props) {
+  const { status } = useConnection()
   const { udvpn, display: balance, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
-  const eligibility = useChainEligibility()
+  const { billing, setBilling, amount, setAmount, clear, eligibility } = useChainDraft()
 
-  const [step, setStep] = useState<Step>('entry')
-  const [entry, setEntry] = useState<SentNode | null>(null)
-  const [exit, setExit] = useState<SentNode | null>(null)
-  const [billing, setBilling] = useState<BillingType>('gigabytes')
-  const [amount, setAmount] = useState(1)
   const [mode, setMode] = useState<'tunnel' | 'proxy'>('tunnel')
   const [acknowledged, setAcknowledged] = useState(false)
   const [overrideDiversity, setOverrideDiversity] = useState(false)
@@ -94,7 +48,7 @@ export default function MultihopModal({ onClose }: Props) {
   // DNS is the one leak a chain cannot close by itself: with the resolver left on
   // System Default and no kill switch, queries go to the LAN resolver, which is more
   // specific than tun2socks' /1 halves and so never enters the tunnel. Read it here so
-  // the confirm step can say so before the money moves.
+  // the summary can say so before the money moves.
   const [dnsResolver, setDnsResolver] = useState<string | null>(null)
   const [dnsBusy, setDnsBusy] = useState(false)
 
@@ -105,7 +59,6 @@ export default function MultihopModal({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [paid, setPaid] = useState<{ entrySessionId: string; exitSessionId: string } | null>(null)
   const [tunnelConnected, setTunnelConnected] = useState(false)
-  const [disconnecting, setDisconnecting] = useState(false)
 
   const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
   // Both purchases and handshakes are done once the modal moves to the bring-up.
@@ -165,27 +118,29 @@ export default function MultihopModal({ onClose }: Props) {
     return () => { cancelled = true }
   }, [])
 
-  // Only v2ray/xray can be chained at all: proxySettings.tag is a v2ray-core
-  // feature and no other protocol in this client has an equivalent.
-  const chainable = useMemo(
-    () => allNodes.filter((n) => (n.type === 2 || n.type === 4) && n.isActive && n.isHealthy),
-    [allNodes],
-  )
-
-  const entryPrice = entry ? udvpnPrice(entry, billing) : null
-  const exitPrice = exit ? udvpnPrice(exit, billing) : null
+  const entryPrice = udvpnPrice(entry, billing)
+  const exitPrice = udvpnPrice(exit, billing)
   const costUdvpn = (entryPrice ?? 0) * amount + (exitPrice ?? 0) * amount
-  const priceMissing = (entry !== null && entryPrice === null) || (exit !== null && exitPrice === null)
+  const priceMissing = entryPrice === null || exitPrice === null
   const funds = udvpn === null ? null : checkFunds(udvpn, costUdvpn)
   const cantAfford = funds !== null && !funds.ok
 
-  const issues = entry && exit ? chainDiversityIssues(entry, exit) : []
+  const issues = chainDiversityIssues(entry, exit)
   const operatorOverlap = hasOperatorOverlap(issues)
-  const exitGrade = exit ? eligibility.results.get(exit.address) : undefined
+  const exitGrade = eligibility.results.get(exit.address)
   // Block only on a definite No. "Couldn't ask" (a pre-9.0.0 node, or an
   // unreachable one) stays allowed: it may work, and a failed build refunds both
   // sessions. A definite no is different — it is known before any money moves.
   const exitRefused = exitGrade !== undefined && exitGrade.reachable && !exitGrade.exit
+
+  /**
+   * Closing once a session exists spends the draft: those two nodes are now a pair of
+   * sessions, and re-offering them on the page would invite a second purchase.
+   */
+  function handleClose() {
+    if (paid) clear()
+    onClose()
+  }
 
   /**
    * Switch the app's resolver to encrypted DNS for this chain (and everything after).
@@ -204,7 +159,7 @@ export default function MultihopModal({ onClose }: Props) {
   }
 
   async function handleBuild() {
-    if (!entry || !exit || entryPrice === null || exitPrice === null) return
+    if (entryPrice === null || exitPrice === null) return
     setConnecting(true)
     setError(null)
     setCurrentStep('1/5')
@@ -256,119 +211,29 @@ export default function MultihopModal({ onClose }: Props) {
     }
   }
 
-  async function handleDisconnect() {
-    setDisconnecting(true)
-    try {
-      await disconnectVpn()
-    } finally {
-      setDisconnecting(false)
-      onClose()
-    }
-  }
-
   const title = tunnelConnected
     ? 'Chain active'
     : connecting
       ? 'Building the chain…'
-      : step === 'entry'
-        ? 'Pick the entry node'
-        : step === 'exit'
-          ? 'Pick the exit node'
-          : 'Confirm the chain'
+      : 'Review the chain'
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting ? undefined : onClose}>
-      {/* Fixed size, not content-sized. The three steps differ enormously in height
-          (a 50-row list vs. a short summary), so a shrink-to-fit box resized under
-          the cursor on every step change and moved the buttons around. Header and
-          rail stay put; only the body scrolls. */}
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting ? undefined : handleClose}>
       <div
-        className="bg-bg-secondary border border-border w-full max-w-2xl h-[640px] max-h-[88vh] mx-4 flex flex-col rounded-lg shadow-overlay"
+        className="bg-bg-secondary border border-border w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto rounded-lg shadow-overlay"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
-          <div>
-            <h2 className="text-text-primary text-base font-semibold">{title}</h2>
-            <p className="text-text-tertiary text-xs mt-0.5">
-              Two hops: your device → entry → exit → the internet.
-            </p>
-          </div>
+        <div className="flex items-center justify-between px-6 pt-6 pb-4">
+          <h2 className="text-text-primary text-base font-semibold">{title}</h2>
           {!connecting && (
-            <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-lg transition-colors">
+            <button onClick={handleClose} className="text-text-secondary hover:text-text-primary text-lg transition-colors">
               ×
             </button>
           )}
         </div>
 
-        {/* Step rail, also the way back to an earlier choice. Stays on screen while
-            the chain is being built — losing it there made the modal look like a
-            different window that had forgotten the two nodes just picked. Every
-            button is disabled mid-build, since going back would strand a purchase. */}
-        {!tunnelConnected && !error && (
-          <div className="flex items-center gap-2 text-xs px-6 pb-4 shrink-0">
-            {(['entry', 'exit', 'confirm'] as const).map((s, i) => {
-              const reachable = s === 'entry' || (s === 'exit' && entry) || (s === 'confirm' && entry && exit)
-              const node = s === 'entry' ? entry : s === 'exit' ? exit : null
-              return (
-                <button
-                  key={s}
-                  type="button"
-                  disabled={!reachable || connecting}
-                  onClick={() => setStep(s)}
-                  className={`flex-1 px-2 py-1.5 border rounded-sm text-left transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
-                    step === s ? 'border-accent text-accent' : 'border-border text-text-secondary hover:border-border-focus'
-                  }`}
-                >
-                  <span className="font-mono mr-1.5">{i + 1}</span>
-                  {s === 'entry' ? 'Entry' : s === 'exit' ? 'Exit' : 'Confirm'}
-                  {node && <span className="block truncate text-text-tertiary">{node.moniker || node.country}</span>}
-                </button>
-              )
-            })}
-          </div>
-        )}
-
-        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6 space-y-4">
-        {alreadyConnected && !connecting && !tunnelConnected && (
-          <div className="bg-warning-subtle border border-warning p-3 rounded-md space-y-2">
-            <p className="text-warning text-sm">A tunnel is already up.</p>
-            <p className="text-text-secondary text-xs">
-              Building a chain replaces it. Disconnect first. The current session stays paid and
-              can be reconnected from the Sessions tab.
-            </p>
-            <button
-              onClick={handleDisconnect}
-              disabled={disconnecting}
-              className="btn btn-danger text-xs px-3 py-1 disabled:opacity-50"
-            >
-              {disconnecting ? 'Disconnecting…' : 'Disconnect'}
-            </button>
-          </div>
-        )}
-
-        {!connecting && !error && !tunnelConnected && (step === 'entry' || step === 'exit') && (
-          <NodePicker
-            role={step}
-            nodes={chainable}
-            exclude={step === 'exit' ? entry : null}
-            billing={billing}
-            onBillingChange={setBilling}
-            eligibility={eligibility}
-            selected={step === 'entry' ? entry : exit}
-            onSelect={(node) => {
-              if (step === 'entry') {
-                setEntry(node)
-                setStep('exit')
-              } else {
-                setExit(node)
-                setOverrideDiversity(false)
-                setStep('confirm')
-              }
-            }}
-          />
-        )}
-
-        {!connecting && !error && !tunnelConnected && step === 'confirm' && entry && exit && (
+        <div className="px-6 pb-6 space-y-4">
+        {!connecting && !error && !tunnelConnected && (
           <div className="space-y-4">
             <div className="space-y-2 text-sm border border-border rounded-md p-3">
               <HopRow label="Entry" hint="Sees your real IP. Never sees where you go." node={entry} price={entryPrice} billing={billing} />
@@ -693,6 +558,14 @@ export default function MultihopModal({ onClose }: Props) {
               </label>
             </div>
 
+            {/* Says why the button below is dead. The banner on the page behind this one
+                carries the Disconnect, so there is no second one here. */}
+            {alreadyConnected && (
+              <p className="text-warning text-xs">
+                A tunnel is already up. Disconnect it first, on the tab behind this window.
+              </p>
+            )}
+
             <button
               onClick={handleBuild}
               disabled={
@@ -706,10 +579,10 @@ export default function MultihopModal({ onClose }: Props) {
           </div>
         )}
 
-        {connecting && entry && exit && (
+        {connecting && (
           <div className="space-y-4">
-            {/* The same summary the confirm step showed, so the build happens "in
-                place" rather than in what reads as a new, emptier window. */}
+            {/* The same summary the review showed, so the build happens "in place"
+                rather than in what reads as a new, emptier window. */}
             <div className="space-y-2 text-sm border border-border rounded-md p-3 opacity-70">
               <HopRow label="Entry" hint="Sees your real IP. Never sees where you go." node={entry} price={entryPrice} billing={billing} />
               <div className="text-text-tertiary text-center text-xs">↓ tunnelled inside the entry hop</div>
@@ -749,7 +622,6 @@ export default function MultihopModal({ onClose }: Props) {
             </p>
           </div>
         )}
-        {connecting && !(entry && exit) && <ProgressSteps currentStep={currentStep} error={error} />}
 
         {error && !connecting && (
           <div className="space-y-3">
@@ -772,17 +644,17 @@ export default function MultihopModal({ onClose }: Props) {
               paidSessionId={paid ? paid.entrySessionId : null}
               onRetryTunnel={handleRetryTunnel}
               // With two sessions already paid for, "start over" must NOT lead back to
-              // the confirm step: the Buy button there is live, and pressing it buys a
-              // SECOND pair while the first is still open and still charged. Close
-              // instead, and leave the chain where the user can see and end it.
+              // the review: the Buy button there is live, and pressing it buys a SECOND
+              // pair while the first is still open and still charged. Close instead, and
+              // leave the chain where the user can see and end it.
               onStartOver={paid
-                ? onClose
-                : () => { setError(null); setCurrentStep(null); setStep('confirm') }}
+                ? handleClose
+                : () => { setError(null); setCurrentStep(null) }}
             />
           </div>
         )}
 
-        {tunnelConnected && paid && entry && exit && (
+        {tunnelConnected && paid && (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm">
               <span className="status-dot status-dot-active" />
@@ -810,7 +682,7 @@ export default function MultihopModal({ onClose }: Props) {
                 pointed at it go through the chain.
               </p>
             )}
-            <button onClick={onClose} className="btn btn-primary w-full">Done</button>
+            <button onClick={handleClose} className="btn btn-primary w-full">Done</button>
           </div>
         )}
         </div>
@@ -957,285 +829,6 @@ function HopRow({ label, hint, node, price, billing }: {
       <span className="text-text-secondary font-mono text-xs shrink-0">
         {price === null ? '—' : `${formatP2p(price)}/${billing === 'gigabytes' ? 'GB' : 'hr'}`}
       </span>
-    </div>
-  )
-}
-
-function NodePicker({ role, nodes, exclude, billing, onBillingChange, eligibility, selected, onSelect }: {
-  role: 'entry' | 'exit'
-  nodes: SentNode[]
-  exclude: SentNode | null
-  billing: BillingType
-  onBillingChange: (t: BillingType) => void
-  eligibility: ReturnType<typeof useChainEligibility>
-  selected: SentNode | null
-  onSelect: (node: SentNode) => void
-}) {
-  const [search, setSearch] = useState('')
-  const [country, setCountry] = useState('')
-  const [verifiedOnly, setVerifiedOnly] = useState(false)
-
-  const countries = useMemo(
-    () => [...new Set(nodes.map((n) => n.country).filter(Boolean))].sort(),
-    [nodes],
-  )
-
-  const matches = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    return nodes
-      .filter((n) => n.address !== exclude?.address)
-      .filter((n) => (country ? n.country === country : true))
-      .filter((n) => !q || n.moniker.toLowerCase().includes(q) || n.country.toLowerCase().includes(q) || n.city.toLowerCase().includes(q))
-      .filter((n) => {
-        if (!verifiedOnly) return true
-        const grade = eligibility.results.get(n.address)
-        return grade?.reachable === true && (role === 'exit' ? grade.exit : grade.entry)
-      })
-      // Confirmed exits first, then the rest cheapest-first. Sorting by price alone
-      // buried the usable ones: only MAX_ROWS render, so a verified exit priced above
-      // that many cheaper nodes was unreachable no matter how far you scrolled.
-      .sort((a, b) => {
-        const rank = (n: SentNode) => {
-          const grade = eligibility.results.get(n.address)
-          if (grade?.reachable === true && (role === 'exit' ? grade.exit : grade.entry)) return 0
-          if (majorVersion(n) >= 9) return 1  // checkable, and either pending or refused
-          return 2                            // too old to check at all
-        }
-        const byRank = rank(a) - rank(b)
-        if (byRank !== 0) return byRank
-        return (udvpnPrice(a, billing) ?? Infinity) - (udvpnPrice(b, billing) ?? Infinity)
-      })
-  }, [nodes, exclude, country, search, verifiedOnly, eligibility.results, billing, role])
-
-  const visible = matches.slice(0, MAX_ROWS)
-
-  // Grade every CHECKABLE candidate, not just the rows on screen. Two reasons, both
-  // found the hard way:
-  //   - only MAX_ROWS render, so grading just those made everything past the last row
-  //     permanently ungraded, and the sort above could never lift a verified exit
-  //     into view.
-  //   - "Verified exits only" filters on the grades, so with only the visible rows
-  //     graded it silently hid every verified exit outside them.
-  // Pre-9.0.0 nodes are skipped entirely rather than probed and reported unknown:
-  // they publish no inbound list, so the request can only fail. That is most of the
-  // network (487 of 726 healthy V2Ray/XRAY nodes), so skipping them is also what
-  // keeps this affordable.
-  //
-  // VISIBLE ROWS FIRST, though. probe() walks its argument in order, so putting the
-  // rendered rows at the front settles the part of the list the user is looking at in
-  // the first chunk or two, instead of after every node in the country they didn't
-  // pick. It also means an early close probes far fewer nodes: each probe is an HTTPS
-  // request from the user's own address, so a picker opened and abandoned should not
-  // announce itself to a couple of hundred operators.
-  const { probe } = eligibility
-  const checkable = useMemo(() => {
-    const onScreen = new Set(visible.map((n) => n.address))
-    return [
-      ...visible.filter((n) => majorVersion(n) >= 9),
-      ...matches.filter((n) => majorVersion(n) >= 9 && !onScreen.has(n.address)),
-    ]
-    // `visible` is derived from `matches`, so one dependency covers both.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [matches])
-  // Sorted, because grades arriving change the list ORDER and an order-sensitive
-  // key would retrigger this effect on every one of them.
-  const visibleKey = checkable.map((n) => n.address).sort().join(',')
-  // Settle before probing. The search box filters on every keystroke, and each new set
-  // abandons the sweep in flight and starts one for the new one — so typing "toronto"
-  // unthrottled would fire a chunk of 30 requests per letter. probe's identity is
-  // stable (it reads results from a ref), so this timer is only reset by a real change
-  // of role or filter, never by a chunk landing.
-  useEffect(() => {
-    if (checkable.length === 0) return
-    // The key tells probe() whether this is the set it is already working or a new one
-    // to switch to. Role is in it because the two ends are graded against different rules.
-    const timer = setTimeout(() => { void probe(checkable, `${role}:${visibleKey}`) }, PROBE_SETTLE_MS)
-    return () => clearTimeout(timer)
-    // visibleKey stands in for `visible`, which is a fresh array every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role, visibleKey, probe])
-
-  return (
-    // h-full + a flex-1 list, so the rows fill whatever the fixed-height modal
-    // leaves rather than stopping short of it.
-    <div className="space-y-3 h-full flex flex-col">
-      {/* One line, with the reasoning behind the "?". Both roles used to open with a
-          paragraph, and the second one (the TLS rule below) was word-for-word the same
-          on each, so choosing two nodes meant reading it twice. */}
-      <div className="flex items-start justify-between gap-2 shrink-0">
-        <p className="text-text-secondary text-xs">
-          {role === 'entry'
-            ? 'Your device dials this node directly, so it sees your IP and not where you go.'
-            : 'Reached only through the entry, setup included, so sites see its location instead of yours.'}
-        </p>
-        <InfoTip label={`More about the ${role} node`}>
-          {role === 'entry' ? (
-            <>
-              It is also the hop your own network and ISP can see, which is why it has to be
-              wrapped.
-            </>
-          ) : (
-            <>
-              It must also serve plain TCP: grpc and websocket bring their own dialer and break
-              when carried inside another hop.
-            </>
-          )}
-        </InfoTip>
-      </div>
-      {/* A legend, not a paragraph. The rule it replaced ran 72 words to explain four
-          badges that already carry their own per-node `title`, and the badges are what
-          the user actually reads.
-
-          The enforced rule is "not cleartext", which is narrower than "TLS only":
-          VMess carries its own AEAD cipher, so VMess without TLS is accepted while
-          VLess without TLS is refused. Every exit-capable node measured on
-          2026-08-14 (138 of them) served TLS or Reality, but that is a fact about
-          today's network and not something to promise, so the badge reports each
-          node's actual security instead. */}
-      <div className="flex items-start justify-between gap-2 text-text-tertiary text-xs shrink-0">
-        <p>
-          <span className="text-success">TLS</span> or <span className="text-success">Reality</span>{' '}
-          chainable · <span className="text-danger">no TLS</span> not eligible ·{' '}
-          <span className="text-text-tertiary">v8.x</span> too old to check
-        </p>
-        <InfoTip label="Why both hops need TLS or Reality">
-          Both hops of a chain must be wrapped in TLS or Reality, which is stricter than an
-          ordinary connection. A VMess hop without TLS is still encrypted, but it is
-          recognisable as a proxy to anyone watching the wire, and that is the thing a chain is
-          bought to avoid. Nodes older than 9.0.0 publish nothing to check against that rule, so
-          they are listed for context but cannot be picked.
-        </InfoTip>
-      </div>
-
-      <div className="flex items-center gap-2 flex-wrap shrink-0">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search moniker, country, city…"
-          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus flex-1 min-w-[180px]"
-        />
-        <select
-          value={country}
-          onChange={(e) => setCountry(e.target.value)}
-          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
-        >
-          <option value="">All countries</option>
-          {countries.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <select
-          value={billing}
-          onChange={(e) => onBillingChange(e.target.value as BillingType)}
-          className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
-        >
-          <option value="gigabytes">P2P / GB</option>
-          <option value="hours">P2P / hour</option>
-        </select>
-        {role === 'exit' && (
-          <label className="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={verifiedOnly}
-              onChange={(e) => setVerifiedOnly(e.target.checked)}
-              className="accent-[var(--color-accent)]"
-            />
-            Verified exits only
-          </label>
-        )}
-      </div>
-
-      <div className="flex items-center justify-between text-xs text-text-tertiary shrink-0">
-        <span>
-          Showing {visible.length} of {matches.length}
-          {matches.length > MAX_ROWS ? ', narrow the search to see more' : ''}
-        </span>
-        {eligibility.progress && (
-          <span className="flex items-center gap-1.5 text-text-secondary">
-            <Spinner className="text-accent" />
-            Checking nodes {eligibility.progress.done}/{eligibility.progress.total}
-          </span>
-        )}
-      </div>
-
-      <div className="border border-border rounded-md divide-y divide-border flex-1 min-h-0 overflow-y-auto">
-        {visible.map((node) => {
-          const grade = eligibility.results.get(node.address)
-          const ok = role === 'exit' ? grade?.exit : grade?.entry
-          const security = role === 'exit' ? grade?.exitSecurity : grade?.entrySecurity
-          // Selectable only on POSITIVE evidence. Under the chain's TLS rule an
-          // unverifiable node is not a maybe, it is a near-certain refund: a node
-          // that publishes no listing is pre-9.0.0, and 485 of 487 of those report
-          // no TLS. Leaving them clickable cost a real pair of sessions, and the
-          // refund of that pair then failed. Ungraded rows stay VISIBLE, so the list
-          // still explains itself rather than silently hiding most of the network.
-          const checking = majorVersion(node) >= 9 && grade === undefined
-          const refused = !checking && ok !== true
-          const price = udvpnPrice(node, billing)
-          const code = COUNTRY_CODES[node.country] || ''
-          return (
-            <button
-              key={node.address}
-              type="button"
-              onClick={() => onSelect(node)}
-              disabled={refused}
-              className={`w-full text-left px-3 py-2 flex items-center gap-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                selected?.address === node.address ? 'bg-success-subtle' : 'hover:bg-bg-hover'
-              }`}
-            >
-              {code && <span className={`fi fi-${code} shrink-0`} style={{ fontSize: '12px', lineHeight: 1 }} />}
-              <span className="flex-1 min-w-0">
-                <span className="block text-sm text-text-primary truncate">{node.moniker || node.address}</span>
-                <span className="block text-xs text-text-tertiary truncate">
-                  {node.country}{node.city ? `, ${node.city}` : ''}
-                  {node.asn ? ` · AS${node.asn}` : ''}
-                </span>
-              </span>
-              {(
-                <span className="shrink-0 text-xs">
-                  {majorVersion(node) < 9 ? (
-                    // Never probed (see `checkable`), so say what is actually known:
-                    // its version. "unknown" made a knowable fact look like a failure.
-                    <span
-                      className="text-text-tertiary"
-                      title={`This node runs ${node.version || 'a pre-9.0.0 version'}, which does not publish its inbound list, so it cannot be checked before you pay. Almost none of them offer TLS, so this will very likely be refused at the handshake and refunded.`}
-                    >
-                      v{node.version || '8.x'}
-                    </span>
-                  ) : grade === undefined ? (
-                    <span className="text-text-tertiary">checking…</span>
-                  ) : !grade.reachable ? (
-                    <span className="text-warning" title={grade.error ?? 'No inbound listing'}>unknown</span>
-                  ) : ok ? (
-                    <span
-                      className="text-success"
-                      title={`Serves ${grade.transports.join(', ')}. This hop would be wrapped in ${security === 'reality' ? 'Reality' : 'TLS'}.`}
-                    >
-                      {role === 'exit' ? 'TCP + ' : ''}{security === 'reality' ? 'Reality' : 'TLS'}
-                    </span>
-                  ) : (
-                    <span
-                      className="text-danger"
-                      title={role === 'exit'
-                        ? `Serves ${grade.transports.join(', ') || 'nothing usable'}. A chain exit needs a plain-TCP inbound wrapped in TLS or Reality.`
-                        : `Serves ${grade.transports.join(', ') || 'nothing usable'}, but none of it is wrapped in TLS or Reality. Still fine for an ordinary single-hop connection.`}
-                    >
-                      {role === 'exit' ? 'no TLS/TCP' : 'no TLS'}
-                    </span>
-                  )}
-                </span>
-              )}
-              <span className={`shrink-0 text-xs ${protocolMeta(node.type).color}`}>{protocolMeta(node.type).short}</span>
-              <span className="shrink-0 text-xs font-mono text-text-secondary w-[70px] text-right">
-                {price === null ? '—' : formatP2p(price)}
-              </span>
-            </button>
-          )
-        })}
-        {visible.length === 0 && (
-          <div className="px-3 py-6 text-center text-text-secondary text-sm">
-            No nodes match. Try clearing the filters.
-          </div>
-        )}
-      </div>
     </div>
   )
 }

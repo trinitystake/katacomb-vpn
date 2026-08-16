@@ -650,6 +650,12 @@ xray-core is a strict superset of what the builder emits, so it lands in
 `activeXrayConfig` and needs no new connect branch. Only v2ray(2)/xray(4) can chain —
 `proxySettings.tag` has no equivalent in the other protocols.
 
+- **The builder is a TAB, not a modal**, with the same shape as Nodes: choose on
+  `multihop/MultihopView.tsx` (the real `NodeFilters` + `useNodes(latencyMap, isChainable)`,
+  no private picker), commit in `multihop/ChainReviewModal.tsx`; the draft and its grades
+  live above the tab in `ChainDraftContext`. `utils/chain-node.ts` (pure, unit-tested) owns
+  the rule that decides which rows can be clicked: **selectable only on POSITIVE evidence**,
+  so ungraded, unreachable and pre-9.0.0 nodes stay visible but refuse the click.
 - **Only the ENTRY is dialled directly.** `extractV2RayRemoteHost` picks the outbound
   **without** `proxySettings`, and that one IP is the only bypass route and the only
   kill-switch whitelist. Whitelisting the exit strands the tunnel. Verify a live chain

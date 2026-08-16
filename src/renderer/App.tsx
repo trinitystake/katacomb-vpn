@@ -8,6 +8,7 @@ import MnemonicInput from './components/MnemonicInput'
 import WalletPicker from './components/WalletPicker'
 import MapView from './components/MapView'
 import NodeTable from './components/NodeTable'
+import MultihopView from './components/multihop/MultihopView'
 import WalletPanel from './components/WalletPanel'
 import ConnectedBar from './components/ConnectedBar'
 import IpDisplay from './components/IpDisplay'
@@ -22,6 +23,7 @@ import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { NodesProvider } from './contexts/NodesContext'
+import { ChainDraftProvider, useChainDraft } from './contexts/ChainDraftContext'
 import { NavigationProvider, useNavigation, type MainTab } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
 import AppLogo from './components/AppLogo'
@@ -97,6 +99,19 @@ function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'
   )
 }
 
+/**
+ * Written out rather than capitalized from the tab id: "multihop" would render as
+ * "Multihop", and the hyphen is what makes it read as two hops rather than a word.
+ */
+const TAB_LABELS: Record<MainTab, string> = {
+  map: 'Map',
+  nodes: 'Nodes',
+  multihop: 'Multi-hop',
+  plans: 'Plans',
+  sessions: 'Sessions',
+  provider: 'Provider',
+}
+
 function AppInner() {
   const wallet = useWallet()
   const { status: connStatus } = useConnection()
@@ -115,6 +130,10 @@ function AppInner() {
   // Live sessions only. An ended one is still listed while it settles on chain, but
   // the badge means "this needs you", and a settling row does not.
   const sessionCount = sessionsState.sessions.filter((s) => s.status === 'active').length
+  // A parked half-built chain, so it is visible from any tab rather than only from
+  // the one the two nodes were picked on.
+  const { entry: chainEntry, exit: chainExit } = useChainDraft()
+  const chainDraftCount = (chainEntry ? 1 : 0) + (chainExit ? 1 : 0)
   const reconnect = useReconnect()
   // One instance for the whole app: it decides whether the tab exists AND feeds the
   // console, so a refresh from inside the console also updates the tab. Skipped
@@ -125,8 +144,8 @@ function AppInner() {
   const providerState = useProvider(wallet.address, !isConnected, Boolean(activeWallet?.providerMode))
   const providerVisible = providerState.visible
   const mainTabs: MainTab[] = providerVisible
-    ? ['map', 'nodes', 'plans', 'sessions', 'provider']
-    : ['map', 'nodes', 'plans', 'sessions']
+    ? ['map', 'nodes', 'multihop', 'plans', 'sessions', 'provider']
+    : ['map', 'nodes', 'multihop', 'plans', 'sessions']
 
   // Turning provider mode back off while standing on that tab would leave the
   // main area blank — fall back to the map.
@@ -247,16 +266,21 @@ function AppInner() {
           <button
             key={t}
             onClick={() => setMainTab(t)}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors capitalize flex items-center gap-1.5 ${
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
               mainTab === t
                 ? 'border-accent text-accent'
                 : 'border-transparent text-text-secondary hover:text-text-primary'
             }`}
           >
-            {t}
+            {TAB_LABELS[t]}
             {t === 'sessions' && sessionCount > 0 && (
               <span className="text-[10px] font-mono bg-accent/15 text-accent px-1.5 py-0.5 rounded-full leading-none">
                 {sessionCount}
+              </span>
+            )}
+            {t === 'multihop' && chainDraftCount > 0 && (
+              <span className="text-[10px] font-mono bg-accent/15 text-accent px-1.5 py-0.5 rounded-full leading-none">
+                {chainDraftCount}/2
               </span>
             )}
           </button>
@@ -266,6 +290,7 @@ function AppInner() {
       <main className="flex-1 overflow-hidden">
         {mainTab === 'map' && <MapView />}
         {mainTab === 'nodes' && <NodeTable />}
+        {mainTab === 'multihop' && <MultihopView />}
         {mainTab === 'plans' && <PlanDiscovery />}
         {mainTab === 'sessions' && (
           <ActiveSessions
@@ -305,7 +330,11 @@ export default function App() {
     <SettingsProvider>
       <NodesProvider>
         <NavigationProvider>
-          <AppInner />
+          {/* Above the tab, not inside it: leaving the Multi-hop tab must keep the
+              half-built chain AND the grades it took hundreds of requests to collect. */}
+          <ChainDraftProvider>
+            <AppInner />
+          </ChainDraftProvider>
         </NavigationProvider>
       </NodesProvider>
     </SettingsProvider>

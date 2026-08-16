@@ -313,7 +313,7 @@ export function deadTunnelMessage(nodeIssuedFreshPeer: boolean, isChain = false)
       'Both hops are paid for and still open, so retry the connection first. If it fails ' +
       'again, the exit hop is the more likely one at fault: the entry is dialled directly ' +
       'and would have failed earlier, while an exit that accepts the connection and forwards ' +
-      'nothing looks exactly like this. End both and build a chain with a different exit.'
+      'nothing looks exactly like this. End the chain and build a new one with a different exit.'
   }
   if (nodeIssuedFreshPeer) {
     return 'The tunnel came up but no traffic is getting through. The node is not carrying ' +

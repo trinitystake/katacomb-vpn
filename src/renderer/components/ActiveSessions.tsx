@@ -461,7 +461,13 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                                     : undefined
                             }
                           >
-                            {isBusy ? <Spinner /> : isChain ? 'Connect chain' : 'Connect'}
+                            {/* Not "Connect chain" / "End both": the card is headed
+                                "Multi-hop chain" and lists both hops right below, so the
+                                qualifier repeated what the row already said. What the
+                                labels used to carry is still carried, and more precisely
+                                — the title here, and for End a confirm that names the
+                                peer session it is about to close. */}
+                            {isBusy ? <Spinner /> : 'Connect'}
                           </button>
                         )}
                         <button
@@ -470,7 +476,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                           className="btn btn-danger text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
                           title={isChain ? 'Ends both hops. One hop alone carries no traffic.' : undefined}
                         >
-                          {isBusy ? <Spinner /> : isChain ? 'End both' : 'End'}
+                          {isBusy ? <Spinner /> : 'End'}
                         </button>
                       </>
                     )}

@@ -323,7 +323,19 @@ function ensurePolkitSetup(): void {
       `chown root:root "$4"`,
     ].join(' && ')
 
-    execFileSync('pkexec', ['sh', '-c', script, '--', helperSrc, policySrc, HELPER_PATH, POLICY_PATH], { stdio: 'pipe' })
+    // Bounded, unlike the rest of this function's blocking. Running before
+    // createWindow() is deliberate — the helper has to exist before anything can
+    // connect, and the message box above already gates startup on an answer — but
+    // this call had no timeout at all, so a polkit prompt that never gets answered
+    // (no agent running, dialog swallowed by the WM) blocked the main process
+    // forever: no window, no tray, nothing to click, kill it from a terminal. 60s
+    // is what runPrivileged allows for the same shape of call, a prompt plus a fast
+    // command. Failure here is already survivable: the app falls back to
+    // per-operation prompts.
+    execFileSync('pkexec', ['sh', '-c', script, '--', helperSrc, policySrc, HELPER_PATH, POLICY_PATH], {
+      stdio: 'pipe',
+      timeout: 60000,
+    })
   } catch {
     // User cancelled or pkexec failed — app still works with per-operation prompts
   }

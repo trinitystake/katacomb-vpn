@@ -4,7 +4,8 @@ import { useNodesContext } from '../contexts/NodesContext'
 import { v2rayConnectionCategory } from '../utils/v2ray-connection'
 import { nodeStatusRank } from '../utils/node-status'
 
-const DEFAULT_FILTER: NodeFilter = {
+/** Exported so the filter bar can tell whether a control is still at its default. */
+export const DEFAULT_FILTER: NodeFilter = {
   country: '',
   city: '',
   type: 'all',
@@ -18,7 +19,7 @@ const DEFAULT_FILTER: NodeFilter = {
   search: '',
 }
 
-type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'peers' | 'latency' | 'status'
+type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'peers' | 'latency' | 'status' | 'eligibility'
 type SortDir = 'asc' | 'desc'
 
 function getUdvpnPrice(prices: { denom: string; value: string }[]): number {
@@ -30,6 +31,7 @@ function compareNodes(
   a: SentNode, b: SentNode,
   key: SortKey, dir: SortDir,
   latencyMap: Map<string, number | null>,
+  rankMap: Map<string, number>,
 ): number {
   let cmp = 0
   switch (key) {
@@ -68,11 +70,18 @@ function compareNodes(
       // healthy and inactive rather than tying with inactive.
       cmp = nodeStatusRank(a) - nodeStatusRank(b)
       break
+    case 'eligibility':
+      // Scored by the caller (only Multi-hop has this column) because the grade
+      // depends on which hop is being chosen, which this hook knows nothing about.
+      // An unranked node sorts last rather than first.
+      cmp = (rankMap.get(a.address) ?? Infinity) - (rankMap.get(b.address) ?? Infinity)
+      break
   }
   return dir === 'asc' ? cmp : -cmp
 }
 
 const EMPTY_LATENCY_MAP: Map<string, number | null> = new Map()
+const EMPTY_RANK_MAP: Map<string, number> = new Map()
 
 /**
  * @param prefilter Narrows the universe this consumer sees, BEFORE anything else.
@@ -80,10 +89,14 @@ const EMPTY_LATENCY_MAP: Map<string, number | null> = new Map()
  *   that the country and city dropdowns, and the total, describe the same universe as
  *   the table: filtered afterwards, they would offer places with no chainable node in
  *   them. Pass a stable (module-level) function, or the memo below recomputes forever.
+ * @param eligibilityRank Scores for the `eligibility` sort key, by node address. Same
+ *   arrangement as `latencyMap`: the value is measured by the consumer, this hook only
+ *   orders by it.
  */
 export function useNodes(
   latencyMap: Map<string, number | null> = EMPTY_LATENCY_MAP,
   prefilter?: (n: SentNode) => boolean,
+  eligibilityRank: Map<string, number> = EMPTY_RANK_MAP,
 ) {
   // Raw node state is owned by the NodesProvider so Map + Nodes tabs share
   // a single fetch + a single in-memory cache (seeded from disk on startup).
@@ -131,8 +144,8 @@ export function useNodes(
       nodes = nodes.filter((n) => (n.moniker || '').toLowerCase().includes(q))
     }
 
-    return nodes.slice().sort((a, b) => compareNodes(a, b, sortKey, sortDir, latencyMap))
-  }, [allNodes, filter, sortKey, sortDir, bookmarks, latencyMap])
+    return nodes.slice().sort((a, b) => compareNodes(a, b, sortKey, sortDir, latencyMap, eligibilityRank))
+  }, [allNodes, filter, sortKey, sortDir, bookmarks, latencyMap, eligibilityRank])
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {

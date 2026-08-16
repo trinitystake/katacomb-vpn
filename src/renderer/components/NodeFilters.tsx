@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import Spinner from './Spinner'
+import { DEFAULT_FILTER } from '../hooks/useNodes'
 import type { NodeFilter } from '../types'
 import { PROTOCOL_FILTER_OPTIONS, type ProtocolType } from '../utils/protocols'
 
@@ -11,6 +12,19 @@ const V2RAY_CONNECTION_OPTIONS = [
   ['unknown', 'Unknown'],
 ] as const
 
+/**
+ * The six booleans that used to sit on their own row under the bar. Five are flags on
+ * the node record (`isActive`, `isHealthy`, …); Bookmarked is the user's own mark,
+ * which is why it hangs below a rule rather than in the list with them.
+ */
+const STATUS_OPTIONS = [
+  ['activeOnly', 'Active'],
+  ['healthyOnly', 'Healthy'],
+  ['residentialOnly', 'Residential'],
+  ['whitelistedOnly', 'Whitelisted'],
+  ['hideDuplicates', 'Hide Dupes'],
+] as const
+
 interface Props {
   filter: NodeFilter
   updateFilter: (patch: Partial<NodeFilter>) => void
@@ -18,7 +32,6 @@ interface Props {
   cities: string[]
   totalCount: number
   filteredCount: number
-  lastFetched: Date | null
   loading: boolean
   onRefresh: () => void
   batchProgress: { done: number; total: number } | null
@@ -38,7 +51,6 @@ export default function NodeFilters({
   cities,
   totalCount,
   filteredCount,
-  lastFetched,
   loading,
   onRefresh,
   batchProgress,
@@ -48,6 +60,8 @@ export default function NodeFilters({
 }: Props) {
   const [connOpen, setConnOpen] = useState(false)
   const connRef = useRef<HTMLDivElement | null>(null)
+  const [statusOpen, setStatusOpen] = useState(false)
+  const statusRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!connOpen) return
@@ -60,11 +74,29 @@ export default function NodeFilters({
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [connOpen])
 
+  useEffect(() => {
+    if (!statusOpen) return
+    function handleClickOutside(e: MouseEvent) {
+      if (statusRef.current && !statusRef.current.contains(e.target as Node)) {
+        setStatusOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [statusOpen])
+
   // Highlight the button + show a dot when the list is being narrowed by connection type.
   const connFiltered = Object.values(filter.v2rayConnection).some((v) => !v)
+  // Same signal for the status button, against the DEFAULTS rather than against "all
+  // off": three of these start ticked, so "any is on" would light the dot permanently
+  // and say nothing. This says "you changed something in here", which is what a
+  // collapsed control has to say for the user to trust it.
+  const statusFiltered =
+    STATUS_OPTIONS.some(([key]) => filter[key] !== DEFAULT_FILTER[key]) ||
+    filter.bookmarkedOnly !== DEFAULT_FILTER.bookmarkedOnly
 
   return (
-    <div className="border-b border-border bg-bg-secondary px-4 py-3 space-y-3">
+    <div className="border-b border-border bg-bg-secondary px-4 py-3">
       <div className="flex items-center gap-3 flex-wrap">
         <select
           value={filter.country}
@@ -95,6 +127,54 @@ export default function NodeFilters({
           placeholder="Search moniker..."
           className="bg-bg-tertiary border border-border text-text-primary text-sm px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus w-[180px]"
         />
+
+        {/* Six checkboxes that used to be a second row under the bar. Collapsed to
+            match the Connection control next to it: same button, same dot, same panel.
+            They are the least-touched controls in the bar and were taking the most
+            room. */}
+        <div ref={statusRef} className="relative">
+          <button
+            onClick={() => setStatusOpen((o) => !o)}
+            className={`flex items-center gap-1.5 border rounded-sm px-2.5 py-1.5 text-sm transition-colors ${
+              statusFiltered
+                ? 'border-accent text-accent'
+                : 'bg-bg-tertiary border-border text-text-primary hover:border-border-focus'
+            }`}
+            title="Filter by node status and your bookmarks"
+          >
+            {statusFiltered && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
+            Status
+            <span className="text-text-tertiary text-[10px]">▾</span>
+          </button>
+
+          {statusOpen && (
+            <div className="absolute left-0 top-full mt-1 z-20 w-44 bg-bg-secondary border border-border rounded-md shadow-overlay p-2 space-y-1">
+              <div className="px-1 pb-1 text-[10px] uppercase tracking-wide text-text-tertiary select-none">
+                Node status
+              </div>
+              {STATUS_OPTIONS.map(([key, label]) => (
+                <label key={key} className="flex items-center gap-2 px-1 py-0.5 text-sm text-text-secondary cursor-pointer select-none rounded-sm hover:bg-bg-hover">
+                  <input
+                    type="checkbox"
+                    checked={filter[key]}
+                    onChange={(e) => updateFilter({ [key]: e.target.checked })}
+                    className="accent-[var(--color-accent)]"
+                  />
+                  {label}
+                </label>
+              ))}
+              <label className="flex items-center gap-2 px-1 py-0.5 mt-1 pt-2 border-t border-border text-sm text-text-secondary cursor-pointer select-none rounded-sm hover:bg-bg-hover">
+                <input
+                  type="checkbox"
+                  checked={filter.bookmarkedOnly}
+                  onChange={(e) => updateFilter({ bookmarkedOnly: e.target.checked })}
+                  className="accent-[var(--color-accent)]"
+                />
+                Bookmarked
+              </label>
+            </div>
+          )}
+        </div>
 
         <select
           value={filter.type === 'all' ? 'all' : String(filter.type)}
@@ -153,12 +233,6 @@ export default function NodeFilters({
           {filteredCount}/{totalCount}
         </span>
 
-        {lastFetched && (
-          <span className="text-text-tertiary text-xs">
-            {lastFetched.toLocaleTimeString()}
-          </span>
-        )}
-
         {batchProgress ? (
           <button
             onClick={onCancelBatch}
@@ -183,27 +257,6 @@ export default function NodeFilters({
         >
           {loading ? <><Spinner className="text-accent" /> Fetching</> : 'Refresh'}
         </button>
-      </div>
-
-      <div className="flex items-center gap-4 flex-wrap">
-        {([
-          ['activeOnly', 'Active'],
-          ['healthyOnly', 'Healthy'],
-          ['residentialOnly', 'Residential'],
-          ['whitelistedOnly', 'Whitelisted'],
-          ['hideDuplicates', 'Hide Dupes'],
-          ['bookmarkedOnly', 'Bookmarked'],
-        ] as const).map(([key, label]) => (
-          <label key={key} className="flex items-center gap-1.5 text-sm text-text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={filter[key]}
-              onChange={(e) => updateFilter({ [key]: e.target.checked })}
-              className="accent-[var(--color-accent)]"
-            />
-            {label}
-          </label>
-        ))}
       </div>
     </div>
   )

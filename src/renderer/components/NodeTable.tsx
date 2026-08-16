@@ -98,7 +98,6 @@ export default function NodeTable() {
         cities={cities}
         totalCount={totalCount}
         filteredCount={nodes.length}
-        lastFetched={lastFetched}
         loading={loading}
         onRefresh={refresh}
         batchProgress={batchProgress}
@@ -109,9 +108,9 @@ export default function NodeTable() {
         onCancelBatch={cancelBatch}
       />
 
-      {/* With a list in hand a failed refresh only makes it stale — the filter
-          bar's timestamp already says so, and blanking the table would be worse.
-          Only the no-list-at-all case gets the full-pane treatment. */}
+      {/* With a list in hand a failed refresh only makes it stale, and blanking the
+          table would be worse than showing the last good one. Only the no-list-at-all
+          case gets the full-pane treatment. */}
       {!lastFetched ? (
         error ? (
           <div className="flex-1 flex items-center justify-center">

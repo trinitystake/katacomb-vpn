@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  chainRowRank,
   chainRowState,
   isChainable,
   isCheckable,
@@ -115,6 +116,43 @@ test('a verified row names the wrapping it would get', () => {
     },
   )
   assert.equal(chainRowState(node({}), grade({}), 'entry').badge, 'TLS')
+})
+
+test('chainRowRank puts the pickable first and the uncheckable last', () => {
+  const v9 = node({ version: '9.0.0' })
+  assert.equal(chainRowRank(v9, grade({}), 'entry'), 0)                                  // verified
+  assert.equal(chainRowRank(v9, undefined, 'entry'), 1)                                  // still checking
+  assert.equal(chainRowRank(v9, grade({ reachable: false }), 'entry'), 2)                // did not answer
+  assert.equal(chainRowRank(v9, grade({ entry: false, exit: false }), 'entry'), 3)       // refused
+  assert.equal(chainRowRank(node({ version: '8.3.1' }), undefined, 'entry'), 4)          // too old
+})
+
+test('chainRowRank is scored per role, like the badge', () => {
+  const entryOnly = grade({ exit: false, exitSecurity: null, transports: ['grpc'] })
+  assert.equal(chainRowRank(node({}), entryOnly, 'entry'), 0)
+  assert.equal(chainRowRank(node({}), entryOnly, 'exit'), 3)
+})
+
+test('rank 0 and selectable never disagree', () => {
+  // The column sorts on the rank while the row is enabled on the state, so a split
+  // between them would put unpickable rows at the top of a "best first" sort.
+  const cases: [SentNode, ChainEligibility | undefined][] = [
+    [node({ version: '8.3.1' }), undefined],
+    [node({}), undefined],
+    [node({}), grade({ reachable: false })],
+    [node({}), grade({})],
+    [node({}), grade({ entry: false, exit: false })],
+    [node({}), grade({ exit: false })],
+  ]
+  for (const role of ['entry', 'exit'] as const) {
+    for (const [n, g] of cases) {
+      assert.equal(
+        chainRowRank(n, g, role) === 0,
+        chainRowState(n, g, role).selectable,
+        `disagreed for ${role} on ${JSON.stringify(g)}`,
+      )
+    }
+  }
 })
 
 test('isVerifiedFor answers only on a reachable grade for that end', () => {

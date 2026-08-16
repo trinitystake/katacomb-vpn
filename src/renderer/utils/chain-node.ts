@@ -118,6 +118,27 @@ export function chainRowState(
   }
 }
 
+/**
+ * Sort rank for the eligibility column: most useful to this hop first.
+ *
+ * Ascending is "best first", so a plain ascending sort puts every node you can
+ * actually pick at the top. The two that are merely unproven sit above the two that
+ * are known to fail, and pre-9.0.0 sorts last because it is the one that cannot be
+ * checked at any price.
+ *
+ * Rank 0 is exactly `chainRowState().selectable`, and the test holds the two together.
+ */
+export function chainRowRank(
+  node: SentNode,
+  grade: ChainEligibility | undefined,
+  role: ChainRole,
+): number {
+  if (!isCheckable(node)) return 4
+  if (grade === undefined) return 1
+  if (!grade.reachable) return 2
+  return (role === 'exit' ? grade.exit : grade.entry) ? 0 : 3
+}
+
 /** Whether `grade` confirms this node can serve `role`. Drives "Verified only". */
 export function isVerifiedFor(grade: ChainEligibility | undefined, role: ChainRole): boolean {
   if (!grade?.reachable) return false

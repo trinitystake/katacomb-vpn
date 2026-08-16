@@ -3,8 +3,10 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useNodes } from '../../hooks/useNodes'
 import { useConnection } from '../../hooks/useConnection'
 import { useNodeTest } from '../../hooks/useNodeTest'
+import { useNodesContext } from '../../contexts/NodesContext'
 import { useChainDraft } from '../../contexts/ChainDraftContext'
 import {
+  chainRowRank,
   chainRowState,
   isChainable,
   isCheckable,
@@ -49,21 +51,24 @@ const CHAIN_PROTOCOL_OPTIONS = [
 
 const CACHE_TTL = 10 * 60 * 1000
 
-type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'latency' | 'status'
+type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'latency' | 'status' | 'eligibility'
 
 /**
  * The Nodes tab's columns minus Peers (a chain hop is picked on eligibility, not on
- * how busy the node is) plus the eligibility badge, which is the column this whole
- * page turns on. Eligibility has no sort key on purpose: "Verified only" plus the
- * ordinary column sorts already reach every usable node now that the list is
- * virtualized and nothing is truncated.
+ * how busy the node is) plus the eligibility grade, which is the column this whole page
+ * turns on.
+ *
+ * Every one of them is sortable, and that is also what keeps the casing consistent: the
+ * header row carries `uppercase`, but a <button> does not inherit it. While eligibility
+ * was the one unsortable column it was the one plain <div>, so it alone rendered
+ * "ELIG." among "Country" and "Latency". Don't make a header a non-button again.
  */
-const COLUMNS: { key: SortKey | null; label: string; width: string }[] = [
+const COLUMNS: { key: SortKey; label: string; width: string }[] = [
   { key: 'country', label: 'Country', width: 'w-[160px]' },
   { key: 'city', label: 'City', width: 'w-[120px]' },
   { key: 'moniker', label: 'Moniker', width: 'flex-1 min-w-[140px]' },
   { key: 'type', label: 'Type', width: 'w-[80px]' },
-  { key: null, label: 'Elig.', width: 'w-[110px]' },
+  { key: 'eligibility', label: 'Eligibility', width: 'w-[110px]' },
   { key: 'priceGb', label: 'P2P/GB', width: 'w-[80px]' },
   { key: 'priceHr', label: 'P2P/Hr', width: 'w-[80px]' },
   { key: 'latency', label: 'Latency', width: 'w-[70px] justify-center' },
@@ -103,6 +108,20 @@ export default function MultihopView() {
     return map
   }, [testResults])
 
+  // Scored here rather than in useNodes because the grade depends on which hop is
+  // being chosen. Rebuilt as grades land, which is what makes an eligibility sort fill
+  // in live; the probe key is address-sorted, so the reordering never restarts a sweep.
+  const { allNodes } = useNodesContext()
+  const eligibilityRank = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const n of allNodes) {
+      if (isChainable(n)) {
+        map.set(n.address, chainRowRank(n, eligibility.results.get(n.address), activeSlot))
+      }
+    }
+    return map
+  }, [allNodes, eligibility.results, activeSlot])
+
   const {
     nodes: matches,
     totalCount,
@@ -119,7 +138,7 @@ export default function MultihopView() {
     refresh,
     bookmarks,
     toggleBookmark,
-  } = useNodes(latencyMap, isChainable)
+  } = useNodes(latencyMap, isChainable, eligibilityRank)
 
   // Display only. The grading below deliberately runs on `matches`, not on this:
   // "Verified only" filters ON the grades, so probing what it leaves would freeze the
@@ -305,7 +324,6 @@ export default function MultihopView() {
         cities={cities}
         totalCount={totalCount}
         filteredCount={rows.length}
-        lastFetched={lastFetched}
         loading={loading}
         onRefresh={refresh}
         batchProgress={batchProgress}
@@ -373,20 +391,17 @@ export default function MultihopView() {
         <div className="sticky top-0 z-10 flex items-center px-4 py-2 border-b border-border bg-bg-secondary text-text-secondary text-xs font-medium uppercase tracking-wide select-none">
           <div className="w-[28px] shrink-0" />
           {COLUMNS.map((col) => (
-            col.key === null ? (
-              <div key={col.label} className={`${col.width} shrink-0`}>{col.label}</div>
-            ) : (
-              <button
-                key={col.key}
-                onClick={() => toggleSort(col.key!)}
-                className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
-              >
-                {col.label}
-                {sortKey === col.key && (
-                  <span className="text-accent">{sortDir === 'asc' ? '▲' : '▼'}</span>
-                )}
-              </button>
-            )
+            <button
+              key={col.key}
+              onClick={() => toggleSort(col.key)}
+              className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
+              title={col.key === 'eligibility' ? 'Sort by eligibility for this hop, pickable first' : undefined}
+            >
+              {col.label}
+              {sortKey === col.key && (
+                <span className="text-accent">{sortDir === 'asc' ? '▲' : '▼'}</span>
+              )}
+            </button>
           ))}
         </div>
 

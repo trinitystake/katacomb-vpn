@@ -463,6 +463,32 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   **Every place that changes that path must call `onChainPathChanged()`** — `sendStateChange`,
   `reapplyFirewall`'s live kill-switch toggle, and the startup `healStrandedKillSwitch` —
   or the pill sits a full poll behind reality.
+- **A panel may fail; the window may not. WebGL is the case that proved it.** The only
+  `ErrorBoundary` used to sit at the app root (`main.tsx`), so anything it caught replaced
+  the entire client with a full-screen "Something went wrong". `mainTab` defaults to
+  `'map'`, and `CountryGlobe` builds a three.js `WebGLRenderer`, which throws
+  `Error creating WebGL context.` when the browser refuses a context. Net effect: a user
+  with no usable GPU could set up a wallet and never see the app again. Reported on 0.1.1
+  (GitHub), reproduced on 1.0.0, both shipping the same Electron.
+  **Chromium 146 (Electron 41) no longer falls back to software WebGL by itself** —
+  measured, not inferred: with no GPU, `getContext('webgl2')` *and* `('webgl')` both
+  return null, silently, with no console warning, and `getGPUFeatureStatus().webgl` reads
+  `disabled_off`. Older Chromium auto-fell back to SwiftShader, which is why this appeared
+  without anyone touching the map code. Two defences, both required:
+  `main/index.ts` appends **`enable-unsafe-swiftshader`** (it only *permits* the fallback,
+  a machine with a GPU still gets hardware ANGLE, verified; it must be unconditional
+  because switches are set before `whenReady` while `getGPUFeatureStatus()` is only
+  readable after); and `MapView` **probes for a context before mounting the globe** and
+  wraps it in a scoped `ErrorBoundary fallback=...`, because a context can still be
+  refused after the probe passes when Chromium drops the oldest of too many contexts
+  (the case `CountryGlobe`'s `forceContextLoss` cleanup already guards against).
+  The "unsafe" in the flag name is about shaders from *untrusted web content*; this
+  renderer only ever loads our own bundle (`setWindowOpenHandler` denies every window,
+  `will-navigate` is pinned to our own index.html, no webview). Verify with the real app,
+  not a unit test: `--disable-gpu` must render a globe via SwiftShader and
+  `--disable-gpu --disable-software-rasterizer` must degrade to the country list with the
+  window intact. **Never give `ErrorBoundary` a new caller without a `fallback`** unless
+  the whole window really is the right blast radius.
 - **No em dashes in user-visible strings** (modal copy, buttons, tooltips, error text
   that reaches a pane) — the maintainer reads them as AI-written. Use commas, colons or
   full stops. Code comments and commit messages are unaffected. Note this includes
@@ -1012,6 +1038,67 @@ and `afterInstall` dropped electron-builder's own postinst (the AppArmor profile
 the chrome-sandbox SUID logic — `resources/linux/postinstall.sh` now begins with that
 generated block verbatim, then appends ours). Each site says so inline; if you add a
 custom key, re-add whatever the default supplied.
+
+**getDefaultDepends is not the whole truth: `libasound2` and `libgbm1` are ours to
+declare.** Both are hard `DT_NEEDED` entries of the Electron binary, not dlopen'd
+extras, so a missing one is not degraded audio or degraded graphics — the dynamic
+linker refuses to exec the app at all (`error while loading shared libraries:
+libasound.so.2: cannot open shared object file`), before any window, log line or
+error dialog can exist. Neither is in electron-builder's default list, so the
+"repeat the nine verbatim" rule above was necessary but NOT sufficient.
+Measured in a `debian:bookworm` container carrying only this package's declared
+dependencies: plain install → `libasound.so.2` missing, app dead at exec;
+`apt-get --no-install-recommends` → `libgbm.so.1` missing as well, since the GL stack
+(libGL, libEGL, the mesa DRI drivers) arrives through **Recommends** somewhere in this
+dependency set and never through anyone's Depends. That second case is also a machine
+with no system GL whatsoever, which is precisely the no-WebGL state the Map tab has to
+survive.
+
+**`libasound2t64 | libasound2` must stay an alternation with the t64 name FIRST, and
+Ubuntu is the only place that shows why.** On Ubuntu 24.04 `libasound2` is a *virtual*
+name with several providers, and the one apt picks unprompted is
+`liboss4-salsa-asound2`, an OSS4 shim implementing a subset of the ALSA API. The real
+`libasound2t64` is never installed, the package installs cleanly, `ldd` reports **zero**
+unresolved libraries, and the app dies the instant it is run:
+`symbol lookup error: undefined symbol: snd_device_name_get_hint, version ALSA_0.9`.
+Debian 12/13 and Ubuntu 22.04 all resolved the bare name to the real library, so
+**testing Debian only would have shipped a package that cannot start on the single most
+common desktop target.** Naming the real package first makes the choice deterministic;
+older releases have no `libasound2t64` and fall through to the second alternative, where
+`libasound2` is a real package and therefore beats any provider.
+
+**A container is enough to catch this class of bug and costs minutes, but `ldd` alone is
+not a sufficient check and Debian alone is not sufficient coverage.** Run all four
+(`debian:bookworm`, `debian:trixie`, `ubuntu:22.04`, `ubuntu:24.04`):
+`apt-get install -y --no-install-recommends /tmp/app.deb`, then
+`ldd "/opt/Katacomb VPN/katacomb-vpn" | grep "not found"` (must print nothing) **and**
+actually execute the binary (`--no-sandbox --version`), which must reach Chromium's own
+startup rather than `symbol lookup error` or `error while loading shared libraries`.
+Reaching a dbus or `Missing X server or $DISPLAY` complaint is the expected pass in a
+headless container. Do that on any dependency change before reaching for the full
+interactive script below.
+
+**The AppImage bundles `libasound.so.2`, and deliberately does NOT bundle `libgbm.so.1`.**
+An AppImage has no package metadata, so it cannot declare either of the two libraries
+the deb declares above, and both are `DT_NEEDED` on the main Electron binary — a host
+missing one gets a linker error and no dialog. `AppRun` exports
+`LD_LIBRARY_PATH=$APPDIR/usr/lib`, so `linux.extraFiles` stages our copy there beside
+electron-builder's own `libXtst`/`libnotify`/`libXss`. It has to be `linux.extraFiles`,
+not `appImage.extraFiles`: the schema has no per-target `extraFiles`. Landing in the deb
+as well is harmless **because the binary's RPATH is bare `$ORIGIN`, not
+`$ORIGIN/usr/lib`** — moving it up to the app root would shadow the system library for
+deb users, which is the opposite of what the deb's own `Depends` is for.
+The asymmetry is the point: `libgbm` is bound to the host's mesa DRI drivers and
+`LD_LIBRARY_PATH` outranks the system, so bundling it would shadow mesa for **every**
+AppImage user including the ones it works for today, to rescue hosts that have no
+graphics stack to run a GUI on regardless. `libasound` has no such coupling and the app
+never plays audio; it only needs the symbols to resolve, which is also what makes it
+immune to Ubuntu's partial OSS4 shim. Vendored **from a `debian:bookworm` container**,
+never from the maintainer's desktop, for the reason `scripts/build-amneziawg.sh` builds
+in one: a native copy inherits this machine's glibc and would refuse to load on older
+targets (floor is GLIBC_2.34; re-check on any refresh). It is LGPL-2.1, so unlike the
+six executables it is *linked into* the process and carries a source offer in
+`THIRD-PARTY-LICENSES.md` — keep that entry in step if the file is ever refreshed.
 
 **The AppImage runs UNSANDBOXED on Ubuntu 24.04+ — this is known, documented, and not
 to be "fixed" in code.** With `kernel.apparmor_restrict_unprivileged_userns=1`,

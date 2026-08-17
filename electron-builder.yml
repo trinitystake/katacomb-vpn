@@ -56,6 +56,37 @@ linux:
     - deb
   category: Network
   icon: build/icons
+  # An AppImage carries no package metadata, so it cannot declare the libasound2
+  # the deb declares below, and Chromium hard-links libasound.so.2 (DT_NEEDED on
+  # the main binary). A host without it, or with only Ubuntu's partial OSS4 shim,
+  # kills the app at exec with a linker/symbol error and no dialog. So the AppImage
+  # carries its own copy: AppRun exports LD_LIBRARY_PATH=$APPDIR/usr/lib, which is
+  # where electron-builder already stages libXtst/libnotify/libXss.
+  #
+  # This is `linux.extraFiles` and not `appImage.extraFiles` because the schema has
+  # no per-target extraFiles (AppImageOptions/DebOptions both lack it, checked in
+  # app-builder-lib/scheme.json). Landing in the deb too is harmless and deliberate:
+  # the binary's RPATH is bare `$ORIGIN`, NOT `$ORIGIN/usr/lib`, so under the deb
+  # this file is on no search path and the system libasound2t64 keeps winning. Do
+  # not "tidy" it to the app root, that WOULD shadow the system copy for deb users.
+  #
+  # Deliberately libasound only. libgbm.so.1 is missing in the same situations, but
+  # it is bound to the host's mesa DRI drivers, and since LD_LIBRARY_PATH takes
+  # precedence over the system a bundled copy would shadow mesa for every AppImage
+  # user, including the ones it currently works for. A host with no libgbm has no
+  # graphics stack to run a GUI app on anyway. libasound has no such coupling: the
+  # app never plays audio, it only needs the symbols to resolve.
+  #
+  # Extracted from a debian:bookworm container (alsa-lib 1.2.8-1+b1), never from the
+  # maintainer's desktop, for the same reason scripts/build-amneziawg.sh builds in a
+  # container: a native copy inherits this machine's glibc and would refuse to load
+  # on older targets. Floor is GLIBC_2.34, under every supported release, and it
+  # needs only libc/libm. Re-check that floor if this is ever refreshed.
+  extraFiles:
+    - from: resources/appimage/libasound.so.2
+      to: usr/lib/libasound.so.2
+    - from: resources/appimage/LICENSE.libasound
+      to: usr/lib/LICENSE.libasound
   # First line of the deb control Description (the synopsis). Without it the
   # field is emitted with an empty first line, which reads as a blank package
   # summary in apt/Discover listings.
@@ -85,6 +116,30 @@ deb:
     - xdg-utils
     - libatspi2.0-0
     - libuuid1
+    # NOT in getDefaultDepends, and both are hard DT_NEEDED entries of the
+    # Electron binary rather than dlopen'd extras: when either is missing the
+    # dynamic linker refuses to start the app at all ("error while loading shared
+    # libraries: … cannot open shared object file"), before any window or log
+    # line exists. Verified in a debian:bookworm container holding nothing but
+    # this package's declared dependencies.
+    # libasound2 is missing on a plain minimal install; libgbm1 additionally goes
+    # missing under `apt-get --no-install-recommends`, which is where the GL stack
+    # stops arriving transitively (it comes in via Recommends somewhere in this
+    # dependency set, never via anyone's Depends).
+    #
+    # MUST stay an alternation, and the t64 name MUST come first. On Ubuntu 24.04
+    # `libasound2` is a *virtual* name with more than one provider, and the one apt
+    # picks unprompted is `liboss4-salsa-asound2` — an OSS4 shim implementing only a
+    # subset of the ALSA API. The package then installs cleanly, passes `ldd` with
+    # zero unresolved libraries, and dies the moment it is executed:
+    #   symbol lookup error: undefined symbol: snd_device_name_get_hint, version ALSA_0.9
+    # Naming the real package first makes the choice deterministic. Debian 12 and
+    # Ubuntu 22.04 have no libasound2t64 and fall through to the second alternative,
+    # where `libasound2` is a real package and so beats any provider. Verified by
+    # installing and executing on all four. libgbm1 needs no alternation: it is a
+    # real package, un-renamed, on every target.
+    - libasound2t64 | libasound2
+    - libgbm1
     # Also load-bearing for us specifically: Electron dlopens libsecret-1.so.0
     # for safeStorage, and without a real keyring backend
     # isSecureStorageAvailable() is false and NO wallet can be persisted

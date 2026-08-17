@@ -166,6 +166,13 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./katacomb-vpn-0.1.0.AppImage
 
 which unpacks to a temp directory and runs from there (verified working, no mount).
 
+**Needs `libgbm1`.** An AppImage cannot declare dependencies, so a handful of Chromium's
+libraries have to come from your system. The AppImage carries its own `libasound.so.2`,
+but not `libgbm.so.1`: that one is tied to your graphics drivers, and shipping our own
+would override yours. Any normal desktop already has it, since it comes with Mesa. If
+the app exits immediately with `error while loading shared libraries: libgbm.so.1`,
+install it (`sudo apt install libgbm1`) or use the `.deb`, which declares it properly.
+
 > **On Ubuntu 24.04+ (and any distro with
 > `kernel.apparmor_restrict_unprivileged_userns=1`) the AppImage runs with Chromium's
 > sandbox disabled — prefer the `.deb` there.**

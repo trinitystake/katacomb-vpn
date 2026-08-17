@@ -22,6 +22,28 @@ the app and the root daemon both refuse to execute a binary whose hash doesn't m
 `openvpn`, `wireguard-tools` and `pkexec` are **not** bundled — they are declared as
 `.deb` dependencies and come from your distribution under its own packaging.
 
+## Bundled shared library (AppImage)
+
+Unlike the six executables above, this one is **linked into the application process**,
+so its license governs distribution of the combined work rather than just the file.
+
+| Library | Upstream | Pinned version | License | Text |
+|---|---|---|---|---|
+| `libasound.so.2` | [alsa-project/alsa-lib](https://github.com/alsa-project/alsa-lib) | 1.2.8-1+b1 (Debian 12) | LGPL-2.1-or-later | `LICENSE.libasound` |
+
+It ships at `usr/lib/libasound.so.2`, which only the AppImage's `AppRun` puts on the
+library search path; the `.deb` declares `libasound2t64 | libasound2` and uses the
+distribution's copy instead. It is an **unmodified** binary copy of Debian 12's
+`libasound2` package, taken verbatim from that package and not rebuilt or patched.
+
+**As required by LGPL-2.1 §6**, the complete corresponding source for this library is
+the `libasound2` source package of Debian 12 (`alsa-lib` 1.2.8-1+b1), available from
+<https://sources.debian.org/src/alsa-lib/> and from the Debian mirror network. The
+maintainers of this repository will also, for at least three years, supply that source
+on request via the repository's issue tracker. Because the library is dynamically
+linked and shipped as a separate file with its SONAME intact, a recipient may replace
+it with their own build of alsa-lib by substituting the file.
+
 ## Source code offer
 
 Four of the six binaries are vendored from an upstream release; two are built from

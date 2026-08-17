@@ -92,6 +92,52 @@ info() { printf '  ....  %s\n' "$1"; }
 die()  { printf '  \033[31mSTOP\033[0m  %s\n' "$1" >&2; exit 1; }
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  would run: %s\n' "$*"; else "$@"; fi; }
 
+update_release_notes() {
+  local version=$1 prev_tag=$2 notes_file=$3
+
+  # Generate fixes section from commit messages since last tag
+  local fixes=""
+  if [ -n "$prev_tag" ]; then
+    fixes=$(git log "$prev_tag"..HEAD --pretty=format:"- %s" | sed 's/^- /  - /')
+  fi
+
+  # Update or create RELEASE_NOTES.md with correct version and fixes
+  local title="# Katacomb VPN $version"
+  local fixes_section="## Fixes in $version"
+
+  if [ ! -f "$notes_file" ]; then
+    # Create minimal notes if missing
+    cat > "$notes_file" << EOF
+$title
+
+$fixes_section
+
+$fixes
+
+## Installation
+
+**Recommended: .deb**
+
+\`\`\`bash
+sudo apt install ./katacomb-vpn_${version}_amd64.deb
+\`\`\`
+
+**Alternative: AppImage**
+
+\`\`\`bash
+chmod +x katacomb-vpn-${version}.AppImage
+./katacomb-vpn-${version}.AppImage
+\`\`\`
+EOF
+  else
+    # Update existing notes: title, fixes, and installation versions
+    sed -i "1s/^.*/# Katacomb VPN $version/" "$notes_file"
+    sed -i "s/## Fixes in .*/## Fixes in $version/" "$notes_file"
+    sed -i "s/katacomb-vpn_[0-9]*\.[0-9]*\.[0-9]*_amd64\.deb/katacomb-vpn_${version}_amd64.deb/g" "$notes_file"
+    sed -i "s/katacomb-vpn-[0-9]*\.[0-9]*\.[0-9]*\.AppImage/katacomb-vpn-${version}.AppImage/g" "$notes_file"
+  fi
+}
+
 usage() {
   sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -198,13 +244,22 @@ else
   ok "packaging unchanged since $PREV_TAG, verify-deb-portability.sh can be skipped"
 fi
 
-# Publishing the previous release's notes is easy to do and hard to take back, so
-# the heading has to name the version being cut. Absent is fine, stale is not.
+# Auto-generate or update RELEASE_NOTES.md with correct version and fixes from commits
+if [ "$DRY_RUN" = 0 ]; then
+  update_release_notes "$VERSION" "$PREV_TAG" "$NOTES"
+  if git status --porcelain "$NOTES" | grep -q .; then
+    git add "$NOTES"
+    git commit -q -m "Update release notes for $VERSION"
+    info "$NOTES updated automatically from commits and staged"
+  fi
+fi
+
+# Verify the notes exist and have the right version heading
 if [ -f "$NOTES" ]; then
-  head -1 "$NOTES" | grep -qF "$VERSION" || die "$NOTES still says '$(head -1 "$NOTES")', update it for $VERSION"
+  head -1 "$NOTES" | grep -qF "$VERSION" || die "$NOTES heading does not match $VERSION"
   ok "$NOTES is written for $VERSION"
 else
-  info "no $NOTES yet, the GitHub release will need its notes typed by hand"
+  die "no $NOTES found"
 fi
 
 # --- 2. clean build outputs -------------------------------------------------

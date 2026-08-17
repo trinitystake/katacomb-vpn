@@ -92,25 +92,23 @@ info() { printf '  ....  %s\n' "$1"; }
 die()  { printf '  \033[31mSTOP\033[0m  %s\n' "$1" >&2; exit 1; }
 run()  { if [ "$DRY_RUN" = 1 ]; then printf '  would run: %s\n' "$*"; else "$@"; fi; }
 
-update_release_notes() {
-  local version=$1 prev_tag=$2 notes_file=$3
+# Writes what RELEASE_NOTES.md for $version would look like to $out_file,
+# leaving $src_notes untouched. Called in both dry and real runs so a dry run
+# can report the truth instead of failing on a file it was never allowed to
+# touch, and the real run then just copies $out_file over $src_notes.
+generate_release_notes() {
+  local version=$1 prev_tag=$2 src_notes=$3 out_file=$4
 
-  # Generate fixes section from commit messages since last tag
   local fixes=""
   if [ -n "$prev_tag" ]; then
-    fixes=$(git log "$prev_tag"..HEAD --pretty=format:"- %s" | sed 's/^- /  - /')
+    fixes=$(git log "$prev_tag"..HEAD --pretty=format:"- %s")
   fi
 
-  # Update or create RELEASE_NOTES.md with correct version and fixes
-  local title="# Katacomb VPN $version"
-  local fixes_section="## Fixes in $version"
+  if [ ! -f "$src_notes" ]; then
+    cat > "$out_file" << EOF
+# Katacomb VPN $version
 
-  if [ ! -f "$notes_file" ]; then
-    # Create minimal notes if missing
-    cat > "$notes_file" << EOF
-$title
-
-$fixes_section
+## Fixes in $version
 
 $fixes
 
@@ -129,13 +127,31 @@ chmod +x katacomb-vpn-${version}.AppImage
 ./katacomb-vpn-${version}.AppImage
 \`\`\`
 EOF
-  else
-    # Update existing notes: title, fixes, and installation versions
-    sed -i "1s/^.*/# Katacomb VPN $version/" "$notes_file"
-    sed -i "s/## Fixes in .*/## Fixes in $version/" "$notes_file"
-    sed -i "s/katacomb-vpn_[0-9]*\.[0-9]*\.[0-9]*_amd64\.deb/katacomb-vpn_${version}_amd64.deb/g" "$notes_file"
-    sed -i "s/katacomb-vpn-[0-9]*\.[0-9]*\.[0-9]*\.AppImage/katacomb-vpn-${version}.AppImage/g" "$notes_file"
+    return
   fi
+
+  cp "$src_notes" "$out_file"
+  sed -i "1s/^.*/# Katacomb VPN $version/" "$out_file"
+
+  # Replace the WHOLE fixes section (heading + old bullets), not just the
+  # heading text — a plain heading-only sed left last release's fixes list
+  # in place under the new heading.
+  awk -v heading="## Fixes in $version" -v fixes="$fixes" '
+    {
+      if ($0 ~ /^## Fixes in /) {
+        print heading; print ""; if (fixes != "") print fixes; print ""
+        in_fixes = 1
+        next
+      }
+      if (in_fixes) {
+        if ($0 ~ /^## /) { in_fixes = 0 } else { next }
+      }
+      print
+    }
+  ' "$out_file" > "$out_file.tmp" && mv "$out_file.tmp" "$out_file"
+
+  sed -i -E "s/katacomb-vpn_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb/katacomb-vpn_${version}_amd64.deb/g" "$out_file"
+  sed -i -E "s/katacomb-vpn-[0-9]+\.[0-9]+\.[0-9]+\.AppImage/katacomb-vpn-${version}.AppImage/g" "$out_file"
 }
 
 usage() {
@@ -244,23 +260,24 @@ else
   ok "packaging unchanged since $PREV_TAG, verify-deb-portability.sh can be skipped"
 fi
 
-# Auto-generate or update RELEASE_NOTES.md with correct version and fixes from commits
-if [ "$DRY_RUN" = 0 ]; then
-  update_release_notes "$VERSION" "$PREV_TAG" "$NOTES"
-  if git status --porcelain "$NOTES" | grep -q .; then
-    git add "$NOTES"
-    git commit -q -m "Update release notes for $VERSION"
-    info "$NOTES updated automatically from commits and staged"
-  fi
-fi
-
-# Verify the notes exist and have the right version heading
-if [ -f "$NOTES" ]; then
-  head -1 "$NOTES" | grep -qF "$VERSION" || die "$NOTES heading does not match $VERSION"
-  ok "$NOTES is written for $VERSION"
+# RELEASE_NOTES.md's title, fixes section and install commands are derived
+# from git history, not typed by hand — generated into a temp file first (read
+# only, so a dry run sees the same thing a real run would) and compared
+# against what is on disk, rather than requiring the disk copy to already
+# match a version that has not been cut yet.
+NOTES_TMP="$(mktemp)"
+generate_release_notes "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
+if [ -f "$NOTES" ] && diff -q "$NOTES" "$NOTES_TMP" >/dev/null 2>&1; then
+  ok "$NOTES already up to date for $VERSION"
+elif [ "$DRY_RUN" = 1 ]; then
+  info "$NOTES would be $([ -f "$NOTES" ] && echo updated || echo created) for $VERSION"
 else
-  die "no $NOTES found"
+  cp "$NOTES_TMP" "$NOTES"
+  git add "$NOTES"
+  git commit -q -m "Update release notes for $VERSION"
+  ok "$NOTES updated from commits since ${PREV_TAG:-the start} and committed"
 fi
+rm -f "$NOTES_TMP"
 
 # --- 2. clean build outputs -------------------------------------------------
 # After preflight, so a refused release (stale notes, dirty tree, existing tag)

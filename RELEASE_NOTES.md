@@ -93,7 +93,7 @@ Pop!\_OS, Zorin).
 **Recommended: .deb**
 
 ```bash
-sudo apt install ./katacomb-vpn_1.0.0_amd64.deb
+sudo apt install ./katacomb-vpn_1.0.1_amd64.deb
 ```
 
 Installs a root daemon, so connect and disconnect never prompt for a password. It needs
@@ -102,8 +102,8 @@ one log out and log back in after the first install before that takes effect.
 **Alternative: AppImage**
 
 ```bash
-chmod +x katacomb-vpn-1.0.0.AppImage
-./katacomb-vpn-1.0.0.AppImage
+chmod +x katacomb-vpn-1.0.1.AppImage
+./katacomb-vpn-1.0.1.AppImage
 ```
 
 No install needed. Every privileged operation prompts for a password instead.

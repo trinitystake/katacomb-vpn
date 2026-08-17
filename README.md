@@ -11,7 +11,7 @@ from independent node operators with a wallet you hold the keys to.
 
 Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 
-> **Status:** pre-release (0.1.0). Connecting spends real funds — see
+> **Status:** release (1.0.1). Connecting spends real funds — see
 > [Money](#money-this-app-spends-real-funds).
 
 ---
@@ -24,6 +24,7 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 - **Nodes** — virtualized table over the whole network (thousands of nodes). Filter by
   country, city, protocol, residential/whitelisted, bookmarks; hide duplicates; sort on
   any column. Latency probes (single or batch) and a download speed test.
+- **Multi-Hop** — Your device -> Entry node -> Exit Node -> The internet.
 - **Plans** — discover provider plans, subscribe, then start sessions on any node in the
   plan. Includes a subscription manager for cancelling and for the auto-renewal policy.
 - **Sessions** — every active session with usage, price and remaining allowance;
@@ -37,6 +38,7 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
   V2Ray-family protocols the queries go out over DoH, so the node can't read them.
 - **Split tunneling** — CIDR routes that bypass the tunnel; private ranges are excluded
   by default.
+- **Localt Network Sharing** — each other devices on your network (SSH, printers, NAS) while the    kill switch is on. This traffic stays on your LAN and is not encrypted by the VPN.
 - **Auto-reconnect** — up to 5 attempts with backoff when a tunnel drops.
 - **Proxy mode** — for the SOCKS-capable protocols, run just the local listener at
   `127.0.0.1:1080` without touching system routing or asking for root.
@@ -123,7 +125,7 @@ with `gpg --armor --detach-sign dist/SHA256SUMS`.
 ### .deb — recommended
 
 ```bash
-sudo apt install ./dist/katacomb-vpn_0.1.0_amd64.deb
+sudo apt install ./dist/katacomb-vpn_1.0.1_amd64.deb
 ```
 
 Pulls in Electron's GUI libraries (GTK, NSS, libsecret and friends) plus
@@ -147,8 +149,8 @@ than falling back to weak encryption, so a missing keyring is visible, not silen
 ### AppImage
 
 ```bash
-chmod +x dist/katacomb-vpn-0.1.0.AppImage
-./dist/katacomb-vpn-0.1.0.AppImage
+chmod +x dist/katacomb-vpn-1.0.1.AppImage
+./dist/katacomb-vpn-1.0.1.AppImage
 ```
 
 No daemon here, so each privileged operation goes through `pkexec` (one prompt, cached
@@ -161,7 +163,7 @@ Ubuntu dropped that from the default install at 22.04, so on 22.04/24.04 you may
 `sudo apt install libfuse2t64` (24.04+) or `libfuse2` (22.04) — or skip FUSE entirely:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./katacomb-vpn-0.1.0.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./katacomb-vpn-1.0.1.AppImage
 ```
 
 which unpacks to a temp directory and runs from there (verified working, no mount).

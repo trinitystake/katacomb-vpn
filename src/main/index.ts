@@ -352,6 +352,29 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => showWindow())
 }
 
+// Chromium 146 (Electron 41) no longer falls back to software WebGL on its own.
+// On a machine with no usable GPU — a VM without 3D acceleration, a VNC/xrdp
+// session, a driver Chromium blocklists — canvas.getContext('webgl2') and
+// ('webgl') both return null, silently and with no console warning. That is what
+// the Map tab's three.js renderer turns into a thrown "Error creating WebGL
+// context.", and since 'map' is the default tab it used to reach the root
+// ErrorBoundary and blank the whole client at startup (GitHub issue: user saw
+// "Something went wrong / Error creating WebGL context" right after wallet setup,
+// on 0.1.1, which shipped this same Electron).
+//
+// The switch only *permits* the SwiftShader fallback, it does not force it:
+// measured on a working Intel GPU, the renderer is still hardware ANGLE with the
+// flag set. It has to be set before whenReady, which is also why this is
+// unconditional — app.getGPUFeatureStatus() is only readable after ready, too
+// late to append a command-line switch.
+//
+// "unsafe" in the flag name refers to running shaders from *untrusted web
+// content* on a software rasterizer. This renderer only ever loads our own
+// bundle: setWindowOpenHandler denies every new window, will-navigate is locked
+// to our own index.html, and there is no webview. MapView still degrades
+// gracefully if a context is refused anyway.
+app.commandLine.appendSwitch('enable-unsafe-swiftshader')
+
 app.whenReady().then(() => {
   // Must run before anything touches userData (sweepStaleSessionFiles, settings,
   // the wallet store): the rename moved the directory, so this brings the user's

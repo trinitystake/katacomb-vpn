@@ -2,6 +2,13 @@ import { Component, ErrorInfo, ReactNode } from 'react'
 
 interface Props {
   children: ReactNode
+  /**
+   * Scoped fallback. Without it a caught error replaces the whole window, which
+   * is right at the app root and wrong around a single panel: the Map tab's
+   * WebGL renderer can throw on a machine with no GPU, and that must not take
+   * the wallet and connect UI down with it.
+   */
+  fallback?: ReactNode
 }
 
 interface State {
@@ -26,6 +33,7 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   render(): ReactNode {
     if (this.state.error) {
+      if (this.props.fallback !== undefined) return this.props.fallback
       return (
         <div className="h-screen flex items-center justify-center bg-bg-primary text-text-primary">
           <div className="max-w-md text-center space-y-4 p-6">

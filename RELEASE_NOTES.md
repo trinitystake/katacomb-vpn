@@ -1,8 +1,17 @@
-# Katacomb VPN 1.0.0
+# Katacomb VPN 1.0.1
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
+
+## Fixes in 1.0.1
+
+- **WebGL crash on systems without GPU.** The app now falls back gracefully to a
+  text-based country list if your system lacks graphics acceleration. The map tab
+  stays functional either way.
+- **.deb launch failure on Ubuntu 24.04.** Fixed missing system library declarations
+  that caused the package to install cleanly but crash at runtime with no error message.
+  Tested on Debian 12, Debian 13, Ubuntu 22.04, and Ubuntu 24.04.
 
 ## Multi-hop chains
 

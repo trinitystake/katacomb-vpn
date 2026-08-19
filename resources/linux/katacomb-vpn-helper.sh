@@ -176,8 +176,8 @@ validate_awg_config() {
 # line, so they can only come from us.
 validate_openvpn_config() {
   local config="$1"
-  local line directive lc_dir block="" tag
-  local -A seen_block=()
+  local line directive lc_dir value block="" tag
+  local -A seen_block=() seen_dir=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     # trim surrounding whitespace
     line="${line#"${line%%[![:space:]]*}"}"
@@ -216,6 +216,31 @@ validate_openvpn_config() {
       persist-key|persist-tun) ;;
       *) echo "Error: OpenVPN directive '$lc_dir' is not allowed" >&2; exit 1 ;;
     esac
+    # A repeated directive is rejected even when each copy is well-formed: e.g.
+    # a second `remote` (failover) that the kill switch wouldn't whitelist.
+    if [[ -n "${seen_dir[$lc_dir]:-}" ]]; then
+      echo "Error: OpenVPN directive '$lc_dir' is repeated" >&2; exit 1
+    fi
+    seen_dir[$lc_dir]=1
+    value="${line#"$directive"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    # Argument grammar mirrors OVPN_DIRECTIVES in config-guard.ts, directive
+    # for directive — keep the two tables in step.
+    case "$lc_dir" in
+      client|nobind|auth-nocache|tls-client|persist-key|persist-tun) [[ -z "$value" ]] ;;
+      dev) [[ "$value" == "sntl-ovpn" ]] ;;
+      dev-type) [[ "$value" == "tun" ]] ;;
+      proto) [[ "$value" =~ ^(tcp|udp)$ ]] ;;
+      remote) [[ "$value" =~ ^\[?[A-Za-z0-9.:_-]+\]?[[:blank:]]+[0-9]{1,5}$ ]] ;;
+      auth) [[ "$value" =~ ^[A-Za-z0-9-]{1,32}$ ]] ;;
+      data-ciphers|tls-cipher) [[ "$value" =~ ^[A-Za-z0-9:-]{1,128}$ ]] ;;
+      data-ciphers-fallback) [[ "$value" =~ ^[A-Za-z0-9-]{1,64}$ ]] ;;
+      tls-version-min) [[ "$value" =~ ^1\.[23]$ ]] ;;
+      remote-cert-tls) [[ "$value" == "server" ]] ;;
+      redirect-gateway) [[ "$value" =~ ^[A-Za-z0-9[:blank:]-]{0,64}$ ]] ;;
+      topology) [[ "$value" == "subnet" ]] ;;
+      explicit-exit-notify) [[ "$value" =~ ^[1-3]$ ]] ;;
+    esac || { echo "Error: OpenVPN directive '$lc_dir' has a malformed value" >&2; exit 1; }
   done < "$config"
   if [[ -n "$block" ]]; then
     echo "Error: OpenVPN inline block <$block> is unterminated" >&2; exit 1
@@ -223,6 +248,13 @@ validate_openvpn_config() {
   for tag in ca cert key tls-crypt; do
     if [[ -z "${seen_block[$tag]:-}" ]]; then
       echo "Error: OpenVPN inline block <$tag> is missing" >&2; exit 1
+    fi
+  done
+  # Same essentials assertSafeOpenVpnConfig requires (OVPN_REQUIRED): without
+  # these the tunnel is not a client tunnel pointed at exactly one endpoint.
+  for lc_dir in client dev proto remote; do
+    if [[ -z "${seen_dir[$lc_dir]:-}" ]]; then
+      echo "Error: OpenVPN directive '$lc_dir' is missing" >&2; exit 1
     fi
   done
 }

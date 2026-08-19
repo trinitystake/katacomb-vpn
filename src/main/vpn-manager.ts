@@ -103,11 +103,6 @@ const OVPN_CONFIG_NAME = 'openvpn.conf'
 const SOCKS_PORT = 1080
 const SOCKS_ADDR = `127.0.0.1:${SOCKS_PORT}`
 
-/** Where the child proxies listen — shown to the user in local-proxy mode. */
-export function getSocksAddr(): string {
-  return SOCKS_ADDR
-}
-
 let activeChild: ChildProcess | null = null
 let activeProtocol: 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn' | null = null
 /**

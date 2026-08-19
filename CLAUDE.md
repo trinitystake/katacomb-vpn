@@ -249,8 +249,9 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   measure** — it reads an untouched paid hour as spent and the watchdog then destroys it.
 - **Watch the paid quota.** Nothing else does: `startRootTunnelMonitor` polls whether the
   INTERFACE exists, and a node that has stopped forwarding leaves it up, so an exhausted
-  session used to sit on a dead tunnel. Every tunnel bring-up calls `startQuotaWatchdog()`
-  (all six protocols + proxy mode + the reconnect success path — 7 sites); it scores
+  session used to sit on a dead tunnel. Every successful bring-up funnels through
+  `finalizeTunnelConnect()` (ipc-handlers.ts), which calls `startQuotaWatchdog()` — all
+  six protocols, proxy mode and the reconnect success path end there; it scores
   `evaluateQuota` (pure, in `connect-decisions.ts`) every 15 s and hands expiry to
   `standDownSession`, which repeats `performDisconnect`'s epoch-bump-before-the-lock
   stand-down so the reconnect timer can't resurrect a session the chain has closed.
@@ -266,8 +267,9 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   well-formed WireGuard initiation with its own saved keys and getting silence, hours
   after the node stopped reporting usage — while the app said "Connected" and the
   watchdog billed the paid hour against it. Two enforcement points, both required:
-  - `assertTunnelCarriesTraffic()` after **every** bring-up (6 protocol branches +
-    the auto-reconnect body; skipped in proxy mode, which changes no routing). It runs
+  - `assertTunnelCarriesTraffic()` after **every** bring-up (the WG/AWG/OpenVPN
+    branches, `finishChildProxyConnect` for the three child-proxy protocols, and the
+    auto-reconnect body; skipped in proxy mode, which changes no routing). It runs
     AFTER `applyPostConnectSettings` on purpose — the kill switch is one of the things
     that can strangle a tunnel — and passes on **either** a successful probe fetch
     **or** inbound bytes on the interface, because the probe host being down is not
@@ -305,11 +307,12 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   **It was invisible until `runPrivileged` went async** (the fix for the disconnect
   freeze): while it was `execFileSync` the main process could not turn the event loop
   during the dialog, so the 3 s status poll never observed the gap. WireGuard was never
-  affected, its branch checks for the interface. **And the four sites that spawn the
-  core, wait 1500 ms and ask whether it survived** (the reconnect body plus the
-  v2ray/xray/hysteria2 connect branches) MUST use `isProxyChildAlive()` — pointed at
-  the traffic predicate they fail *every* tunnel-mode connect with "process exited
-  immediately after starting", which is worse than the bug.
+  affected, its branch checks for the interface. **And the one helper that
+  spawns-waits-and-asks whether the core survived** (`assertProxyChildStarted`, reached
+  from the reconnect body and, via `finishChildProxyConnect`, the v2ray/xray/hysteria2
+  connect branches) MUST use `isProxyChildAlive()` — pointed at the traffic predicate it
+  fails *every* tunnel-mode connect with "process exited immediately after starting",
+  which is worse than the bug.
 - **Reconnect re-handshakes first, and a 409 back means the node kept the RECORD —
   it says nothing about the PEER.** `CONNECTION_RECONNECT` calls `performHandshake`
   for the session before falling back to `SavedSessionConfig.configString`. Read

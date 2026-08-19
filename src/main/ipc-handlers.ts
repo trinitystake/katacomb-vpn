@@ -1941,10 +1941,13 @@ async function attemptReconnect(): Promise<void> {
               connectV2RayFromConfig(saved.configString, dohIp, { proxyOnly })
             }
           }
-          await new Promise((r) => setTimeout(r, 1500))
-          if (!isProxyChildAlive()) {
-            throw new Error('Proxy failed to start on reconnect')
-          }
+          // A reconnect replays a saved config, so the detailed failure + the
+          // "node may have changed configuration" hint apply here too (this
+          // used to say only 'Proxy failed to start on reconnect').
+          await assertProxyChildStarted(
+            saved.protocol === 'hysteria2' ? 'Hysteria2' : saved.protocol === 'xray' ? 'Xray' : 'V2Ray',
+            true,
+          )
           if (!proxyOnly) await bringUpV2RayTunnel()
         }
 
@@ -1967,21 +1970,97 @@ async function attemptReconnect(): Promise<void> {
           await assertTunnelCarriesTraffic()
         }
 
-        desiredProtocol = saved.protocol as 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
-        // Unconditional now: the monitor watches the interface for the root protocols
-        // and the default route for the tun2socks ones, and self-gates on proxy mode.
-        if (desiredMode !== 'proxy') startRootTunnelMonitor()
-        startQuotaWatchdog()
-
         console.log('[reconnect] Success')
         reconnectAttempt = 0
-        sendStateChange('connected')
+        // desiredMode is replayed, not overwritten: passing it back through
+        // keeps a proxy-mode session in proxy mode.
+        finalizeTunnelConnect(saved.protocol as ConnectProtocol, desiredMode)
       } catch (err) {
         console.error('[reconnect] Failed:', err)
         attemptReconnect()
       }
     })
   }, decision.delayMs)
+}
+
+// ---- Shared bring-up helpers ----------------------------------------------
+
+type ConnectProtocol = 'wireguard' | 'amneziawg' | 'v2ray' | 'xray' | 'hysteria2' | 'openvpn'
+
+/**
+ * The invariant tail of every successful bring-up: record intent
+ * (desiredProtocol/desiredMode), start the root-tunnel monitor and the quota
+ * watchdog, publish 'connected'. All six protocol branches, proxy mode and the
+ * reconnect success path end here — funneling the tail through one function is
+ * what enforces "every tunnel bring-up calls startQuotaWatchdog()" structurally
+ * instead of by hand-counted call sites.
+ */
+function finalizeTunnelConnect(protocol: ConnectProtocol, mode: 'tunnel' | 'proxy'): void {
+  desiredProtocol = protocol
+  desiredMode = mode
+  // Watches the interface for the root protocols and the default route for the
+  // tun2socks ones; a no-op in proxy mode, which changes no routing.
+  if (mode !== 'proxy') startRootTunnelMonitor()
+  startQuotaWatchdog()
+  sendStateChange('connected')
+}
+
+const CHILD_PROXY_STARTUP_MS = 1500
+const SAVED_CONFIG_HINT =
+  '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
+
+/**
+ * Wait out core startup and throw a detailed error if the child died. Every
+ * spawn-wait site goes through here, and the predicate MUST stay
+ * isProxyChildAlive() — pointed at the traffic predicate this fails every
+ * tunnel-mode connect while the tun-up polkit dialog is open (see CLAUDE.md).
+ */
+async function assertProxyChildStarted(
+  label: 'V2Ray' | 'Xray' | 'Hysteria2',
+  fromSavedConfig: boolean,
+): Promise<void> {
+  await new Promise((r) => setTimeout(r, CHILD_PROXY_STARTUP_MS))
+  if (isProxyChildAlive()) return
+  const errMsg = getV2RayError()
+  // When replaying a saved config (reconnect), a failure to start usually means
+  // the node changed its configuration (e.g. switched protocols) or went
+  // offline since the config was saved — point the user at the fix.
+  const hint = fromSavedConfig ? SAVED_CONFIG_HINT : ''
+  throw new Error(
+    `${label} process exited immediately after starting.` + hint +
+    (errMsg ? `\n\n${label} error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
+  )
+}
+
+/**
+ * Everything after the core has been spawned, shared by the v2ray/xray/
+ * hysteria2 CONNECTION_CONNECT branches: verify the child survived startup,
+ * then (tunnel mode only) bring up tun2socks + post-connect settings and prove
+ * the tunnel carries traffic. In local-proxy mode there is no TUN and no
+ * system state to change: the kill switch and dns-set are deliberately
+ * skipped, so proxy mode leaks by design (only apps pointed at the SOCKS
+ * address are tunneled) and the kill-switch setting is intentionally ignored.
+ */
+async function finishChildProxyConnect(opts: {
+  protocol: 'v2ray' | 'xray' | 'hysteria2'
+  label: 'V2Ray' | 'Xray' | 'Hysteria2'
+  proxyOnly: boolean
+  fromSavedConfig: boolean
+}): Promise<void> {
+  await assertProxyChildStarted(opts.label, opts.fromSavedConfig)
+  if (!opts.proxyOnly) {
+    // The core is running — bring up the TUN interface. If this fails the
+    // child is still running, so tear it down rather than orphan a SOCKS proxy.
+    try {
+      await bringUpV2RayTunnel()
+    } catch (err) {
+      await disconnect()
+      throw err
+    }
+    await applyPostConnectSettings(opts.protocol)
+    await assertTunnelCarriesTraffic()
+  }
+  finalizeTunnelConnect(opts.protocol, opts.proxyOnly ? 'proxy' : 'tunnel')
 }
 
 async function fetchNodesPage(page: number): Promise<NodesPage> {
@@ -2999,11 +3078,7 @@ export function registerIpcHandlers(): void {
         await applyPostConnectSettings('wireguard')
         await assertTunnelCarriesTraffic()
 
-        desiredProtocol = 'wireguard'
-        desiredMode = 'tunnel'
-        startRootTunnelMonitor()
-        startQuotaWatchdog()
-        sendStateChange('connected')
+        finalizeTunnelConnect('wireguard', 'tunnel')
         return { protocol: 'wireguard' }
       }
 
@@ -3025,11 +3100,7 @@ export function registerIpcHandlers(): void {
         await applyPostConnectSettings('amneziawg')
         await assertTunnelCarriesTraffic()
 
-        desiredProtocol = 'amneziawg'
-        desiredMode = 'tunnel'
-        startRootTunnelMonitor()
-        startQuotaWatchdog()
-        sendStateChange('connected')
+        finalizeTunnelConnect('amneziawg', 'tunnel')
         return { protocol: 'amneziawg' }
       }
 
@@ -3047,11 +3118,7 @@ export function registerIpcHandlers(): void {
         await applyPostConnectSettings('openvpn')
         await assertTunnelCarriesTraffic()
 
-        desiredProtocol = 'openvpn'
-        desiredMode = 'tunnel'
-        startRootTunnelMonitor()
-        startQuotaWatchdog()
-        sendStateChange('connected')
+        finalizeTunnelConnect('openvpn', 'tunnel')
         return { protocol: 'openvpn' }
       }
 
@@ -3066,148 +3133,44 @@ export function registerIpcHandlers(): void {
         } else {
           throw new Error('No V2Ray instance or config available')
         }
-
-        // Wait briefly and verify the v2ray process didn't crash on startup
-        await new Promise((r) => setTimeout(r, 1500))
-        if (!isProxyChildAlive()) {
-          const errMsg = getV2RayError()
-          // When replaying a saved config (reconnect), a failure to start usually
-          // means the node changed its configuration (e.g. switched protocols) or
-          // went offline since the config was saved — point the user at the fix.
-          const fromSavedConfig = !activeV2ray && !!params.configString
-          const hint = fromSavedConfig
-            ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
-            : ''
-          throw new Error(
-            'V2Ray process exited immediately after starting.' + hint +
-            (errMsg ? `\n\nV2Ray error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
-          )
-        }
-
-        // V2Ray is running — bring up the TUN interface. If this fails the child is
-        // still running, so tear it down rather than orphan a SOCKS proxy (finding M4).
-        // In local-proxy mode there is no TUN and no system state to change: the
-        // kill switch and dns-set are deliberately skipped, so proxy mode leaks by
-        // design (only apps pointed at the SOCKS address are tunneled) and the
-        // kill-switch setting is intentionally ignored.
-        if (!proxyOnly) {
-          try {
-            await bringUpV2RayTunnel()
-          } catch (err) {
-            await disconnect()
-            throw err
-          }
-
-          // Apply DNS and kill switch if enabled
-          await applyPostConnectSettings('v2ray')
-          await assertTunnelCarriesTraffic()
-        }
-
-        desiredProtocol = 'v2ray'
-        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
-        // Watches the default route under a tun2socks tunnel; a no-op in proxy mode,
-        // which changes no routing (see startRootTunnelMonitor).
-        if (!proxyOnly) startRootTunnelMonitor()
-        startQuotaWatchdog()
-        sendStateChange('connected')
+        await finishChildProxyConnect({
+          protocol: 'v2ray', label: 'V2Ray', proxyOnly,
+          fromSavedConfig: !activeV2ray && !!params.configString,
+        })
         return { protocol: 'v2ray' }
       }
 
       if (params.protocol === 'xray') {
         // Xray reuses the v2ray tunnel path (child process + tun2socks). The config
-        // is the one built during the handshake (activeXrayConfig), or a saved config
-        // on manual reconnect (params.configString).
+        // is the one built during the handshake (activeXrayConfig), or a saved
+        // config on manual reconnect (params.configString).
         const dohIp = effectiveV2RayResolverIp(loadSettings())
         const xrayConfig = params.configString ?? activeXrayConfig
         if (!xrayConfig) {
           throw new Error('No Xray config available')
         }
         connectXRayFromConfig(xrayConfig, dohIp, { proxyOnly })
-
-        // Wait briefly and verify the xray process didn't crash on startup
-        await new Promise((r) => setTimeout(r, 1500))
-        if (!isProxyChildAlive()) {
-          const errMsg = getV2RayError()
-          const fromSavedConfig = !activeXrayConfig && !!params.configString
-          const hint = fromSavedConfig
-            ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
-            : ''
-          throw new Error(
-            'Xray process exited immediately after starting.' + hint +
-            (errMsg ? `\n\nXray error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
-          )
-        }
-
-        // Xray is running — bring up the TUN interface (same tun2socks path as v2ray),
-        // unless this is local-proxy mode (see the v2ray branch).
-        if (!proxyOnly) {
-          try {
-            await bringUpV2RayTunnel()
-          } catch (err) {
-            await disconnect()
-            throw err
-          }
-
-          await applyPostConnectSettings('xray')
-          await assertTunnelCarriesTraffic()
-        }
-
-        desiredProtocol = 'xray'
-        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
-        // Watches the default route under a tun2socks tunnel; a no-op in proxy mode,
-        // which changes no routing (see startRootTunnelMonitor).
-        if (!proxyOnly) startRootTunnelMonitor()
-        startQuotaWatchdog()
-        sendStateChange('connected')
+        await finishChildProxyConnect({
+          protocol: 'xray', label: 'Xray', proxyOnly,
+          fromSavedConfig: !activeXrayConfig && !!params.configString,
+        })
         return { protocol: 'xray' }
       }
 
       if (params.protocol === 'hysteria2') {
-        // Hysteria2 reuses the v2ray tunnel path (child process + tun2socks). The config
-        // is the one built during the handshake (activeHysteria2Config), or a saved
-        // config on manual reconnect (params.configString). No DoH — hysteria2's DNS is
-        // plaintext-through-tunnel (see connectHysteria2FromConfig).
+        // Hysteria2 reuses the v2ray tunnel path (child process + tun2socks). The
+        // config is the one built during the handshake (activeHysteria2Config), or
+        // a saved config on manual reconnect (params.configString). No DoH —
+        // hysteria2's DNS is plaintext-through-tunnel (see connectHysteria2FromConfig).
         const hysteria2Config = params.configString ?? activeHysteria2Config
         if (!hysteria2Config) {
           throw new Error('No Hysteria2 config available')
         }
         connectHysteria2FromConfig(hysteria2Config, { proxyOnly })
-
-        // Wait briefly and verify the hysteria process didn't crash on startup
-        await new Promise((r) => setTimeout(r, 1500))
-        if (!isProxyChildAlive()) {
-          const errMsg = getV2RayError()
-          const fromSavedConfig = !activeHysteria2Config && !!params.configString
-          const hint = fromSavedConfig
-            ? '\n\nThis node may have changed its configuration or gone offline since you last connected. Remove this session and subscribe again to pick a working node.'
-            : ''
-          throw new Error(
-            'Hysteria2 process exited immediately after starting.' + hint +
-            (errMsg ? `\n\nHysteria2 error:\n${errMsg.slice(0, 500)}` : '\n\nNo error output captured.')
-          )
-        }
-
-        // Hysteria2 is running — bring up the TUN interface (same tun2socks path as
-        // v2ray), unless this is local-proxy mode (see the v2ray branch).
-        if (!proxyOnly) {
-          try {
-            await bringUpV2RayTunnel()
-          } catch (err) {
-            await disconnect()
-            throw err
-          }
-
-          await applyPostConnectSettings('hysteria2')
-          await assertTunnelCarriesTraffic()
-        }
-
-        desiredProtocol = 'hysteria2'
-        desiredMode = proxyOnly ? 'proxy' : 'tunnel'
-        // Watches the default route under a tun2socks tunnel; a no-op in proxy mode,
-        // which changes no routing (see startRootTunnelMonitor).
-        if (!proxyOnly) startRootTunnelMonitor()
-        startQuotaWatchdog()
-        sendStateChange('connected')
+        await finishChildProxyConnect({
+          protocol: 'hysteria2', label: 'Hysteria2', proxyOnly,
+          fromSavedConfig: !activeHysteria2Config && !!params.configString,
+        })
         return { protocol: 'hysteria2' }
       }
 

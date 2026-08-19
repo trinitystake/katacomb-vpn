@@ -40,10 +40,10 @@ export interface RpcCandidate {
 }
 
 /** Above this, the endpoint answers but every screen feels broken. */
-export const SLOW_LATENCY_MS = 2_500
+const SLOW_LATENCY_MS = 2_500
 /** Sentinel blocks land every ~6s; two minutes behind means it's not keeping up. */
 export const STALE_BLOCK_AGE_SEC = 120
-export const EXPECTED_CHAIN_ID = 'sentinelhub-2'
+const EXPECTED_CHAIN_ID = 'sentinelhub-2'
 
 /**
  * A wrong chain is `down`, not `degraded`: queries would return another

@@ -192,7 +192,7 @@ export async function getProviderDeposit(): Promise<{ denom: string; amount: str
  * inflate every earnings figure, so an absent value fails the whole economics read
  * and the UI shows "unavailable" instead of a flattering lie.
  */
-export async function getSubscriptionStakingShare(): Promise<string> {
+async function getSubscriptionStakingShare(): Promise<string> {
   return withProtobufQuery(async (rpc) => {
     const query = new SubscriptionQueryServiceClientImpl(rpc)
     const resp = await withTimeout(

@@ -11,7 +11,7 @@
  */
 export const FEE_RESERVE_UDVPN = 50_000
 
-export const UDVPN_PER_P2P = 1_000_000
+const UDVPN_PER_P2P = 1_000_000
 
 /** Total `udvpn` across a balance list, ignoring every other denom. */
 export function udvpnOf(balances: { denom: string; amount: string }[]): number {

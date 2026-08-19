@@ -34,7 +34,7 @@ function planUsd(plan: MyPlan, price: TokenPrice | null): string | null {
  * typed as "12.35" can't land on chain as 12349999 through float rounding.
  * Returns null for anything that isn't a plain amount with at most 6 decimals.
  */
-export function p2pToUdvpn(input: string): number | null {
+function p2pToUdvpn(input: string): number | null {
   const match = /^(\d+)(?:\.(\d{1,6}))?$/.exec(input.trim())
   if (!match) return null
   const frac = (match[2] ?? '').padEnd(6, '0')

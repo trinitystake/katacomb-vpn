@@ -6,7 +6,7 @@ import { readFileSync } from 'fs'
 // app (vpn-manager) and the root daemon, which both refuse to execute a binary
 // whose hash doesn't match. Update these whenever the vendored binaries are
 // replaced. Node builtins only — importable by the standalone daemon (no Electron deps).
-export const BUNDLED_HASHES: Record<string, string> = {
+const BUNDLED_HASHES: Record<string, string> = {
   v2ray: '751f52a3d9324c993953b7ebb6aab79e77115542a8ca1ef83078cb215c03dea8',
   tun2socks: '42ce074a9a225825ef5e3f21b3657af7ed25187f7cd4e6d11e0646d5d166eb04',
   // Xray-core v26.3.27 (official XTLS/Xray-core Xray-linux-64.zip release, zip

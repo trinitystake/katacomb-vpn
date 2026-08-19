@@ -104,7 +104,7 @@ function ifaceUp(name: string): boolean {
   }
 }
 
-export const defaultDeps: DaemonDeps = {
+const defaultDeps: DaemonDeps = {
   runHelper: (args) =>
     execFileSync(HELPER_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 }).toString(),
   writeWgConfig: (content) => {

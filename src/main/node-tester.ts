@@ -243,7 +243,7 @@ async function fetchNodeRoot(remoteUrl: string, agent?: https.Agent): Promise<No
   return info
 }
 
-export async function probeBatch(
+async function probeBatch(
   nodes: Array<{ nodeAddress: string; remoteUrl: string }>,
   signal: AbortSignal,
 ): Promise<void> {

@@ -70,7 +70,7 @@ export type HopRole = 'entry' | 'exit'
 
 export const ENTRY_TAG = 'entry-out'
 export const EXIT_TAG = 'exit-out'
-export const SOCKS_TAG = 'socks'
+const SOCKS_TAG = 'socks'
 
 const SOCKS_LISTEN = '127.0.0.1'
 // Inlined (not imported from shared/socks.ts) so the native test runner can

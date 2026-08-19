@@ -2,7 +2,7 @@
 // the dVPN node data uses the conventional long form. Map polygon-name
 // -> data-name so the count lookup hits. Ported verbatim from meile-gui's
 // map.html. Only the 17 entries that actually clash are listed.
-export const POLY_TO_PIN: Record<string, string> = {
+const POLY_TO_PIN: Record<string, string> = {
   'Bosnia and Herz.': 'Bosnia and Herzegovina',
   'Central African Rep.': 'Central African Republic',
   'Congo': 'Republic of the Congo',

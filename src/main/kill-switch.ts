@@ -12,7 +12,7 @@ function markerPath(): string {
   return join(app.getPath('userData'), 'killswitch-armed.state')
 }
 
-export function markKillSwitchArmed(): void {
+function markKillSwitchArmed(): void {
   try {
     writeFileAtomic(markerPath(), 'armed\n')
   } catch { /* best-effort — marker is only a hint for self-heal */ }
@@ -22,7 +22,7 @@ export function isKillSwitchArmed(): boolean {
   return existsSync(markerPath())
 }
 
-export function clearKillSwitchArmed(): void {
+function clearKillSwitchArmed(): void {
   try {
     unlinkSync(markerPath())
   } catch { /* already gone */ }

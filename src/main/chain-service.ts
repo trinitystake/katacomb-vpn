@@ -111,7 +111,7 @@ function sessionConfigPath(sessionId: string): string {
   return join(getSessionsDir(), `session-${sessionId}.json`)
 }
 
-export function saveSessionConfig(config: SavedSessionConfig): void {
+function saveSessionConfig(config: SavedSessionConfig): void {
   // Never write tunnel credentials (WG private key / V2Ray UUID) to disk in
   // plaintext OR under the reversible basic_text backend (finding H1). Without
   // real keyring encryption we skip persistence entirely — connecting still works

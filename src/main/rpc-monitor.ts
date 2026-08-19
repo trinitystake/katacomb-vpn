@@ -60,7 +60,7 @@ interface StatusResponse {
  * wants the failure as data. `blockAgeSec` is what catches the nastiest kind of
  * bad endpoint: one that answers instantly but is hours behind the chain.
  */
-export async function probeRpc(endpoint: string): Promise<RpcProbe> {
+async function probeRpc(endpoint: string): Promise<RpcProbe> {
   const start = Date.now()
   try {
     const response = await net.fetch(`${endpoint}/status`, {
@@ -166,7 +166,7 @@ function publishUnprobed(state: 'suspended' | 'blocked' | 'unknown', endpoint: s
  * `confirming` marks the second probe of a reading that needsConfirmation held
  * back; only that one may publish a fresh fault.
  */
-export async function refreshRpcHealth(opts: { confirming?: boolean } = {}): Promise<void> {
+async function refreshRpcHealth(opts: { confirming?: boolean } = {}): Promise<void> {
   if (probeInFlight) return probeInFlight
   const endpoint = getRpcEndpoint()
 

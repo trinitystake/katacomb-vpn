@@ -14,7 +14,7 @@ export type BillingType = 'gigabytes' | 'hours'
  * `proxySettings.tag`, a v2ray-core feature no other protocol in this client has an
  * equivalent for.
  */
-export const CHAINABLE_TYPES = [2, 4]
+const CHAINABLE_TYPES = [2, 4]
 
 export function isChainable(node: SentNode): boolean {
   return CHAINABLE_TYPES.includes(node.type) && node.isActive && node.isHealthy

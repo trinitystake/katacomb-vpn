@@ -47,7 +47,7 @@ import {
 } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/lease/v1/msg.js'
 
 /** The only denom this console prices in. Multi-denom/IBC plan pricing is out of scope. */
-export const PLAN_DENOM = 'udvpn'
+const PLAN_DENOM = 'udvpn'
 
 /** 1 GB as the chain counts it — decimal, matching every live plan (250 GB = 250000000000). */
 const BYTES_PER_GB = 1_000_000_000n
@@ -56,7 +56,7 @@ const SECONDS_PER_DAY = 86_400
 // The SDK has no lease module, so its type URLs are declared here. These are
 // stable protobuf identifiers (sentinel.lease.v1), not SDK API.
 export const MsgStartLeaseTypeUrl = '/sentinel.lease.v1.MsgStartLeaseRequest'
-export const MsgEndLeaseTypeUrl = '/sentinel.lease.v1.MsgEndLeaseRequest'
+const MsgEndLeaseTypeUrl = '/sentinel.lease.v1.MsgEndLeaseRequest'
 
 /**
  * The SDK registry plus the missing lease types.

@@ -157,6 +157,10 @@ function AppInner() {
   const wallet = useWallet()
   const { status: connStatus } = useConnection()
   const isConnected = connStatus.state === 'connected' || connStatus.state === 'reconnecting'
+  // Whether the chain is out of reach because our own tunnel carries the traffic,
+  // which is what isVpnActive() gates the cached-data handlers on in main. Proxy mode
+  // is connected but redirects nothing, so the RPC endpoint is still reachable there.
+  const chainFrozen = isConnected && !connStatus.proxyMode
   const { mainTab, setMainTab, settingsTab, openSettings, closeSettings } = useNavigation()
   const [showBinarySetup, setShowBinarySetup] = useState(true)
   // "Add another wallet" from the picker: show the import screen even though
@@ -272,7 +276,7 @@ function AppInner() {
             address={wallet.address}
             name={wallet.name}
             onLogout={wallet.logout}
-            connected={isConnected}
+            chainFrozen={chainFrozen}
             walletCount={wallet.store?.wallets.length ?? 0}
           />
           <button

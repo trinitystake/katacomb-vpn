@@ -8,11 +8,16 @@ interface Props {
   name: string | null
   /** Locks the wallet: clears it from memory, leaves the encrypted seed on disk. */
   onLogout: () => void
-  connected: boolean
+  /**
+   * The chain is unreachable because OUR tunnel is carrying the traffic, so the
+   * balance is the cached one and refreshing it cannot work. Not the same as being
+   * connected: proxy mode leaves routing alone, so the RPC endpoint stays reachable.
+   */
+  chainFrozen: boolean
   walletCount: number
 }
 
-export default function WalletPanel({ address, name, onLogout, connected, walletCount }: Props) {
+export default function WalletPanel({ address, name, onLogout, chainFrozen, walletCount }: Props) {
   const { display: balance, refresh: refreshBalance } = useBalance()
   const { openSettings } = useNavigation()
   const [copied, setCopied] = useState(false)
@@ -100,7 +105,7 @@ export default function WalletPanel({ address, name, onLogout, connected, wallet
             <div className="flex justify-between items-center">
               <span className="text-text-secondary">Balance</span>
               <div className="flex items-center gap-2">
-                {connected && (
+                {chainFrozen && (
                   <span
                     className="text-text-tertiary text-xs"
                     title="Connected to the VPN, so the chain is unreachable through the tunnel. This is the balance from before you connected."
@@ -111,9 +116,9 @@ export default function WalletPanel({ address, name, onLogout, connected, wallet
                 <span className="text-success font-mono">{balance || '...'} P2P</span>
                 <button
                   onClick={refresh}
-                  disabled={refreshing || connected}
+                  disabled={refreshing || chainFrozen}
                   className="text-text-secondary hover:text-accent transition-colors disabled:opacity-50"
-                  title={connected ? 'Balance refresh is unavailable while connected (RPC routes through the tunnel)' : 'Refresh balance'}
+                  title={chainFrozen ? 'Balance refresh is unavailable while connected (RPC routes through the tunnel)' : 'Refresh balance'}
                   aria-label="Refresh balance"
                 >
                   {refreshing ? (

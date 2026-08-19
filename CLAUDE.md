@@ -366,11 +366,20 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   up. Reported live: 8 h bought, ~4 h connected, gauge showing 6 h+. Fixes: `abort` with
   reason `'auto-reconnect-off'` goes through `standDownSession('stalled')` (so the kill
   switch still follows the user's setting), and `usageAccruesWithoutTunnelInterface`
-  (pure, unit-tested) gates that `aliveUntilMs = now` on proxy mode. **The node meters
-  tunnel-UP time, not traffic** — verified on mainnet #56136929 (1216 s of interface
-  uptime, 1218.45 s settled) and #56141731 (147 s / 148.03 s, unchanged 24 minutes after
-  disconnect with the session still active) — so an idle-but-connected tunnel really is
-  billed, and our clock must track interface uptime exactly, neither more nor less.
+  (pure, unit-tested) gates that `aliveUntilMs = now` on proxy mode. **The node bills DURATION as
+  wall-clock from `startAt` to the last activity, gaps included; only BYTES are exact.**
+  Measured on #56152782: two tunnel windows totalling 646 s with a 657 s gap in between
+  where no interface existed at all, and the chain settled **1306 s** — 2.02x the real
+  connected time, and within 5 s of `startAt`-to-last-drop. Bytes over the same session
+  agreed with our own interface counters to 0.018% (120,382,672 vs 120,360,568). Do NOT
+  read #56136929 (1216 s up / 1218 s settled) or #56141731 (147 s / 148 s) as evidence
+  against this — both ran as ONE continuous window, where uptime and span coincide, so
+  they cannot distinguish the two. Only a session with a gap can, and n=1 so far.
+  Consequences: an hourly session used intermittently is billed as if continuous, so
+  per-GB is the honest product for dip-in-dip-out use; and our own floor (real connected
+  time) sits BELOW what the chain settles, so once the proof lands the chain overtakes
+  it and the gauge shows the larger, wall-clock figure. That is correct — the gauge must
+  show what the user was CHARGED, not what we wish they had been.
 - **An empty session list is NOT proof of anything, because the failure is swallowed
   a layer down.** `getSessionsForAddress` catches every error and `return []`, so
   "the RPC is unreachable" and "this account has no sessions" arrive at every caller
@@ -382,12 +391,11 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   and 37.5 MB recorded at 18:00:37, `session-usage.json` emptied to `{}` at 18:00:55
   by the next poll, and the chain STILL reporting `duration: 0` ten minutes later, so
   the gauge had no source of truth left and read zero for a session that had genuinely
-  run. **That session was never metered at all** — `inactiveAt - startAt` was EXACTLY
-  `statusTimeout` (7200s), the arithmetic proof that zero node proofs ever landed,
-  after two connects totalling ~644s and ~118MB. The same node metered #56136929 and
-  #56141731 correctly hours earlier, so this is per-SESSION, not a broken node, and it
-  is the single-hop twin of the multihop exit-hop finding below. The floor is
-  therefore not a nicety that bridges a lag: it is sometimes the ONLY record that
+  run. **Proofs can lag by tens of minutes**: #56152782 sat at `duration: 0` with
+  `inactiveAt - startAt` EXACTLY `statusTimeout` (the arithmetic proof that no proof
+  had landed) for 54 minutes across two connects and ~120MB, before its first proof
+  arrived 40 minutes after the last disconnect. So the floor is not a nicety that
+  bridges a couple of seconds: for the best part of an hour it is the ONLY record that
   usage happened. `prunableUsageIds` (pure, unit-tested) is the
   guard: an EMPTY list prunes nothing. Don't "fix" this by making
   `getSessionsForAddress` throw — several callers rely on `[]` meaning "carry on"

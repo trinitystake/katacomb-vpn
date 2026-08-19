@@ -251,6 +251,55 @@ export function stripDnsLines(config: string): string {
 }
 
 /**
+ * Point a WireGuard/AmneziaWG INI at ONE chosen resolver, replacing whatever DNS
+ * the node pushed.
+ *
+ * Nodes advertise a LIST, and its first entry is typically their own in-tunnel
+ * resolver. wg-quick hands the whole list to resolvconf, and systemd-resolved
+ * starts at entry one: when that server is a black hole (routed into the tunnel,
+ * never answers) every uncached lookup costs the glibc ceiling of 10s (5s x 2
+ * attempts) until resolved fails over and pins a working server. Measured live on
+ * 2026-08-19: `DNS = 10.8.0.1, 1.0.0.1, 1.1.1.1`, ~34s of dead DNS after connect,
+ * then instant forever after, because resolved's server choice is sticky for the
+ * life of the link. That is why it reads as a one-time stall and why it comes back
+ * on the next connect to the same node.
+ *
+ * Replacing rather than reordering is deliberate: the node's resolver sees every
+ * name the user looks up, so a user who named a resolver should get that one and
+ * nothing else. `stripDnsLines` stays the separate, narrower tool for the
+ * resolvconf-missing retry.
+ */
+export function replaceDnsLines(config: string, resolverIp: string): string {
+  const lines = config.split('\n')
+  const isDns = (line: string): boolean => /^\s*DNS\s*=/i.test(line)
+
+  const first = lines.findIndex(isDns)
+  if (first !== -1) {
+    // Keep the node's line position, drop any further DNS lines.
+    return lines
+      .map((line, i) => (i === first ? `DNS = ${resolverIp}` : line))
+      .filter((line, i) => i === first || !isDns(line))
+      .join('\n')
+  }
+
+  // The node pushed no DNS at all. Add one, or the user stays on their LAN
+  // resolver while tunnelled, which is the leak this setting exists to close.
+  const start = lines.findIndex((line) => line.trim().toLowerCase() === '[interface]')
+  if (start === -1) return config
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\s*\[/.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+  // Step back over the blank line before the next section so the key stays inside
+  // [Interface] — wg-quick reads DNS only there.
+  while (end > start + 1 && lines[end - 1].trim() === '') end--
+  return [...lines.slice(0, end), `DNS = ${resolverIp}`, ...lines.slice(end)].join('\n')
+}
+
+/**
  * Bytes the tunnel must have sent with NOTHING coming back before we call it one-way.
  * Small enough that a handful of DNS retries and TCP SYNs reach it, large enough that
  * a brief stall doesn't.

@@ -268,6 +268,55 @@ ensure_persist_dir() {
 # host) and never allowed to abort the IPv4 kill switch (callers use `|| ...`).
 CHAIN6="KATACOMB_KILLSWITCH6"
 
+# --- wg-quick policy-routing rule cleanup ---
+# wg-quick/awg-quick install a rule PAIR per bring-up for a full-tunnel config:
+#   not from all fwmark 0xca6c lookup 51820
+#   from all lookup main suppress_prefixlength 0
+# Their own `down` removes them, but ours almost never runs it: `wg-quick down
+# sntl0` resolves the name against /etc/wireguard and our config lives elsewhere,
+# so the `down` verb falls through to `ip link delete` (and `awg-down` only ever
+# did that). The interface goes, the rules stay, and they accumulate one pair per
+# connect. Measured 2026-08-19: three pairs against a single live sntl0.
+#
+# Scoped tightly, because these rules are not ours alone:
+#  - runs only once NO tunnel that could own them is left;
+#  - deletes a fwmark table only if it is in wg-quick's own allocation range
+#    (it starts at 51820 and counts up), so another VPN's table 100 is untouched;
+#  - every loop is bounded, so a delete that keeps failing can never spin.
+WG_TABLE_MIN=51820
+WG_TABLE_MAX=51899
+
+wg_rule_tables() {
+  # Tables named by a wg-quick-shaped fwmark rule, restricted to its own range.
+  ip "$1" rule show 2>/dev/null | awk -v lo="$WG_TABLE_MIN" -v hi="$WG_TABLE_MAX" '
+    /fwmark/ {
+      for (i = 1; i <= NF; i++)
+        if ($i == "lookup" && $(i+1) + 0 >= lo && $(i+1) + 0 <= hi) print $(i+1)
+    }' | sort -u
+}
+
+cleanup_wg_rules() {
+  # A second WireGuard tunnel (or our own, still up) means these rules are in use.
+  ip -o link show type wireguard 2>/dev/null | grep -q . && return 0
+  ip link show "$ALLOWED_IFACE" &>/dev/null && return 0
+
+  local fam table n
+  for fam in -4 -6; do
+    for table in $(wg_rule_tables "$fam"); do
+      n=0
+      while [[ $n -lt 32 ]] && ip "$fam" rule show 2>/dev/null | grep -q "lookup $table"; do
+        ip "$fam" rule delete table "$table" 2>/dev/null || break
+        n=$((n + 1))
+      done
+    done
+    n=0
+    while [[ $n -lt 32 ]] && ip "$fam" rule show 2>/dev/null | grep -q "suppress_prefixlength 0"; do
+      ip "$fam" rule delete table main suppress_prefixlength 0 2>/dev/null || break
+      n=$((n + 1))
+    done
+  done
+}
+
 ipv6_available() {
   command -v ip6tables >/dev/null 2>&1 && ip6tables -S >/dev/null 2>&1
 }
@@ -317,6 +366,9 @@ case "${1:-}" in
       validate_iface "$iface"
       wg-quick down "$iface" 2>/dev/null || ip link delete "$iface" 2>/dev/null || true
     done
+    # The `ip link delete` fallback above is the normal path, not the exception,
+    # and it leaves wg-quick's policy-routing rules behind.
+    cleanup_wg_rules
     ;;
   awg-up)
     # AmneziaWG bring-up: same config rules as `up`, but via bundled awg-quick.
@@ -356,6 +408,9 @@ case "${1:-}" in
     # as the `down` fallback above (wg-quick down by name fails for our config
     # location there too and falls back to ip link delete).
     ip link delete "$ALLOWED_IFACE" 2>/dev/null || true
+    # awg-quick installs the same rule pair wg-quick does, and nothing above
+    # removes it.
+    cleanup_wg_rules
     ;;
   ovpn-up)
     # OpenVPN bring-up. Unlike wg-quick/awg-quick, openvpn STAYS RESIDENT, so this

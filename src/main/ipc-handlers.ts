@@ -33,7 +33,7 @@ import {
 import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
 import type https from 'node:https'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -165,6 +165,24 @@ const DEFAULT_KILLSWITCH_DNS = '1.1.1.1'
 function effectiveV2RayResolverIp(settings: AppSettings): string | null {
   if (settings.dnsResolver !== 'system') return settings.dnsResolver
   return settings.killSwitch ? DEFAULT_KILLSWITCH_DNS : null
+}
+
+/**
+ * The resolver a WireGuard/AmneziaWG tunnel should use, or null to keep the node's.
+ *
+ * These protocols never take the `dns-set` path (wg-quick owns resolv.conf, and
+ * overriding it here would strand DNS on the node resolver after disconnect), so
+ * the chosen resolver has to reach the tunnel as a `DNS =` line in the config
+ * instead. Until this existed the setting was silently ignored on the whole WG
+ * family: the UI offered a resolver and the node's own list was used regardless.
+ *
+ * 'system' deliberately stays "whatever the node pushed" rather than borrowing
+ * effectiveV2RayResolverIp's kill-switch fallback. The kill switch accepts
+ * everything out the tunnel interface, so a node resolver is reachable under it
+ * and needs no public substitute.
+ */
+function wireguardResolverIp(settings: AppSettings): string | null {
+  return settings.dnsResolver === 'system' ? null : settings.dnsResolver
 }
 
 let activeWg: Wireguard | null = null
@@ -2919,12 +2937,18 @@ export function registerIpcHandlers(): void {
       // A new connect supersedes whatever the last session ended as.
       lastExpiry = null
       if (params.protocol === 'wireguard') {
-        if (dnsFallback) {
-          // Same config, minus DNS. config-guard still validates it (DNS is an
-          // optional key in the allow-list).
+        const wgDns = wireguardResolverIp(loadSettings())
+        if (dnsFallback || wgDns) {
+          // Same config, minus DNS (the resolvconf-missing retry), or with the
+          // node's DNS list swapped for the user's resolver. config-guard still
+          // validates it either way (DNS is an optional key in the allow-list).
           const base = params.configString ?? activeWg?.buildConfigString()
           if (!base) throw new Error('No WireGuard instance or config available')
-          await connectWireGuardFromConfig(stripDnsLines(base))
+          await connectWireGuardFromConfig(
+            // dnsFallback wins: it exists because resolvconf is missing, so ANY
+            // DNS line fails the bring-up, including one we chose.
+            dnsFallback || !wgDns ? stripDnsLines(base) : replaceDnsLines(base, wgDns),
+          )
         } else if (activeWg) {
           await connectWireGuard(activeWg)
         } else if (params.configString) {
@@ -2952,7 +2976,13 @@ export function registerIpcHandlers(): void {
         if (!awgConfig) {
           throw new Error('No AmneziaWG config available')
         }
-        await connectAmneziaWgFromConfig(dnsFallback ? stripDnsLines(awgConfig) : awgConfig)
+        // dnsFallback wins: it exists because resolvconf is missing, so ANY DNS
+        // line fails the bring-up, including one we chose.
+        const awgDns = wireguardResolverIp(loadSettings())
+        const awgWithDns = dnsFallback ? stripDnsLines(awgConfig)
+          : awgDns ? replaceDnsLines(awgConfig, awgDns)
+          : awgConfig
+        await connectAmneziaWgFromConfig(awgWithDns)
 
         await applyPostConnectSettings('amneziawg')
         await assertTunnelCarriesTraffic()

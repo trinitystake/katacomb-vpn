@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
 
 // --- isChildProxyCarryingTraffic (the spawn-to-tun-up window) ---
 
@@ -656,4 +656,61 @@ test('deadTunnelMessage names the exit as the likely fault on a chain', () => {
 test('deadTunnelMessage keeps both single-hop variants intact', () => {
   assert.match(deadTunnelMessage(true), /peer it just issued/)
   assert.match(deadTunnelMessage(false), /cannot be reconnected/)
+})
+
+// --- replaceDnsLines (the node-pushed dead resolver) ---
+// Live 2026-08-19: a WireGuard node pushed `DNS = 10.8.0.1, 1.0.0.1, 1.1.1.1`.
+// 10.8.0.1 is the node's in-tunnel resolver and never answered, so systemd-resolved
+// spent ~34s failing over to 1.0.0.1 while every uncached lookup cost the glibc
+// 10s ceiling (5s x 2 attempts). Honouring the user's own resolver removes the
+// dead server from the list entirely.
+
+test('replaceDnsLines swaps the node DNS list for the chosen resolver', () => {
+  const config = [
+    '[Interface]',
+    'PrivateKey = abc123',
+    'Address = 10.94.101.16/32',
+    'DNS = 10.8.0.1, 1.0.0.1, 1.1.1.1',
+    '',
+    '[Peer]',
+    'PublicKey = def456',
+    'Endpoint = 1.2.3.4:51820',
+  ].join('\n')
+
+  const out = replaceDnsLines(config, '9.9.9.9')
+
+  assert.match(out, /^DNS = 9\.9\.9\.9$/m)
+  assert.ok(!out.includes('10.8.0.1'), 'the dead node resolver must be gone')
+  assert.match(out, /Address = 10\.94\.101\.16\/32/, 'other Interface keys survive')
+  assert.match(out, /Endpoint = 1\.2\.3\.4:51820/, 'the Peer section survives')
+})
+
+test('replaceDnsLines collapses multiple DNS lines into one', () => {
+  const config = '[Interface]\nPrivateKey = k\nDNS = 10.8.0.1\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = p'
+
+  const out = replaceDnsLines(config, '9.9.9.9')
+
+  assert.equal(out.match(/^\s*DNS\s*=/gim)?.length, 1, 'exactly one DNS line must remain')
+  assert.match(out, /^DNS = 9\.9\.9\.9$/m)
+})
+
+test('replaceDnsLines adds DNS to [Interface] when the node pushed none', () => {
+  // Without this the user keeps their LAN resolver while tunnelled, which is the
+  // leak the setting exists to close.
+  const config = '[Interface]\nPrivateKey = k\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = p'
+
+  const out = replaceDnsLines(config, '9.9.9.9')
+
+  const lines = out.split('\n')
+  const dnsAt = lines.findIndex((l) => /^\s*DNS\s*=/i.test(l))
+  const peerAt = lines.findIndex((l) => l.trim() === '[Peer]')
+  assert.ok(dnsAt !== -1, 'a DNS line must be added')
+  assert.ok(dnsAt < peerAt, 'DNS must land in [Interface], never in [Peer]')
+})
+
+test('replaceDnsLines leaves a config without an [Interface] section untouched', () => {
+  // Defensive: config-guard rejects these anyway, so inventing a section here
+  // would only produce a shape the guard has never seen.
+  const config = '[Peer]\nPublicKey = p'
+  assert.equal(replaceDnsLines(config, '9.9.9.9'), config)
 })

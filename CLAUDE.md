@@ -196,6 +196,36 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `|| '0.0.0.0'` fallback is what caused it; `applyPostConnectSettings` now skips arming
   and sets `killSwitchFailed`, and both the daemon and the bash helper reject `0.0.0.0`
   outright. Symptom to recognise: bytes out, ~zero bytes in, no DNS, IP unchanged.
+- **A node's DNS list is untrusted input, and its FIRST entry is the one that bites.**
+  Nodes push a list (`DNS = 10.8.0.1, 1.0.0.1, 1.1.1.1`), wg-quick hands the whole thing
+  to resolvconf, and systemd-resolved starts at entry one. When that entry is the node's
+  own in-tunnel resolver and it never answers, every uncached lookup costs the glibc
+  ceiling of 10s (`timeout:5` x `attempts:2`) until resolved fails over and PINS a working
+  server. Measured live 2026-08-19: ~34s of dead DNS after connect, then instant forever,
+  because resolved's server choice is sticky for the life of the link — which is why it
+  reads as a one-time glitch, is blamed on "the first page being slow", and returns on the
+  next connect to the same node. `tcp-noDNS` stayed flat throughout, so routing was never
+  involved. The fix is `replaceDnsLines` (pure, unit-tested), applied on the WG/AWG connect
+  paths when `dnsResolver !== 'system'`: the chosen resolver REPLACES the node's list
+  rather than being appended or reordered, because the node's resolver sees every name the
+  user looks up. Do NOT "simplify" this into the `dns-set` path — wg-quick owns
+  resolv.conf for this family, and overriding it there strands DNS on the node resolver
+  after disconnect. `wireguardResolverIp()` is deliberately NOT
+  `effectiveV2RayResolverIp()`: 'system' keeps the node's list, since the kill switch
+  accepts everything out the tunnel interface and needs no public substitute. The rewrite
+  happens BEFORE the config-guard assert, and `config-guard.test.ts` pins that the
+  rewritten shape still passes both guards.
+- **`wg-quick down` ALWAYS fails for our tunnel, so its cleanup is ours to do.** It
+  resolves an interface name against `/etc/wireguard`, and our config lives in
+  `SECURE_TMPDIR` — so the helper's `down` verb falls through to `ip link delete` on every
+  disconnect (and `awg-down` only ever did that). That removes the interface and leaves
+  wg-quick's policy-routing rule PAIR behind (`not from all fwmark 0xca6c lookup 51820` +
+  `from all lookup main suppress_prefixlength 0`), one pair leaked per connect: measured
+  three pairs against a single live `sntl0`. `cleanup_wg_rules` in the helper repairs it,
+  and its scoping is the load-bearing part — it runs only once NO tunnel that could own
+  the rules is left, deletes a fwmark table only inside wg-quick's own allocation range
+  (so another VPN's table is untouched), and bounds every loop. Anything else that tears
+  a tunnel down by deleting the link inherits this obligation.
 - **Preflight before paying.** The three session-creating handlers call
   `preflightConnect(nodeType, apiField)` BEFORE the tx: `protocolRuntimeError()`
   (binaries present + SHA-verified; WG/AWG also need `canEscalatePrivileges()`), then
@@ -882,7 +912,10 @@ xray-core is a strict superset of what the builder emits, so it lands in
 missing. Those catch paths rethrow with the `DNS_PROVISION_FAILED` marker
 (`src/shared/error-markers.ts`), and `CONNECTION_CONNECT`'s `dnsFallback` retries the
 same config through `stripDnsLines()`. User consent only — auto-reconnect never strips
-DNS, and the renderer states that system DNS then leaves the tunnel.
+DNS, and the renderer states that system DNS then leaves the tunnel. `stripDnsLines` is
+deliberately the narrower sibling of `replaceDnsLines` (see the node-DNS invariant above):
+this path removes DNS because resolvconf is missing, so it wins over a chosen resolver —
+any `DNS =` line fails the bring-up here, including one we picked.
 
 **Subscriptions.** `plan-service.ts` has `querySubscriptions` / `cancelSubscription` /
 `renewSubscription` / `updateSubscriptionPolicy` behind `SUBSCRIPTION_*` IPC, surfaced

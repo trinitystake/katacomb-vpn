@@ -1,5 +1,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { replaceDnsLines } from './connect-decisions.ts'
+
+// The exact config shape a live WireGuard node produced on 2026-08-19, whose
+// first resolver (10.8.0.1) never answered and stalled DNS for ~34s after connect.
+const NODE_WG_CONFIG = [
+  '[Interface]',
+  'PrivateKey = qF3kL9xZ2mNpQrStUvWxYz0123456789abcdefgh=',
+  'Address = 10.94.101.16/32',
+  'DNS = 10.8.0.1, 1.0.0.1, 1.1.1.1',
+  '',
+  '[Peer]',
+  'PublicKey = AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg=',
+  'Endpoint = 45.124.52.245:51820',
+  'AllowedIPs = 0.0.0.0/0',
+].join('\n')
 import {
   assertSafeWireguardConfig,
   extractWireguardEndpointHost,
@@ -655,4 +670,31 @@ test('extractOpenVpnRemoteHost reads the endpoint host for the kill switch', () 
   assert.equal(extractOpenVpnRemoteHost('remote [2001:db8::1] 1194'), '2001:db8::1')
   assert.equal(extractOpenVpnRemoteHost('remote node.example.com 443'), 'node.example.com')
   assert.equal(extractOpenVpnRemoteHost('client\ndev sntl-ovpn'), null)
+})
+
+// --- the connect path's DNS override must survive this guard ---
+// replaceDnsLines rewrites the node's DNS line before wg-quick/awg-quick see the
+// config, and both guards run AFTER that rewrite. A guard that rejected the
+// rewritten shape would break every WireGuard connect, so this pins the contract
+// between the two modules rather than trusting each in isolation.
+
+test('a DNS-replaced WireGuard config still passes the root-exec guard', () => {
+  const out = replaceDnsLines(NODE_WG_CONFIG, '9.9.9.9')
+  assert.doesNotThrow(() => assertSafeWireguardConfig(out))
+  assert.match(out, /^DNS = 9\.9\.9\.9$/m)
+})
+
+test('a DNS-replaced AmneziaWG config still passes its guard', () => {
+  const awg = NODE_WG_CONFIG.replace(
+    '[Interface]',
+    '[Interface]\nJc = 4\nJmin = 64\nJmax = 512\nS1 = 30\nS2 = 40\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4',
+  )
+  assert.doesNotThrow(() => assertSafeAmneziaWgConfig(replaceDnsLines(awg, '9.9.9.9')))
+})
+
+test('the guard still rejects a directive smuggled through the resolver value', () => {
+  // dnsResolver is already constrained to ALLOWED_DNS_RESOLVERS; this proves the
+  // guard remains the backstop if that ever loosened.
+  const bad = replaceDnsLines(NODE_WG_CONFIG, '9.9.9.9\nPostUp = /bin/sh -c evil')
+  assert.throws(() => assertSafeWireguardConfig(bad))
 })

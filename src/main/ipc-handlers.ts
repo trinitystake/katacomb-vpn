@@ -449,7 +449,7 @@ let connectedAtMs: number | null = null
 let lastExpiry: {
   sessionId: string
   nodeMoniker: string
-  reason: 'time' | 'data' | 'stalled'
+  reason: 'time' | 'data' | 'stalled' | 'dropped'
   trafficBlocked: boolean
   /** MULTIHOP: which end of the chain ran out. Absent for an ordinary session. */
   chainRole?: 'entry' | 'exit'
@@ -579,8 +579,9 @@ function startQuotaWatchdog(): void {
   if (quotaTimer) return
   quotaTimer = setInterval(() => {
     if (isIntentionalDisconnect || reconnectAttempt > 0 || !activeSessionId) return
-    if (checkTunnelStalled()) {
-      void standDownSession('stalled')
+    const failure = checkTunnelStalled()
+    if (failure) {
+      void standDownSession(failure)
       return
     }
     const scored = currentQuotaVerdict()
@@ -649,7 +650,7 @@ function resetOneWayTracking(): void {
  * gate: with auto-reconnect off that returns silently and leaves the dead tunnel up,
  * which is the very state being detected.
  */
-function checkTunnelStalled(): boolean {
+function checkTunnelStalled(): 'stalled' | 'dropped' | null {
   const now = Date.now()
   const bytes = readTunnelBytes()
   if (!bytes) {
@@ -657,7 +658,7 @@ function checkTunnelStalled(): boolean {
     // running (the session is being spent either way).
     if (usageAccruesWithoutTunnelInterface(desiredMode)) {
       aliveUntilMs = now
-      return false
+      return null
     }
     // Tunnel mode: the interface IS the tunnel, so its absence is not "cannot tell",
     // it is gone. aliveUntilMs deliberately stays where the last tick that still saw
@@ -665,7 +666,7 @@ function checkTunnelStalled(): boolean {
     // advancing it here billed the user for every second of a tunnel that no longer
     // existed, and wrote that figure into lastSessionUsage as a permanent floor.
     console.error('[vpn] the tunnel interface is gone — the tunnel is down')
-    return true
+    return 'dropped'
   }
   aliveBytes = bytes
   if (lastRxMovedAtMs === 0 || bytes.rx > lastRxBytes) {
@@ -676,7 +677,7 @@ function checkTunnelStalled(): boolean {
   if (!isTunnelOneWay(bytes.tx - lastTxAtRx, now - lastRxMovedAtMs)) {
     // Includes the genuinely idle tunnel: nothing out, nothing back, nothing wrong.
     aliveUntilMs = now
-    return false
+    return null
   }
   // Stalled. The tunnel was last useful when something last came back, so that — not
   // now — is where usage stops accruing.
@@ -685,7 +686,7 @@ function checkTunnelStalled(): boolean {
     `[vpn] tunnel is one-way — ${bytes.tx - lastTxAtRx} bytes sent with no reply for ` +
     `${Math.round((now - lastRxMovedAtMs) / 1000)}s. The node has stopped forwarding.`,
   )
-  return true
+  return 'stalled'
 }
 
 /** "10 minutes" / "1.2 GB" — the remaining-quota phrase for the warning notification. */
@@ -748,7 +749,7 @@ function notify(title: string, body: string): void {
  * from a chain stranded by a crash) and must NOT be weakened to preserve this state.
  */
 async function standDownSession(
-  reason: 'time' | 'data' | 'stalled',
+  reason: 'time' | 'data' | 'stalled' | 'dropped',
   /**
    * MULTIHOP: the hop whose quota actually ran out, when that is known. Both hops are
    * separate nodes on separate deposits, so reporting the entry's name for an exit
@@ -770,8 +771,8 @@ async function standDownSession(
       ? undefined
       : isExitHop ? 'exit' : 'entry'
   console.log(
-    reason === 'stalled'
-      ? `[vpn] session #${sessionId} tunnel stopped carrying traffic — disconnecting`
+    reason === 'stalled' || reason === 'dropped'
+      ? `[vpn] session #${sessionId} tunnel ${reason === 'stalled' ? 'stopped carrying traffic' : 'closed unexpectedly'} — disconnecting`
       : `[quota] session #${sessionId} exhausted its ${reason} quota — disconnecting`,
   )
 
@@ -826,15 +827,16 @@ async function standDownSession(
   })
 
   const blocked = lastExpiry?.trafficBlocked
+  // 'stalled' is an accusation and 'dropped' is not: the first has evidence against
+  // the node (traffic left, nothing came back), the second only means the tunnel is
+  // gone, which a local failure explains just as well.
+  const why =
+    reason === 'stalled' ? 'The tunnel stopped carrying traffic, so it was disconnected.'
+      : reason === 'dropped' ? 'The VPN tunnel closed unexpectedly, so it was disconnected.'
+        : 'Session ended, VPN disconnected.'
   notify(
     'Katacomb VPN',
-    reason === 'stalled'
-      ? blocked
-        ? 'The tunnel stopped carrying traffic, so it was disconnected. The kill switch is still blocking all traffic.'
-        : 'The tunnel stopped carrying traffic, so it was disconnected.'
-      : blocked
-        ? 'Session ended, VPN disconnected. The kill switch is still blocking all traffic.'
-        : 'Session ended, VPN disconnected.',
+    blocked ? `${why} The kill switch is still blocking all traffic.` : why,
   )
 }
 
@@ -1862,7 +1864,7 @@ async function attemptReconnect(): Promise<void> {
     // which remembers the usage and leaves the kill switch to the user's setting.
     if (decision.reason === 'auto-reconnect-off') {
       console.log('[reconnect] Auto-reconnect is off and the tunnel dropped — standing the session down')
-      await standDownSession('stalled')
+      await standDownSession('dropped')
       return
     }
     // Nothing else broadcasts here, so a ladder that aborts mid-flight (e.g. the

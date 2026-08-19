@@ -238,8 +238,11 @@ export interface ConnectionStatus {
   reconnectMaxAttempts?: number
   /**
    * Main tore the tunnel down on its own. Either the session ran out of the time or
-   * data it was paid for ('time'/'data'), or the tunnel stopped carrying traffic
-   * ('stalled') — the latter is NOT an expiry: the session is normally still live on
+   * data it was paid for ('time'/'data'), the node stopped forwarding ('stalled'),
+   * or the tunnel simply went away ('dropped'). The last two are NOT expiries, and
+   * they are kept apart because only 'stalled' has evidence against the node: traffic
+   * left and nothing came back. A vanished interface is equally well explained by a
+   * local failure, so its copy accuses nobody. The session is normally still live on
    * chain and reconnecting renews the handshake. `trafficBlocked` means the kill
    * switch was left armed on purpose (the user's preference standing in for "no
    * tunnel, no traffic"), so the internet is down until they restore it. Cleared by
@@ -248,7 +251,7 @@ export interface ConnectionStatus {
   expired?: {
     sessionId: string
     nodeMoniker: string
-    reason: 'time' | 'data' | 'stalled'
+    reason: 'time' | 'data' | 'stalled' | 'dropped'
     trafficBlocked: boolean
     /**
      * MULTIHOP: which end of the chain ran out, so the banner can name it. `sessionId`

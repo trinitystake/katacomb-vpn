@@ -29,8 +29,8 @@ import Spinner from './components/Spinner'
 import AppLogo from './components/AppLogo'
 
 /**
- * Main took the tunnel down on its own — the session ran out of what it was paid
- * for, or the tunnel stopped carrying traffic. Two shapes: an ordinary notice when
+ * Main took the tunnel down on its own: the session ran out of what it was paid for,
+ * the node stopped forwarding, or the tunnel went away. Two shapes: an ordinary notice when
  * internet still works, and a danger-styled one when the kill switch was deliberately
  * left armed — there the user has no connectivity at all until they press Restore, so
  * it must not read as cosmetic. It is its own component only because dismissing needs
@@ -53,7 +53,16 @@ function SessionExpiredBanner({ expired }: { expired: ConnectionStatus['expired'
     >
       <span aria-hidden>⚠</span>
       <span className="flex-1">
-        {expired.reason === 'stalled' ? (
+        {expired.reason === 'dropped' ? (
+          <>
+            {/* Deliberately names no culprit. The interface going away is explained by a
+                local failure (a crash, a resume, something else deleting it) just as well
+                as by the node, and the user cannot tell which. Only 'stalled' below has
+                evidence: traffic left and nothing came back. */}
+            The VPN tunnel closed unexpectedly and was disconnected. Your session is still
+            open. Reconnect from the Sessions tab to bring the tunnel back.
+          </>
+        ) : expired.reason === 'stalled' ? (
           <>
             The tunnel to <span className="font-medium">{node}</span> stopped carrying traffic and
             was disconnected. Your session is still open. Reconnect from the Sessions tab to renew

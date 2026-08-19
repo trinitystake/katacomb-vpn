@@ -78,6 +78,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   const { allocations } = usePlans()
   const reconnect = useReconnect()
   const vpnConnected = status.state === 'connected'
+  // Refresh asks the chain, and WALLET_SESSIONS returns lastKnownSessions verbatim
+  // while isVpnActive() — so while our own tunnel carries the traffic the button is a
+  // silent no-op, which reads as a broken control. Proxy mode leaves routing alone, so
+  // the RPC endpoint stays reachable there and the refresh still does something real.
+  const chainFrozen = vpnConnected && !status.proxyMode
   // Live interface counter (bytes used this session). The on-chain session
   // counters are frozen while connected (RPC is unreachable through the tunnel)
   // and lag node settlement anyway, so the connected session's usage is driven
@@ -281,8 +286,11 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
         </h3>
         <button
           onClick={refresh}
-          disabled={refreshing}
-          className="text-text-secondary text-xs hover:text-accent transition-colors flex items-center gap-1"
+          disabled={refreshing || chainFrozen}
+          className="text-text-secondary text-xs hover:text-accent transition-colors flex items-center gap-1 disabled:opacity-50"
+          title={chainFrozen
+            ? 'Unavailable while connected: the chain is unreachable through the tunnel, so this list is the one from before you connected. The connected session keeps updating from live traffic.'
+            : 'Reload sessions from the chain'}
         >
           {refreshing ? <Spinner className="text-accent" /> : 'Refresh'}
         </button>

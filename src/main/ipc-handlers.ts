@@ -1977,6 +1977,24 @@ async function attemptReconnect(): Promise<void> {
         finalizeTunnelConnect(saved.protocol as ConnectProtocol, desiredMode)
       } catch (err) {
         console.error('[reconnect] Failed:', err)
+        // Tear the half-built tunnel down before the next attempt. Every failure
+        // above this point can leave a spawned core (and its SOCKS listener)
+        // behind, and the next attempt spawns another one on top: N failed
+        // attempts leak N cores. Measured live 2026-08-20 by killing v2ray with
+        // the kill switch armed - four v2ray processes all bound to
+        // 127.0.0.1:1080, of which main still tracked only the last, so the
+        // user's Disconnect reaped one of four and the rest kept serving the
+        // port. The connect path has always done this at its own bring-up
+        // failure (finishChildProxyConnect); the retry ladder never did.
+        // disconnect(), NOT teardownToIdle(): the latter resets reconnectAttempt,
+        // which would stop the ladder from ever giving up.
+        try {
+          await disconnect()
+        } catch (cleanupErr) {
+          // Best effort: a failed teardown must not become an unhandled
+          // rejection and must not stop the retry ladder.
+          console.error('[reconnect] Cleanup after a failed attempt failed:', cleanupErr)
+        }
         attemptReconnect()
       }
     })

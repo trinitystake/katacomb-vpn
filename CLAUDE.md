@@ -382,6 +382,35 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   were both considered and rejected: the first goes stale on every dock or Wi-Fi roam, the
   second overloads one control with two meanings and accepts public CIDRs. `100.64.0.0/10`
   (CGNAT, Tailscale) is deliberately absent from the ranges.
+- **The kill switch DROPs, and that silence is the design — so diagnose this area with
+  timings, never with error messages.** Nothing on the physical NIC gets an ICMP reject
+  while the chain is armed, so every failure here surfaces as an unexplained hang in
+  whatever was talking (a browser, a resolver, an app socket) rather than as an error
+  anyone can read. Do NOT "improve" it to REJECT: the silence is what stops the chain
+  advertising itself, and a reject would tear down connections the kill switch exists to
+  hold still. The consequence to plan around is diagnostic, not functional. What worked
+  on 2026-08-19 was sampling four independent clocks once a second across a connect —
+  DNS through the resolved stub using a FRESH RANDOM NAME each time (a cacheable name
+  measures the cache, not the path), DNS for a real name, TCP connect to an IP with no
+  DNS, and full HTTP by IP. The stall landed only in the first while the TCP clock stayed
+  flat at ~0.02s, which is what separated "DNS is broken" from "routing is broken" and
+  killed the plausible-but-wrong "stale sockets black-holed by the kill switch" theory.
+  Log per-link `resolvectl status` on every state change alongside it.
+- **`ConnectionStatus.state === 'connected'` means "traffic is redirected", and it flips
+  on INTERFACE PRESENCE — deliberately. Do not add an intermediate "verifying" state.**
+  For WG/AWG/OpenVPN the status is true from the moment the interface exists, which is
+  BEFORE `applyPostConnectSettings` arms the kill switch and before
+  `assertTunnelCarriesTraffic` finishes (that probe alone can run 36s: 3 attempts x 2 URLs
+  x 6s). That reads like a bug and is not one, because the tunnel genuinely is carrying
+  the user's traffic throughout that window. The renderer gates on this string in 10+
+  places and two of them break immediately if it goes false while a tunnel is up:
+  `ActiveSessions`' `chainFrozen` re-enables the Sessions Refresh button, which is a
+  silent no-op while our own tunnel freezes the chain (the bug d41d35b fixed), and
+  `useTrafficStats(vpnConnected)` stops feeding the live meter, which drives the usage
+  gauge BACKWARDS against the "must never go backwards" rule above. If the connect FLOW's
+  progress needs surfacing, it belongs in the connect modal's own progress channel
+  (`sendChainHopProgress` is the precedent), never in the status string every consumer
+  reads as "is the tunnel up".
 - **The kill switch's `ESTABLISHED,RELATED` accept now scopes to the tunnel interface
   only.** Was scoped to **any** interface, so a connection opened over the physical NIC
   *before* connecting would keep running while the chain was armed — latent but not

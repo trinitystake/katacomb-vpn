@@ -112,7 +112,7 @@ export function chainDiversityIssues(entry: SentNode, exit: SentNode): Diversity
     })
   }
 
-  const country = (n: SentNode) => (n.country || '').trim()
+  const country = (n: SentNode) => n.country.trim()
   if (country(entry) !== '' && country(entry) === country(exit)) {
     issues.push({
       key: 'country',

@@ -36,13 +36,13 @@ function compareNodes(
   let cmp = 0
   switch (key) {
     case 'country':
-      cmp = (a.country || '').localeCompare(b.country || '')
+      cmp = a.country.localeCompare(b.country)
       break
     case 'city':
-      cmp = (a.city || '').localeCompare(b.city || '')
+      cmp = a.city.localeCompare(b.city)
       break
     case 'moniker':
-      cmp = (a.moniker || '').localeCompare(b.moniker || '')
+      cmp = a.moniker.localeCompare(b.moniker)
       break
     case 'type':
       cmp = a.type - b.type
@@ -141,7 +141,7 @@ export function useNodes(
     if (filter.bookmarkedOnly) nodes = nodes.filter((n) => bookmarks.has(n.address))
     if (filter.search) {
       const q = filter.search.toLowerCase()
-      nodes = nodes.filter((n) => (n.moniker || '').toLowerCase().includes(q))
+      nodes = nodes.filter((n) => n.moniker.toLowerCase().includes(q))
     }
 
     return nodes.slice().sort((a, b) => compareNodes(a, b, sortKey, sortDir, latencyMap, eligibilityRank))

@@ -240,6 +240,7 @@ validate_openvpn_config() {
       redirect-gateway) [[ "$value" =~ ^[A-Za-z0-9[:blank:]-]{0,64}$ ]] ;;
       topology) [[ "$value" == "subnet" ]] ;;
       explicit-exit-notify) [[ "$value" =~ ^[1-3]$ ]] ;;
+      *) echo "Error: OpenVPN directive '$lc_dir' has no argument grammar" >&2; exit 1 ;;
     esac || { echo "Error: OpenVPN directive '$lc_dir' has a malformed value" >&2; exit 1; }
   done < "$config"
   if [[ -n "$block" ]]; then

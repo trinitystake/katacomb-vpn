@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
 
 // --- isChildProxyCarryingTraffic (the spawn-to-tun-up window) ---
 
@@ -172,15 +172,15 @@ test('sessionFailureMessage: generic failure includes the underlying reason', ()
 const base = { attempt: 0, maxAttempts: 5, autoReconnect: true, intentional: false, hasSession: true }
 
 test('decideReconnect: aborts when there is no active session', () => {
-  assert.deepEqual(decideReconnect({ ...base, hasSession: false }), { action: 'abort' })
+  assert.deepEqual(decideReconnect({ ...base, hasSession: false }), { action: 'abort', reason: 'no-session' })
 })
 
 test('decideReconnect: aborts on an intentional disconnect', () => {
-  assert.deepEqual(decideReconnect({ ...base, intentional: true }), { action: 'abort' })
+  assert.deepEqual(decideReconnect({ ...base, intentional: true }), { action: 'abort', reason: 'intentional' })
 })
 
 test('decideReconnect: aborts when auto-reconnect is off', () => {
-  assert.deepEqual(decideReconnect({ ...base, autoReconnect: false }), { action: 'abort' })
+  assert.deepEqual(decideReconnect({ ...base, autoReconnect: false }), { action: 'abort', reason: 'auto-reconnect-off' })
 })
 
 test('decideReconnect: gives up once the next attempt would exceed the max', () => {
@@ -194,7 +194,7 @@ test('decideReconnect: retries with the incremented attempt and its backoff', ()
 test('decideReconnect: abort takes precedence over give-up', () => {
   assert.deepEqual(
     decideReconnect({ ...base, attempt: 5, maxAttempts: 5, intentional: true }),
-    { action: 'abort' },
+    { action: 'abort', reason: 'intentional' },
   )
 })
 
@@ -392,6 +392,42 @@ test('evaluateQuota: a node metering slightly past the cap still reads as expire
 test('isTunnelOneWay: traffic leaving with no reply, for long enough, is a dead tunnel', () => {
   assert.equal(isTunnelOneWay(ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS), true)
   assert.equal(isTunnelOneWay(5 * 1024 * 1024, 10 * 60_000), true)
+})
+
+// --- prunableUsageIds ---
+
+test('prunableUsageIds: forgets a session the chain no longer lists', () => {
+  assert.deepEqual(prunableUsageIds(['1', '2'], ['2'], null), ['1'])
+})
+
+test('prunableUsageIds: an empty chain read prunes NOTHING', () => {
+  // getSessionsForAddress returns [] for an unreachable RPC as well as for "none",
+  // and the kill switch left armed by standDownSession guarantees the unreachable
+  // case right after the usage is recorded. Live: #56152782 lost 462s and 37.5MB
+  // to this 18 seconds after they were written.
+  assert.deepEqual(prunableUsageIds(['1', '2'], [], null), [])
+})
+
+test('prunableUsageIds: never forgets the session that is connected right now', () => {
+  assert.deepEqual(prunableUsageIds(['1', '2'], ['2'], '1'), [])
+})
+
+test('prunableUsageIds: nothing remembered, nothing to prune', () => {
+  assert.deepEqual(prunableUsageIds([], ['2'], null), [])
+})
+
+// --- usageAccruesWithoutTunnelInterface ---
+
+test('usageAccruesWithoutTunnelInterface: proxy mode keeps spending the session with no interface', () => {
+  assert.equal(usageAccruesWithoutTunnelInterface('proxy'), true)
+})
+
+test('usageAccruesWithoutTunnelInterface: in tunnel mode a missing interface stops the clock', () => {
+  // The node stops metering the moment the tunnel drops (mainnet #56141731 settled
+  // 148.03s against 147s of interface uptime and was still 148.03s twenty-four
+  // minutes later, session still active), so counting wall-clock past that point
+  // bills the user for time the chain never charged for.
+  assert.equal(usageAccruesWithoutTunnelInterface('tunnel'), false)
 })
 
 test('isTunnelOneWay: an idle tunnel is not a dead one', () => {

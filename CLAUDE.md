@@ -350,6 +350,50 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   FLOOR, the chain overtakes it and wins, and entries are pruned once their session
   leaves `getActiveSessions()` — on a SUCCESSFUL read only, since an RPC failure
   returns no rows and must not read as "every session ended".
+- **…and the clock has to be STOPPED by something. An abort is not a teardown.** The
+  rule above only holds if `connectedAtMs` / `aliveUntilMs` are cleared when the tunnel
+  goes away, and for a whole class of drops nothing was doing it. With auto-reconnect
+  OFF, `decideReconnect` returns `abort`, and that branch used to just
+  `notifyTraySettled()` — no `stopQuotaWatchdog`, no `activeSessionId` reset. So an
+  interface that vanished (or a default route that moved under a tun2socks tunnel, or a
+  proxy child that exited) left main believing it was connected, with the quota watchdog
+  still ticking. `checkTunnelStalled` then made it worse: its `!readTunnelBytes()` branch
+  set `aliveUntilMs = now`, which is right for local-proxy mode (no interface by design)
+  and wrong in tunnel mode, where the interface IS the tunnel. Net effect: wall-clock
+  billed against a dead tunnel, written to `lastSessionUsage` as a permanent floor, and
+  `connectedAtMs ??= Date.now()` then carried that stale start into the NEXT connect —
+  including a brand-new session, whose gauge read the time since some earlier tunnel came
+  up. Reported live: 8 h bought, ~4 h connected, gauge showing 6 h+. Fixes: `abort` with
+  reason `'auto-reconnect-off'` goes through `standDownSession('stalled')` (so the kill
+  switch still follows the user's setting), and `usageAccruesWithoutTunnelInterface`
+  (pure, unit-tested) gates that `aliveUntilMs = now` on proxy mode. **The node meters
+  tunnel-UP time, not traffic** — verified on mainnet #56136929 (1216 s of interface
+  uptime, 1218.45 s settled) and #56141731 (147 s / 148.03 s, unchanged 24 minutes after
+  disconnect with the session still active) — so an idle-but-connected tunnel really is
+  billed, and our clock must track interface uptime exactly, neither more nor less.
+- **An empty session list is NOT proof of anything, because the failure is swallowed
+  a layer down.** `getSessionsForAddress` catches every error and `return []`, so
+  "the RPC is unreachable" and "this account has no sessions" arrive at every caller
+  as the same value — the `try/catch` around `readAllSessions()` in WALLET_SESSIONS
+  never fires. The usage-floor prune read that as *every session ended* and deleted
+  the store. That is not a rare race: `standDownSession` deliberately leaves the
+  DROP-all kill switch armed, so the chain is unreachable at precisely the moment the
+  usage has just been written. Measured live on mainnet #56152782 — 462 s of tunnel
+  and 37.5 MB recorded at 18:00:37, `session-usage.json` emptied to `{}` at 18:00:55
+  by the next poll, and the chain STILL reporting `duration: 0` ten minutes later, so
+  the gauge had no source of truth left and read zero for a session that had genuinely
+  run. **That session was never metered at all** — `inactiveAt - startAt` was EXACTLY
+  `statusTimeout` (7200s), the arithmetic proof that zero node proofs ever landed,
+  after two connects totalling ~644s and ~118MB. The same node metered #56136929 and
+  #56141731 correctly hours earlier, so this is per-SESSION, not a broken node, and it
+  is the single-hop twin of the multihop exit-hop finding below. The floor is
+  therefore not a nicety that bridges a lag: it is sometimes the ONLY record that
+  usage happened. `prunableUsageIds` (pure, unit-tested) is the
+  guard: an EMPTY list prunes nothing. Don't "fix" this by making
+  `getSessionsForAddress` throw — several callers rely on `[]` meaning "carry on"
+  (see `chain-service.ts`, which would otherwise delete every reconnect config on a
+  transient failure). Guard at the site that interprets the emptiness, and treat any
+  other `[]` from that function the same way.
 - **A session row is not necessarily live.** `getActiveSessions()` returns `'active'` AND
   `'inactive_pending'` — the state a session enters on its own when its quota runs out —
   so it can be labelled rather than vanishing mid-error. `decodeSession` maps the real

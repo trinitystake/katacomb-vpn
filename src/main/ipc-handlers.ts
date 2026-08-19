@@ -33,7 +33,7 @@ import {
 import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
 import type https from 'node:https'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -618,11 +618,19 @@ let lastRxMovedAtMs = 0
 // is NOT counted as session usage: on a tunnel the node has stopped answering, the
 // chain meters nothing, and neither should we.
 let aliveUntilMs = 0
+// The interface counters as of that same moment. /proc/net/dev stops existing with
+// the interface, so getTrafficStats() reads a flat ZERO once the tunnel is gone —
+// the exact mirror of the clock problem above, and in the opposite direction. A
+// stand-down triggered BY the interface vanishing would otherwise record this
+// connect's traffic as nothing, dropping the byte floor back to the chain's
+// not-yet-settled figure, which is the collapse lastSessionUsage exists to prevent.
+let aliveBytes = { rx: 0, tx: 0 }
 
 function resetOneWayTracking(): void {
   lastRxBytes = 0
   lastTxAtRx = 0
   lastRxMovedAtMs = 0
+  aliveBytes = { rx: 0, tx: 0 }
 }
 
 /**
@@ -644,12 +652,22 @@ function resetOneWayTracking(): void {
 function checkTunnelStalled(): boolean {
   const now = Date.now()
   const bytes = readTunnelBytes()
-  // Local-proxy mode has no interface to judge — abstain, and keep the clock running
-  // (the session is being spent either way).
   if (!bytes) {
-    aliveUntilMs = now
-    return false
+    // Local-proxy mode has no interface to judge — abstain, and keep the clock
+    // running (the session is being spent either way).
+    if (usageAccruesWithoutTunnelInterface(desiredMode)) {
+      aliveUntilMs = now
+      return false
+    }
+    // Tunnel mode: the interface IS the tunnel, so its absence is not "cannot tell",
+    // it is gone. aliveUntilMs deliberately stays where the last tick that still saw
+    // the interface left it — the node stops metering when the tunnel drops, so
+    // advancing it here billed the user for every second of a tunnel that no longer
+    // existed, and wrote that figure into lastSessionUsage as a permanent floor.
+    console.error('[vpn] the tunnel interface is gone — the tunnel is down')
+    return true
   }
+  aliveBytes = bytes
   if (lastRxMovedAtMs === 0 || bytes.rx > lastRxBytes) {
     lastRxBytes = bytes.rx
     lastTxAtRx = bytes.tx
@@ -1723,13 +1741,17 @@ function rememberSessionUsage(): void {
 }
 
 function rememberUsageFor(sessionId: string): void {
-  const live = getTrafficStats()
+  // readTunnelBytes(), not getTrafficStats(): the latter mutates the speed baseline
+  // as a side effect, and only this one returns null instead of a misleading zero
+  // when the interface has already gone. Bytes are clamped at the last confirmed
+  // sign of life exactly as the duration below is — same rule, same reason.
+  const live = readTunnelBytes() ?? aliveBytes
   const baseline = (lastKnownSessions as SessionInfo[]).find((s) => s?.id === sessionId)
   const baseDown = parseInt(baseline?.downloadBytes || '0', 10) || 0
   const baseUp = parseInt(baseline?.uploadBytes || '0', 10) || 0
   lastSessionUsage.set(sessionId, {
-    downloadBytes: String(baseDown + live.rxBytes),
-    uploadBytes: String(baseUp + live.txBytes),
+    downloadBytes: String(baseDown + live.rx),
+    uploadBytes: String(baseUp + live.tx),
     // Duration lags the same way bytes do — the node's final proof lands after we
     // disconnect — so remember it too, or the time gauge jumps backwards.
     //
@@ -1830,11 +1852,26 @@ async function attemptReconnect(): Promise<void> {
     hasSession: !!activeSessionId,
   })
 
-  // Nothing else broadcasts here, so a ladder that aborts mid-flight (e.g. the
-  // user switched auto-reconnect off between attempts) would strand the tray on
-  // its "connecting" badge. give-up doesn't need this — both its exits below end
-  // in a sendStateChange.
-  if (decision.action === 'abort') { notifyTraySettled(); return }
+  if (decision.action === 'abort') {
+    // Auto-reconnect is off and the tunnel dropped on its own: nothing else is going
+    // to clean up after it. Returning here left main believing it was still
+    // connected — activeSessionId set, connectedAtMs running, the quota watchdog
+    // ticking against an interface that no longer existed — so every second until
+    // the user next pressed Disconnect was recorded as session usage and persisted
+    // as a floor the chain can never undercut. Stand it down the way a stall does,
+    // which remembers the usage and leaves the kill switch to the user's setting.
+    if (decision.reason === 'auto-reconnect-off') {
+      console.log('[reconnect] Auto-reconnect is off and the tunnel dropped — standing the session down')
+      await standDownSession('stalled')
+      return
+    }
+    // Nothing else broadcasts here, so a ladder that aborts mid-flight (e.g. the
+    // user switched auto-reconnect off between attempts) would strand the tray on
+    // its "connecting" badge. give-up doesn't need this — both its exits below end
+    // in a sendStateChange.
+    notifyTraySettled()
+    return
+  }
   if (decision.action === 'give-up') {
     console.log('[reconnect] Max attempts reached, giving up')
     // When the node cut the tunnel slightly before our own estimate said it would,
@@ -2219,18 +2256,17 @@ export function registerIpcHandlers(): void {
       lastKnownSessions = enriched
       // The chain DELETES settled sessions, so a remembered entry with no row left is
       // a session that is over — drop it rather than let the store grow forever.
-      // Only on a successful read: an RPC failure returns no rows and must not be
-      // mistaken for "every session ended".
+      // NOT on an empty read, though: getSessionsForAddress swallows a failed query
+      // and returns [], so this try/catch never sees an unreachable chain. See
+      // prunableUsageIds for the live case that erased a session's whole usage.
       if (lastSessionUsage.size > 0) {
-        const live = new Set(sessions.map((s) => s.id))
-        let pruned = false
-        for (const id of lastSessionUsage.keys()) {
-          if (!live.has(id) && id !== activeSessionId) {
-            lastSessionUsage.delete(id)
-            pruned = true
-          }
-        }
-        if (pruned) saveSessionUsage()
+        const prunable = prunableUsageIds(
+          [...lastSessionUsage.keys()],
+          sessions.map((s) => s.id),
+          activeSessionId,
+        )
+        for (const id of prunable) lastSessionUsage.delete(id)
+        if (prunable.length > 0) saveSessionUsage()
       }
       return enriched
     } catch {

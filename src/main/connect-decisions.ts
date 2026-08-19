@@ -97,7 +97,13 @@ export function chainFailureMessage(opts: {
 }
 
 export type ReconnectDecision =
-  | { action: 'abort' }
+  /**
+   * The reason is load-bearing, not documentation. 'intentional' and 'no-session'
+   * mean someone has already torn the tunnel down; 'auto-reconnect-off' means it
+   * dropped on its own and NOTHING will clean up after it, so the caller has to
+   * stand the session down itself rather than leave main believing it is connected.
+   */
+  | { action: 'abort'; reason: 'no-session' | 'intentional' | 'auto-reconnect-off' }
   | { action: 'give-up' }
   | { action: 'retry'; attempt: number; delayMs: number }
 
@@ -113,7 +119,9 @@ export function decideReconnect(opts: {
   intentional: boolean
   hasSession: boolean
 }): ReconnectDecision {
-  if (!opts.hasSession || opts.intentional || !opts.autoReconnect) return { action: 'abort' }
+  if (!opts.hasSession) return { action: 'abort', reason: 'no-session' }
+  if (opts.intentional) return { action: 'abort', reason: 'intentional' }
+  if (!opts.autoReconnect) return { action: 'abort', reason: 'auto-reconnect-off' }
   const next = opts.attempt + 1
   if (next > opts.maxAttempts) return { action: 'give-up' }
   return { action: 'retry', attempt: next, delayMs: backoffDelayMs(next) }
@@ -321,6 +329,56 @@ export const ONE_WAY_SILENCE_MS = 90_000
  */
 export function isTunnelOneWay(txSinceLastRx: number, msSinceLastRx: number): boolean {
   return txSinceLastRx >= ONE_WAY_TX_FLOOR_BYTES && msSinceLastRx >= ONE_WAY_SILENCE_MS
+}
+
+/**
+ * Does a session keep accruing usage while NO tunnel interface exists?
+ *
+ * Only in local-proxy mode, which has no interface by design and is spending the
+ * session all the same. In tunnel mode the interface IS the tunnel, so its absence
+ * is not "unmeasurable", it is gone — and the node stops metering the moment that
+ * happens: mainnet #56141731 settled 148.03s against 147s of interface uptime and
+ * still read 148.03s twenty-four minutes later with the session active on chain.
+ *
+ * Treating the two the same is what let a dropped tunnel bill wall-clock. The
+ * figure is written to `lastSessionUsage` as a FLOOR the chain can never undercut,
+ * so an over-count there is permanent: the time gauge reads the wall clock since
+ * the session was bought instead of the time it was actually connected, and the
+ * quota watchdog ends a session that still has paid time on it.
+ */
+export function usageAccruesWithoutTunnelInterface(mode: 'tunnel' | 'proxy'): boolean {
+  return mode === 'proxy'
+}
+
+/**
+ * Which remembered-usage entries may be forgotten, given the session rows the chain
+ * just returned?
+ *
+ * The chain DELETES settled sessions, so an id no longer in the list is a session
+ * that is over and its floor can go. But `getSessionsForAddress` swallows a failed
+ * query and returns `[]`, which makes "the chain is unreachable" and "you have no
+ * sessions" the SAME VALUE at every call site above it — and pruning on that erases
+ * the floor for sessions that are very much alive.
+ *
+ * That is not a rare race, it is the normal state after a tunnel dies:
+ * `standDownSession` deliberately leaves the DROP-all kill switch armed, so the chain
+ * is unreachable precisely when the usage has just been recorded. Measured live on
+ * mainnet #56152782 — 462 s of tunnel and 37.5 MB written to session-usage.json at
+ * 18:00:37, the file emptied to `{}` at 18:00:55 by the next WALLET_SESSIONS poll,
+ * and the gauge left showing the chain's not-yet-settled 0 s.
+ *
+ * So an EMPTY list prunes NOTHING. A stale entry costs a few hundred bytes and is
+ * cleared by the next read that returns anything; a wrongly pruned one destroys the
+ * only record of usage the chain has not caught up with yet.
+ */
+export function prunableUsageIds(
+  remembered: string[],
+  liveSessionIds: string[],
+  activeSessionId: string | null,
+): string[] {
+  if (liveSessionIds.length === 0) return []
+  const live = new Set(liveSessionIds)
+  return remembered.filter((id) => !live.has(id) && id !== activeSessionId)
 }
 
 /**

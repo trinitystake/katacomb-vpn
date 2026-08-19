@@ -3,6 +3,7 @@ import { useNodeTest } from '../hooks/useNodeTest'
 import TrafficStats from './TrafficStats'
 import RpcStatus from './RpcStatus'
 import Spinner from './Spinner'
+import { SOCKS_DISPLAY_ADDR } from '../../shared/socks'
 
 /**
  * Always present: the RPC pill on the left matters most while *disconnected*,
@@ -25,7 +26,7 @@ export default function StatusBar() {
         {connected && status.proxyMode && (
           <>
             <span className="text-warning font-medium tracking-wide">PROXY</span>
-            <span className="text-text-secondary font-mono">SOCKS5 {status.socksAddr ?? '127.0.0.1:1080'}</span>
+            <span className="text-text-secondary font-mono">SOCKS5 {status.socksAddr ?? SOCKS_DISPLAY_ADDR}</span>
             <span className="text-text-tertiary">only apps set to use it are tunneled</span>
           </>
         )}

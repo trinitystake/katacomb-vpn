@@ -6,6 +6,7 @@ import { useChainDraft } from '../../contexts/ChainDraftContext'
 import { chainDiversityIssues, hasOperatorOverlap } from '../../utils/chain-diversity'
 import { udvpnPrice, type BillingType } from '../../utils/chain-node'
 import { checkFunds, formatP2p, insufficientFundsMessage } from '../../../shared/funds'
+import { SOCKS_DISPLAY_ADDR } from '../../../shared/socks'
 import { protocolMeta } from '../../utils/protocols'
 import { COUNTRY_CODES } from '../../utils/country-codes'
 import ConnectErrorActions from '../ConnectErrorActions'
@@ -478,7 +479,7 @@ export default function ChainReviewModal({ entry, exit, onClose }: Props) {
                 <span>
                   {mode === 'tunnel'
                     ? 'Routes your whole device through the chain. Needs admin rights.'
-                    : 'SOCKS5 on 127.0.0.1:1080. Only apps you point at it use the chain, and there is no kill switch.'}
+                    : `SOCKS5 on ${SOCKS_DISPLAY_ADDR}. Only apps you point at it use the chain, and there is no kill switch.`}
                 </span>
                 {mode === 'proxy' && (
                   <InfoTip label="More about local proxy mode">
@@ -683,7 +684,7 @@ export default function ChainReviewModal({ entry, exit, onClose }: Props) {
             </p>
             {mode === 'proxy' && (
               <p className="text-text-tertiary text-xs">
-                SOCKS5 at <span className="font-mono text-text-secondary">127.0.0.1:1080</span>. Only apps
+                SOCKS5 at <span className="font-mono text-text-secondary">{SOCKS_DISPLAY_ADDR}</span>. Only apps
                 pointed at it go through the chain.
               </p>
             )}

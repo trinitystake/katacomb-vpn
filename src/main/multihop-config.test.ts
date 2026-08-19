@@ -17,6 +17,7 @@ import {
 } from './multihop-config.ts'
 import { classifyV2RayInbound, assertSafeV2RayConfig } from './config-guard.ts'
 import { isUsableXRayReality } from './xray-config.ts'
+import { SOCKS_PORT } from '../shared/socks.ts'
 
 // The proxy/transport/security triples below are real combinations captured from
 // live v9.0.0 nodes on 2026-08-14 (probed at each node's root path). Their
@@ -92,6 +93,7 @@ test('the socks inbound is loopback-only, so assertSafeV2RayConfig accepts it', 
   const inbounds = config.inbounds as Record<string, unknown>[]
   assert.equal(inbounds.length, 1)
   assert.equal(inbounds[0].listen, '127.0.0.1')
+  assert.equal(inbounds[0].port, SOCKS_PORT) // cross-check vs shared/socks.ts
   assert.equal(inbounds[0].protocol, 'socks')
 })
 

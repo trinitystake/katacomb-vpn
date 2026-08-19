@@ -73,6 +73,8 @@ export const EXIT_TAG = 'exit-out'
 export const SOCKS_TAG = 'socks'
 
 const SOCKS_LISTEN = '127.0.0.1'
+// Inlined (not imported from shared/socks.ts) so the native test runner can
+// load this module directly; the test asserts the built config matches it.
 const SOCKS_PORT = 1080
 
 const PROXY_VLESS = 1

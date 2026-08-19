@@ -6,6 +6,7 @@ import {
   isValidTlsPin,
   type HysteriaMetadataEntry,
 } from './hysteria-config.ts'
+import { SOCKS_PORT } from '../shared/socks.ts'
 
 // A well-formed SHA-256 cert fingerprint in the colon-separated hex format the
 // go-sdk emits (hysteria2/metadata.go: tls_pin) and pinSHA256 accepts.
@@ -23,7 +24,8 @@ test('buildHysteria2Config builds a pinned client config with a loopback SOCKS5 
   assert.equal(cfg.server, '203.0.113.10:34567') // addr from addrs + port from metadata
   assert.equal(cfg.auth, UUID) // UUID doubles as the hysteria2 auth credential
   assert.deepEqual(cfg.tls, { insecure: true, pinSHA256: PIN })
-  assert.equal(cfg.socks5.listen, '127.0.0.1:1080') // the SOCKS_ADDR tun2socks dials
+  // the SOCKS_ADDR tun2socks dials; cross-checked against shared/socks.ts
+  assert.equal(cfg.socks5.listen, `127.0.0.1:${SOCKS_PORT}`)
   assert.equal(cfg.lazy, true) // bind SOCKS immediately; connect on first request
   assert.deepEqual(cfg.obfs, { type: 'salamander', salamander: { password: 'salt-pepper' } })
 })

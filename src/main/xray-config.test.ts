@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildXRayConfig, selectXRayEntry, buildXRayOutbound, normalizeXRayTlsPin, type XRayMetadataEntry } from './xray-config.ts'
 import { normalizeTlsPin } from './multihop-config.ts'
+import { SOCKS_PORT } from '../shared/socks.ts'
 
 // Real service_metadata captured from live xray node I3W0H0R2 (103.181.227.155),
 // version 9.0.0. Entry 0 is the flagship VLESS+Reality+TCP; the rest are other
@@ -28,7 +29,9 @@ test('buildXRayConfig builds a VLESS+Reality+TCP outbound from live metadata', (
   // loopback SOCKS inbound that tun2socks dials
   assert.equal(cfg.inbounds[0].protocol, 'socks')
   assert.equal(cfg.inbounds[0].listen, '127.0.0.1')
-  assert.equal(cfg.inbounds[0].port, 1080)
+  // Cross-check: the inlined port in xray-config.ts must match shared/socks.ts
+  // (this module is import-free for the native runner, same as error-markers).
+  assert.equal(cfg.inbounds[0].port, SOCKS_PORT)
 
   const ob = cfg.outbounds[0]
   assert.equal(ob.protocol, 'vless')

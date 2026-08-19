@@ -27,6 +27,7 @@ import { loadSettings } from './settings'
 import { parseDefaultRoute, v2rayRunArgs, firstIPv4FromGetent } from './vpn-parse'
 import { isDnsProvisionError } from './connect-decisions'
 import { DNS_PROVISION_FAILED } from '../shared/error-markers'
+import { SOCKS_PORT } from '../shared/socks'
 
 const WG_IFACE = 'sntl0'
 
@@ -100,7 +101,6 @@ const TUN_IFACE = 'sntl-tun'
 // teardown ambiguous (awg-down and ovpn-down are not interchangeable).
 const OVPN_IFACE = 'sntl-ovpn'
 const OVPN_CONFIG_NAME = 'openvpn.conf'
-const SOCKS_PORT = 1080
 const SOCKS_ADDR = `127.0.0.1:${SOCKS_PORT}`
 
 let activeChild: ChildProcess | null = null

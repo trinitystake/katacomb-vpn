@@ -108,6 +108,8 @@ const FLOW_VISION = 2
 const TRANSPORT_NETWORK: Record<number, string> = { 1: 'tcp' }
 
 const SOCKS_LISTEN = '127.0.0.1'
+// Inlined (not imported from shared/socks.ts) so the native test runner can
+// load this module directly; the test asserts the built config matches it.
 const SOCKS_PORT = 1080
 
 /**

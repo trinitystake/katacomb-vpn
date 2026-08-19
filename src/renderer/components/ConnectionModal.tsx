@@ -11,6 +11,7 @@ import { nodeStatusMeta, isNodeConnectable } from '../utils/node-status'
 import { useBalance } from '../hooks/useBalance'
 import { checkFunds, formatP2p, insufficientFundsMessage } from '../../shared/funds'
 import InsufficientFunds from './InsufficientFunds'
+import { SOCKS_DISPLAY_ADDR } from '../../shared/socks'
 
 interface Props {
   node: SentNode
@@ -563,7 +564,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
                 <p className="text-text-tertiary text-xs">
                   {mode === 'tunnel'
                     ? 'Routes your whole device through the node (needs admin rights).'
-                    : 'Runs a SOCKS5 proxy on 127.0.0.1:1080. No admin password, but only apps you point at it are tunneled. No kill switch.'}
+                    : `Runs a SOCKS5 proxy on ${SOCKS_DISPLAY_ADDR}. No admin password, but only apps you point at it are tunneled. No kill switch.`}
                 </p>
               </div>
             )}
@@ -670,7 +671,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
             {proxyCapable && mode === 'proxy' ? (
               <p className="text-text-tertiary text-sm">
-                SOCKS5 proxy at <span className="font-mono text-text-secondary">127.0.0.1:1080</span>. Only apps
+                SOCKS5 proxy at <span className="font-mono text-text-secondary">{SOCKS_DISPLAY_ADDR}</span>. Only apps
                 configured to use it are tunneled. The rest of your traffic still goes out directly.
               </p>
             ) : node.type === 1 ? (

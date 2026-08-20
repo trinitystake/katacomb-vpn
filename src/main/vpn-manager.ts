@@ -299,6 +299,28 @@ function isTunUp(): boolean {
 }
 
 /**
+ * Last known good hostname -> IPv4, so a bring-up that has no working DNS can
+ * still reach a host we already resolved once.
+ *
+ * A reconnect runs with the kill switch ARMED (the previous connect armed it)
+ * and no tunnel, and the chain permits DNS only out the tunnel interface, so
+ * getent cannot answer. Both pinners then fall through with the hostname intact
+ * (pinV2RayNodeAddresses/pinWireguardEndpoint keep the original on a null
+ * resolve), and extractV2RayRemoteHost fails the whole bring-up with "Cannot
+ * determine V2Ray remote server address" before tun2socks is ever spawned. That
+ * is a deadlock: DNS needs the tunnel, the tunnel needs DNS. Measured live
+ * 2026-08-20 on a v2ray session - all five reconnect attempts died there, each
+ * leaving a core behind, and the user was left with no internet.
+ *
+ * Keyed BY HOSTNAME so it can never answer for a different node, and consulted
+ * ONLY after a live lookup fails, so working DNS always wins. While the chain is
+ * armed the cached address is also the only one that CAN work, since the kill
+ * switch whitelists exactly the /32 the last bring-up pinned - a fresh answer
+ * pointing elsewhere would be dropped anyway.
+ */
+const lastResolvedIpByHost = new Map<string, string>()
+
+/**
  * Resolve a hostname to a single IPv4 via getent. Returns IPs unchanged, null
  * if it can't resolve or the input has shell metacharacters. Used both to pin
  * the v2ray config endpoint (before spawn) and to derive the bypass route — so
@@ -311,9 +333,13 @@ function resolveHostToIPv4(host: string): string | null {
   if (!/^[a-zA-Z0-9._-]+$/.test(host)) return null
   try {
     const out = execFileSync('getent', ['ahostsv4', host], { stdio: 'pipe', timeout: 5000 }).toString()
-    return firstIPv4FromGetent(out)
+    const ip = firstIPv4FromGetent(out)
+    if (ip) {
+      lastResolvedIpByHost.set(host, ip)
+      return ip
+    }
   } catch { /* ignore */ }
-  return null
+  return lastResolvedIpByHost.get(host) ?? null
 }
 
 /**

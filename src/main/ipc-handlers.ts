@@ -2327,7 +2327,17 @@ export function registerIpcHandlers(): void {
   })
 
   handle(IPC.WALLET_SESSIONS, async () => {
-    if (isVpnActive()) return lastKnownSessions
+    // While a tunnel is up the chain is often unreachable through it, so the
+    // cache is the answer. An EMPTY cache is not an answer, though: it renders
+    // a live paid session as "No active sessions" for the whole connection, and
+    // the tab's Refresh is deliberately disabled while connected (chainFrozen),
+    // so nothing can correct it until the user disconnects. Reported live
+    // 2026-08-20 on an active mainnet session with ~800MB of quota left, after
+    // a startup read failed and cached []. Falling through costs one query we
+    // would otherwise skip and cannot make things worse - the alternative is
+    // showing nothing - and the chain does answer through a tunnel often enough
+    // to be worth asking (verified through a live v2ray node the same day).
+    if (isVpnActive() && lastKnownSessions.length > 0) return lastKnownSessions
     // On app startup this can run before the wallet is restored (it races the
     // first walletGetAddress); restore it here too so sessions auto-load instead
     // of returning [] until a manual Refresh.
@@ -2369,7 +2379,10 @@ export function registerIpcHandlers(): void {
       }
       return enriched
     } catch {
-      reportRpcFailure()
+      // Only blame the endpoint when the path is not ours to explain: this can
+      // now run with a tunnel up (the empty-cache fall-through above), and our
+      // own tunnel or kill switch failing the query is not an RPC fault.
+      if (!isVpnActive()) reportRpcFailure()
       return lastKnownSessions
     }
   })

@@ -24,7 +24,9 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 - **Nodes** — virtualized table over the whole network (thousands of nodes). Filter by
   country, city, protocol, residential/whitelisted, bookmarks; hide duplicates; sort on
   any column. Latency probes (single or batch) and a download speed test.
-- **Multi-Hop** — Your device -> Entry node -> Exit Node -> The internet.
+- **Multi-hop** — build a two-node chain, with the same picker, filters and latency
+  probes as the Nodes tab. Candidates are graded for eligibility before you can pick
+  them; what a chain does and does not buy you is under *Connecting* below.
 - **Plans** — discover provider plans, subscribe, then start sessions on any node in the
   plan. Includes a subscription manager for cancelling and for the auto-renewal policy.
 - **Sessions** — every active session with usage, price and remaining allowance;
@@ -34,11 +36,16 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 
 - **Kill switch** — iptables rules that drop everything outside the tunnel, armed on
   connect and torn down on disconnect (with a self-healing marker if the app dies mid-way).
-- **DNS** — pick a resolver (Cloudflare, Quad9, NextDNS, …) applied on connect. On the
-  V2Ray-family protocols the queries go out over DoH, so the node can't read them.
+- **DNS** — pick a resolver (Cloudflare, Quad9, NextDNS, …) applied on connect. On
+  WireGuard and AmneziaWG your choice *replaces* the list the node pushed rather than
+  joining it, so a node cannot install itself as your first resolver. On the
+  V2Ray-family protocols the queries additionally go out over DoH, so the node can't
+  read them.
 - **Split tunneling** — CIDR routes that bypass the tunnel; private ranges are excluded
   by default.
-- **Localt Network Sharing** — each other devices on your network (SSH, printers, NAS) while the    kill switch is on. This traffic stays on your LAN and is not encrypted by the VPN.
+- **Local Network Sharing** — reach other devices on your network (SSH, printers, NAS)
+  while the kill switch is on. It opens the private ranges in the firewall and changes
+  no routing, so that traffic stays on your LAN and is not carried by the VPN.
 - **Auto-reconnect** — up to 5 attempts with backoff when a tunnel drops.
 - **Proxy mode** — for the SOCKS-capable protocols, run just the local listener at
   `127.0.0.1:1080` without touching system routing or asking for root.
@@ -58,7 +65,7 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 
 **Selling bandwidth** — the other side of the network
 
-- **Provider** — a fifth tab, hidden by default. Turn on *Provider mode* in Settings (the
+- **Provider** — a sixth tab, hidden by default. Turn on *Provider mode* in Settings (the
   switch is per wallet, not global), or it appears on its own if the active wallet already
   has a provider registered on chain.
 - Register a provider, create plans and activate them, lease nodes from their operators

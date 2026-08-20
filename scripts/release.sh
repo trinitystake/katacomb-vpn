@@ -22,8 +22,12 @@
 # THE WHOLE RELEASE, of which this script is only step 1. The order is not
 # cosmetic — every one of these was learned by getting it wrong on 1.0.0.
 #
-#   0. notes      Rewrite RELEASE_NOTES.md. Preflight refuses a heading naming
-#                 another version, but it cannot tell you the BODY is stale.
+#   0. notes      Rewrite the PROSE of RELEASE_NOTES.md, and of README.md if the
+#                 release changed what the app does. Every version STRING in both
+#                 (notes title, "Fixes in", README status line, and the install
+#                 commands in both) is rewritten for you in step 1 and committed as
+#                 "Update docs for <version>" - do not hand-edit those. What no
+#                 script can tell you is that the BODY is stale.
 #                 You do NOT have to work out whether step 2 applies: preflight
 #                 diffs electron-builder.yml and resources/linux/ against the last
 #                 tag and says so, and the closing output prints the steps that
@@ -71,6 +75,12 @@
 # Nothing is public until step 7, so anything that fails before it unwinds with:
 #     git tag -d v<version> && git reset --hard HEAD~1   # release commit is HEAD
 #     git rebase --onto <before-release> <release-commit>  # if work sits on top
+#
+# Note there are TWO commits to unwind past once a run reaches step 8: the docs
+# commit from step 1 and the release commit itself. A run that dies in between
+# leaves only the docs commit, and it is deliberately NOT rolled back - the notes
+# and README are correct for the version you are cutting either way, and a re-run
+# finds them already up to date and makes no second commit.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -99,9 +109,14 @@ run()  { if [ "$DRY_RUN" = 1 ]; then printf '  would run: %s\n' "$*"; else "$@";
 generate_release_notes() {
   local version=$1 prev_tag=$2 src_notes=$3 out_file=$4
 
+  # This script's own commits are excluded, because they are not fixes and
+  # because they compound: the docs commit lands BEFORE the build, so a run that
+  # dies later leaves it in history, and the next attempt lists it as a fix for
+  # the very release it belongs to - one fresh bullet per attempt.
   local fixes=""
   if [ -n "$prev_tag" ]; then
-    fixes=$(git log "$prev_tag"..HEAD --pretty=format:"- %s")
+    fixes=$(git log "$prev_tag"..HEAD --pretty=format:"- %s" |
+      grep -vE "^- (Update docs for|Update release notes for|Release v)[0-9. ]*$" || true)
   fi
 
   if [ ! -f "$src_notes" ]; then
@@ -154,6 +169,28 @@ EOF
   sed -i -E "s/katacomb-vpn-[0-9]+\.[0-9]+\.[0-9]+\.AppImage/katacomb-vpn-${version}.AppImage/g" "$out_file"
 }
 
+# Same idea for README.md, which carries the version in five places: the status
+# line and the four install commands. Unlike the notes it is hand-written prose,
+# so this only ever rewrites those five and never generates a file from scratch —
+# a missing README is left missing rather than invented.
+generate_readme() {
+  local version=$1 src_readme=$2 out_file=$3
+
+  [ -f "$src_readme" ] || return 0
+  cp "$src_readme" "$out_file"
+
+  sed -i -E "s/(\*\*Status:\*\* release )\([0-9]+\.[0-9]+\.[0-9]+\)/\1(${version})/" "$out_file"
+  sed -i -E "s/katacomb-vpn_[0-9]+\.[0-9]+\.[0-9]+_amd64\.deb/katacomb-vpn_${version}_amd64.deb/g" "$out_file"
+  sed -i -E "s/katacomb-vpn-[0-9]+\.[0-9]+\.[0-9]+\.AppImage/katacomb-vpn-${version}.AppImage/g" "$out_file"
+
+  # A sed that silently matches nothing is the exact failure this function exists
+  # to prevent, and the status line is the one that is prose and can be reworded.
+  # The filename patterns are mechanical, so a miss there means the install
+  # commands were restructured and want looking at too.
+  grep -q "\*\*Status:\*\* release ($version)" "$out_file" ||
+    die "$src_readme: no '**Status:** release (x.y.z)' line to bump. Reword generate_readme() in scripts/release.sh to match the new wording."
+}
+
 usage() {
   sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -175,6 +212,7 @@ done
 
 TAG="v$VERSION"
 NOTES=RELEASE_NOTES.md
+READMEDOC=README.md
 DEB_NAME="katacomb-vpn_${VERSION}_amd64.deb"
 APPIMAGE_NAME="katacomb-vpn-${VERSION}.AppImage"
 
@@ -261,23 +299,44 @@ else
 fi
 
 # RELEASE_NOTES.md's title, fixes section and install commands are derived
-# from git history, not typed by hand — generated into a temp file first (read
-# only, so a dry run sees the same thing a real run would) and compared
-# against what is on disk, rather than requiring the disk copy to already
-# match a version that has not been cut yet.
+# from git history, not typed by hand, and README.md carries the same version in
+# its status line and install commands — both are generated into a temp file
+# first (read only, so a dry run sees the same thing a real run would) and
+# compared against what is on disk, rather than requiring the disk copy to
+# already match a version that has not been cut yet.
+#
+# Both land in ONE commit: they are the same edit, and splitting them means a
+# release where the notes were bumped and the README was not is representable.
+DOCS_CHANGED=0
+sync_doc() {
+  local target=$1 generated=$2
+  # generate_readme declines to invent a file that is not there.
+  [ -s "$generated" ] || { info "$target absent, nothing to bump"; return 0; }
+  if [ -f "$target" ] && diff -q "$target" "$generated" >/dev/null 2>&1; then
+    ok "$target already up to date for $VERSION"
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    info "$target would be $([ -f "$target" ] && echo updated || echo created) for $VERSION"
+    return 0
+  fi
+  cp "$generated" "$target"
+  git add "$target"
+  DOCS_CHANGED=1
+  ok "$target updated for $VERSION"
+}
+
 NOTES_TMP="$(mktemp)"
+README_TMP="$(mktemp)"
 generate_release_notes "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
-if [ -f "$NOTES" ] && diff -q "$NOTES" "$NOTES_TMP" >/dev/null 2>&1; then
-  ok "$NOTES already up to date for $VERSION"
-elif [ "$DRY_RUN" = 1 ]; then
-  info "$NOTES would be $([ -f "$NOTES" ] && echo updated || echo created) for $VERSION"
-else
-  cp "$NOTES_TMP" "$NOTES"
-  git add "$NOTES"
-  git commit -q -m "Update release notes for $VERSION"
-  ok "$NOTES updated from commits since ${PREV_TAG:-the start} and committed"
+generate_readme "$VERSION" "$READMEDOC" "$README_TMP"
+sync_doc "$NOTES" "$NOTES_TMP"
+sync_doc "$READMEDOC" "$README_TMP"
+if [ "$DOCS_CHANGED" = 1 ]; then
+  git commit -q -m "Update docs for $VERSION"
+  ok "committed: $(git log --oneline -1)"
 fi
-rm -f "$NOTES_TMP"
+rm -f "$NOTES_TMP" "$README_TMP"
 
 # --- 2. clean build outputs -------------------------------------------------
 # After preflight, so a refused release (stale notes, dirty tree, existing tag)

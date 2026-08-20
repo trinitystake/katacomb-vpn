@@ -4,68 +4,32 @@ A desktop client for the Sentinel decentralized VPN network. Pick a node, pay fo
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
+A maintenance release. No new features: it corrects how a paid session is measured,
+reported and recovered.
+
+## Highlights
+
+- **Usage is no longer billed against a tunnel that has gone away.** With
+  auto-reconnect off, a dropped interface left the clock running, so a session could
+  report hours it never ran, and that figure was written down as a floor the chain
+  could not undercut. Time now accrues only up to the last confirmed sign of life.
+- **Auto-reconnect works with the kill switch armed.** Names only resolve through the
+  tunnel, so re-pinning the node's endpoint failed at precisely the moment reconnect
+  needed it. The last known good address is kept for that case, and a reconnect that
+  fails is now torn down before the next attempt instead of being left half-built.
+- **A live session no longer reads as "No active sessions".** A paid, connected
+  session could be missing from the Sessions tab for as long as the connection lasted.
+- **The resolver you choose replaces the node's on WireGuard and AmneziaWG**, rather
+  than being added behind it. A node that lists a dead resolver first cost roughly 30
+  seconds of failed lookups on the first page you opened after connecting, once per
+  connection, which is why it read as a slow start rather than a fault.
+- **Stricter OpenVPN config validation.** Directives whose arguments cannot be parsed
+  are now refused rather than passed through, in the privileged helper as well as in
+  the app.
+
 ## Fixes in 1.0.1
 
-- **WebGL crash on systems without GPU.** The app now falls back gracefully to a
-  text-based country list if your system lacks graphics acceleration. The map tab
-  stays functional either way.
-- **.deb launch failure on Ubuntu 24.04.** Fixed missing system library declarations
-  that caused the package to install cleanly but crash at runtime with no error message.
-  Tested on Debian 12, Debian 13, Ubuntu 22.04, and Ubuntu 24.04.
-
-## Multi-hop chains
-
-The headline of this release. A chain routes you through two nodes, `you > entry >
-exit > internet`, so neither one knows both who you are and where you are going.
-
-- **Its own tab**, with the same node picker, filters and latency probes as the Nodes tab.
-- **Per-hop wallets.** A session carries its buyer's address and that record is public,
-  so paying both hops from one wallet lets either node find the other. You can assign a
-  second wallet to the exit hop. The app never transfers between them, and it warns you
-  if the chain shows the two wallets have funded each other.
-- **Both hops must carry TLS or Reality.** Stricter than the single-hop rule, because a
-  cleartext entry hop announces the circuit to your own ISP, which is the thing a chain
-  is bought to prevent.
-- **The exit hop is bought and provisioned through the entry**, never contacted directly,
-  so it does not see your address at purchase time.
-- **Both sessions are refunded if either half fails.**
-- Nodes are graded for eligibility before you pay, not after.
-
-## Local network sharing
-
-A toggle that lets you reach printers, NAS boxes and other machines on your LAN while
-the kill switch is armed. It adds firewall exceptions for the private ranges only, and
-nothing else about your routing changes.
-
-## Connection integrity
-
-- **A live interface is no longer treated as a working tunnel.** `wg-quick` reports
-  success whether or not the node ever answers, so the app now proves traffic actually
-  flows after every connect, and stands the session down if a tunnel goes one-way.
-- **Kill switch and LAN sharing apply immediately.** Previously they only took effect on
-  the next connect.
-- **The kill switch's established-connection rule is now scoped to the tunnel interface.**
-  It previously matched any interface, which could have kept a pre-connect flow alive on
-  the physical adapter.
-- The node's TLS certificate is pinned on the single-hop XRAY path.
-
-## Fixes
-
-- Disconnect could freeze the whole app and then report that the kill switch could not be
-  turned off, leaving no internet and no way to retry.
-- An unanswered helper install prompt could hang startup indefinitely.
-- The RPC health banner blamed a healthy endpoint every time a session ended, and offered
-  to switch away from it.
-- Save Routes in split tunnelling failed silently on invalid input.
-- Errors from the main process reached the UI wrapped in IPC boilerplate, hiding their
-  real cause.
-- Tray icon badge position, and theme-switch latency.
-
-## Interface
-
-- The connect modal shows the node's full address, endpoint and ASN.
-- Node filter checkboxes are collapsed, and eligibility is sortable.
-- Session buttons and expiry wording are clearer about what actually happens on chain.
+_Generated at release time from the commit subjects since the previous tag._
 
 ## Known limitations
 

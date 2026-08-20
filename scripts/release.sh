@@ -109,13 +109,19 @@ run()  { if [ "$DRY_RUN" = 1 ]; then printf '  would run: %s\n' "$*"; else "$@";
 generate_release_notes() {
   local version=$1 prev_tag=$2 src_notes=$3 out_file=$4
 
-  # This script's own commits are excluded, because they are not fixes and
+  # --no-merges because this repo's merge subjects restate the branch they carry
+  # ("Merge the empty session cache fix" over "Do not let an empty session cache
+  # hide a live session"), so keeping both lists every fix twice, in the vaguer
+  # wording. Nothing is lost: the branch's own commits are on the first-parent
+  # side of the range and survive.
+  #
+  # This script's own commits are excluded too, because they are not fixes and
   # because they compound: the docs commit lands BEFORE the build, so a run that
   # dies later leaves it in history, and the next attempt lists it as a fix for
   # the very release it belongs to - one fresh bullet per attempt.
   local fixes=""
   if [ -n "$prev_tag" ]; then
-    fixes=$(git log "$prev_tag"..HEAD --pretty=format:"- %s" |
+    fixes=$(git log "$prev_tag"..HEAD --no-merges --pretty=format:"- %s" |
       grep -vE "^- (Update docs for|Update release notes for|Release v)[0-9. ]*$" || true)
   fi
 

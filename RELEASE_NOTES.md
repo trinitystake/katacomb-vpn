@@ -1,4 +1,4 @@
-# Katacomb VPN 1.0.3
+# Katacomb VPN 1.1.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
@@ -27,12 +27,16 @@ reported and recovered.
   are now refused rather than passed through, in the privileged helper as well as in
   the app.
 
-## Fixes in 1.0.3
+## Fixes in 1.1.0
 
-- Dial IP lookups and tunnel probes on fresh sockets
-- Refresh the public IP display without the artificial wait
-- Speed up the connect flows
-- updated README.md
+- Label session resume as Reconnect, tooltip the cost difference
+- Count each plan's nodes during rescan and hide unbuyable plans by default
+- Polish the Plans tab from live screenshots and document the rebuild
+- Rebuild the Plans tab: My plans + Catalog with smart connect
+- Extract the shared connect flow and the plan formatters
+- Add smart connect for plans: ranked auto-pick with a money-safe ladder
+- Give plan sessions the same cache and quota safety as node sessions
+- Route plan and subscription chain calls through the fast path
 
 ## Known limitations
 
@@ -60,7 +64,7 @@ Pop!\_OS, Zorin).
 **Recommended: .deb**
 
 ```bash
-sudo apt install ./katacomb-vpn_1.0.3_amd64.deb
+sudo apt install ./katacomb-vpn_1.1.0_amd64.deb
 ```
 
 Installs a root daemon, so connect and disconnect never prompt for a password. It needs
@@ -69,8 +73,8 @@ one log out and log back in after the first install before that takes effect.
 **Alternative: AppImage**
 
 ```bash
-chmod +x katacomb-vpn-1.0.3.AppImage
-./katacomb-vpn-1.0.3.AppImage
+chmod +x katacomb-vpn-1.1.0.AppImage
+./katacomb-vpn-1.1.0.AppImage
 ```
 
 No install needed. Every privileged operation prompts for a password instead.

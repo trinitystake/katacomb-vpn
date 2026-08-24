@@ -1,4 +1,4 @@
-# Katacomb VPN 1.0.2
+# Katacomb VPN 1.0.3
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
@@ -27,34 +27,12 @@ reported and recovered.
   are now refused rather than passed through, in the privileged helper as well as in
   the app.
 
-## Fixes in 1.0.2
+## Fixes in 1.0.3
 
-- Drop merge subjects from the generated fixes list
-- Rewrite the release notes body for a maintenance release
-- Bump the README's version strings from release.sh
-- Do not let an empty session cache hide a live session
-- Fall back to the last known good address when DNS is unavailable
-- Tear down a failed reconnect attempt before retrying
-- Delete the shipped refactor plan documents
-- Fail closed when an OpenVPN directive has no argument grammar
-- Unexport internal-only symbols
-- Drop the leftover || '' guards the normalizeNodes contract forbids
-- Validate OpenVPN directive arguments, repeats and essentials in the bash mirror too
-- Put one disk-cache implementation behind the three cache modules
-- Fold the four child-proxy bring-up copies and the shared connect tail into helpers
-- Single-source the SOCKS listener port and address
-- Delete the dead getSocksAddr export
-- Add the refactor-findings implementation plan and its spec
-- Correct today's metering claim: the node bills wall-clock, not tunnel-up time
-- Separate "the node stopped forwarding" from "the tunnel went away"
-- Stop billing session usage against a tunnel that is gone
-- Record why the kill switch's silence and the early "connected" are both correct
-- Use the chosen resolver on WireGuard, and stop leaking wg-quick's rules
-- Keep the balance refresh usable in proxy mode
-- Disable Sessions Refresh while the tunnel freezes the chain
+- Dial IP lookups and tunnel probes on fresh sockets
+- Refresh the public IP display without the artificial wait
+- Speed up the connect flows
 - updated README.md
-- Fix release notes generation: dry-run compatible, actually replaces fixes body
-- Automate RELEASE_NOTES.md updates from commit messages
 
 ## Known limitations
 
@@ -82,7 +60,7 @@ Pop!\_OS, Zorin).
 **Recommended: .deb**
 
 ```bash
-sudo apt install ./katacomb-vpn_1.0.2_amd64.deb
+sudo apt install ./katacomb-vpn_1.0.3_amd64.deb
 ```
 
 Installs a root daemon, so connect and disconnect never prompt for a password. It needs
@@ -91,8 +69,8 @@ one log out and log back in after the first install before that takes effect.
 **Alternative: AppImage**
 
 ```bash
-chmod +x katacomb-vpn-1.0.2.AppImage
-./katacomb-vpn-1.0.2.AppImage
+chmod +x katacomb-vpn-1.0.3.AppImage
+./katacomb-vpn-1.0.3.AppImage
 ```
 
 No install needed. Every privileged operation prompts for a password instead.

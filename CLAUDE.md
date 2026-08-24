@@ -492,6 +492,14 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   defended against. Fixed 2026-08-15: both IPv4 (:570) and IPv6 (:289) rules now carry
   `-o $VPN_IFACE` / `-o "$vpn_iface"`, matching the honest scope of the comment. Measured
   as latent-not-active before the fix: zero pre-connect flows were observed on the NIC.
+  **The app's own pooled sockets are the observed victim of that scoping.** Chromium's
+  keep-alive pool holds sockets opened while idle (the IP display's 60s poll); after a
+  connect arms the chain, a reused pooled socket's packets exit the physical NIC and are
+  silently dropped, and with no RST Chromium cannot detect the corpse — the request hangs
+  to its abort. Seen live 2026-08-24 as the IP display taking ~6s after a Sessions-tab
+  reconnect. `fetchFreshSocket` (ipc-handlers.ts) is the defence: the tunnel probes and
+  IP lookups dial a fresh, unpooled socket every time. Anything else in main that fetches
+  the same host on both sides of a tunnel transition inherits this hazard.
 
 ### Session lifecycle (verified against live mainnet, not inferred)
 

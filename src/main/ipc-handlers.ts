@@ -34,6 +34,7 @@ import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainE
 import { openChainFlow } from './chain-clients'
 import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
+import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
@@ -878,6 +879,30 @@ const TUNNEL_PROBE_TIMEOUT_MS = 6000
 const TUNNEL_PROBE_ATTEMPTS = 3
 
 /**
+ * GET over a FRESH socket every time (`agent: false` → Connection: close, no
+ * pooling). Chromium's pooled keep-alive sockets are a trap across a tunnel
+ * transition: a socket opened BEFORE connect routes out the physical NIC, and
+ * once the kill switch is armed its packets are silently DROPped — no RST ever
+ * arrives, so Chromium cannot detect the corpse and a reused socket just hangs
+ * until the caller's abort. Live symptom: the IP display taking ~6s after a
+ * Sessions-tab reconnect (stale socket from the disconnect-time lookup, 5s
+ * hang, then the 1s retry dialing fresh through the tunnel) while every fresh
+ * dial answered in ~100ms. The probes and IP lookups are rare and tiny, so one
+ * TLS setup per request costs nothing.
+ */
+function fetchFreshSocket(url: string, timeoutMs: number): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpsGet(url, { agent: false, signal: AbortSignal.timeout(timeoutMs) }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk: string) => { body += chunk })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+    })
+    req.on('error', reject)
+  })
+}
+
+/**
  * Does the tunnel we just built actually carry traffic? An interface existing does
  * not mean it does: `wg-quick up` reports success whether or not the node ever
  * answers a handshake, so a node that has dropped our peer yields a perfectly
@@ -899,19 +924,18 @@ async function tunnelCarriesTraffic(): Promise<boolean> {
     // DNS included) and by IP (proves routing even when DNS is what is broken).
     // Either succeeding was already a pass when they ran in sequence — racing
     // them just stops a node that blackholes one target from costing that
-    // target's whole timeout before the other gets its turn.
-    const probes = [TUNNEL_PROBE_URL, TUNNEL_PROBE_IP_URL].map((url) => {
-      const ctrl = new AbortController()
-      const timer = setTimeout(() => ctrl.abort(), TUNNEL_PROBE_TIMEOUT_MS)
-      const done = net.fetch(url, { signal: ctrl.signal })
-        .then((res) => { if (!res.ok) throw new Error(`${url} answered ${res.status}`) })
-        .finally(() => clearTimeout(timer))
-      return { done, ctrl }
-    })
-    // Promise.any: resolves on the first success, rejects only when BOTH failed
-    // (and swallows the individual rejections either way).
-    const passed = await Promise.any(probes.map((p) => p.done)).then(() => true, () => false)
-    for (const p of probes) p.ctrl.abort()
+    // target's whole timeout before the other gets its turn. Fresh sockets on
+    // purpose (see fetchFreshSocket): a probe that reuses a pooled socket from
+    // BEFORE this tunnel existed is measuring the kill switch, not the tunnel.
+    // Promise.any resolves on the first success, rejects only when both failed
+    // (and swallows the individual rejections either way); the loser closes
+    // itself at its own timeout, holding no pooled state.
+    const passed = await Promise.any(
+      [TUNNEL_PROBE_URL, TUNNEL_PROBE_IP_URL].map(async (url) => {
+        const res = await fetchFreshSocket(url, TUNNEL_PROBE_TIMEOUT_MS)
+        if (res.status < 200 || res.status >= 300) throw new Error(`${url} answered ${res.status}`)
+      }),
+    ).then(() => true, () => false)
     if (passed) return true
     const now = readTunnelBytes()
     if (before && now && now.rx - before.rx >= TUNNEL_PROBE_MIN_RX_BYTES) return true
@@ -3534,9 +3558,9 @@ export function registerIpcHandlers(): void {
   handle(IPC.NETWORK_GET_IP, async (_event, includeGeo?: boolean) => {
     if (includeGeo !== false) {
       try {
-        const response = await net.fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(IP_LOOKUP_TIMEOUT_MS) })
-        if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`)
-        const json = await response.json() as {
+        const response = await fetchFreshSocket('https://ipapi.co/json/', IP_LOOKUP_TIMEOUT_MS)
+        if (response.status !== 200) throw new Error(`IP lookup failed: ${response.status}`)
+        const json = JSON.parse(response.body) as {
           ip?: string; country_name?: string; city?: string; asn?: string; org?: string
         }
         return {
@@ -3551,10 +3575,9 @@ export function registerIpcHandlers(): void {
       }
     }
     try {
-      const response = await net.fetch('https://icanhazip.com', { signal: AbortSignal.timeout(IP_LOOKUP_TIMEOUT_MS) })
-      if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`)
-      const ip = (await response.text()).trim()
-      return { ip, country: '', city: '', asn: '', org: '' }
+      const response = await fetchFreshSocket('https://icanhazip.com', IP_LOOKUP_TIMEOUT_MS)
+      if (response.status !== 200) throw new Error(`IP lookup failed: ${response.status}`)
+      return { ip: response.body.trim(), country: '', city: '', asn: '', org: '' }
     } catch {
       return { ip: '', country: '', city: '', asn: '', org: '' }
     }

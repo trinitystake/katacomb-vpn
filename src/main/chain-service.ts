@@ -30,7 +30,7 @@ import { buildHysteria2Config } from './hysteria-config'
 import { buildAmneziaWgConfig } from './amneziawg-config'
 import { buildOpenVpnConfig } from './openvpn-config'
 import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
-import { resolveRpcBase } from './chain-clients'
+import { resolveRpcBase, TX_POLL_INTERVAL_MS } from './chain-clients'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 // A node in this app's threat model may accept the TLS connection but never reply
@@ -397,8 +397,15 @@ export async function endSession(params: {
   sessionId: string
 }): Promise<void> {
   const { wallet, address, sessionId } = params
+  // This is the money-recovery path (refunds + the user's End button): the
+  // resolved base skips the endpoint's per-request redirect and the 1s poll
+  // discovers the committed cancel ~2s sooner than CosmJS's default.
   const client = await withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
+    resolveRpcBase(getRpcEndpoint()).then((base) =>
+      SigningSentinelClient.connectWithSigner(base, wallet, {
+        gasPrice: GAS_PRICE,
+        broadcastPollIntervalMs: TX_POLL_INTERVAL_MS,
+      })),
     RPC_CONNECT_TIMEOUT_MS,
     'RPC connect',
   )

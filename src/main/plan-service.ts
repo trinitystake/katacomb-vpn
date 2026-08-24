@@ -1,4 +1,3 @@
-import { GasPrice } from '@cosmjs/stargate'
 import { DirectSecp256k1HdWallet } from '@cosmjs/proto-signing'
 import Long from 'long'
 import {
@@ -11,12 +10,14 @@ import {
   RenewalPricePolicy,
   planStartSession,
   subscriptionStartSession,
+  subscriptionCancel,
+  subscriptionRenew,
+  subscriptionUpdate,
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow } from 'electron'
-import { getRpcEndpoint } from './settings'
-import { withTimeout } from './async-utils'
+import { openChainFlow, openChainQuery } from './chain-clients'
 import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
-import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
+import { TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
 import { getCachedProviders } from './provider-cache'
@@ -33,10 +34,10 @@ function enrichPlans(plans: CachedPlan[], providers: ProviderInfo[]): EnrichedPl
   }))
 }
 
-const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 const PAGE_SIZE = 50
-// Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
-const RPC_CONNECT_TIMEOUT_MS = 10_000
+// Bound on the subscriptionsForAccount paged read (8 pages). Beyond it the rest
+// is ignored: a consumer wallet with 400+ subscriptions is out of scope.
+const SUBS_MAX = 400
 // A session-creating tx may confirm after we stop polling — surface that instead of a
 // raw CosmJS TimeoutError so the user can check the Session tab (finding H2).
 const TX_TIMEOUT_MESSAGE =
@@ -86,7 +87,7 @@ function sendDiscoverProgress(done: number, total: number, phase: 'connecting' |
 
 export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
   sendDiscoverProgress(0, maxCount, 'connecting')
-  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  const { query: client, disconnect } = await openChainQuery()
   try {
     sendDiscoverProgress(0, maxCount, 'fetching')
     const results: CachedPlan[] = []
@@ -125,7 +126,7 @@ export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
     const { providers } = getCachedProviders()
     return enrichPlans(results, providers)
   } finally {
-    client.disconnect()
+    disconnect()
   }
 }
 
@@ -143,7 +144,7 @@ export function invalidatePlanNodes(planId: string): void {
   planNodesCache.delete(planId)
 }
 
-export async function listNodesForPlan(planId: string): Promise<string[]> {
+export async function listNodesForPlan(planId: string, sharedClient?: SentinelClient): Promise<string[]> {
   if (!/^\d+$/.test(planId)) return []
   const now = Date.now()
   const cached = planNodesCache.get(planId)
@@ -151,7 +152,9 @@ export async function listNodesForPlan(planId: string): Promise<string[]> {
     return cached.addresses
   }
 
-  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
+  const own = sharedClient ? null : await openChainQuery()
+  const client = sharedClient ?? own!.query
   try {
     const addresses: string[] = []
     let nextKey: Uint8Array = new Uint8Array()
@@ -188,7 +191,7 @@ export async function listNodesForPlan(planId: string): Promise<string[]> {
     planNodesCache.set(planId, { addresses, fetchedAt: now })
     return addresses
   } finally {
-    client.disconnect()
+    own?.disconnect()
   }
 }
 
@@ -200,12 +203,15 @@ export async function listPlansForNode(nodeAddress: string): Promise<EnrichedPla
   const queue = cache.plans.map((p) => p.id)
   const CONCURRENCY = 4
 
+  // One connection for the whole fan-out; cache misses used to open one each.
+  const { query, disconnect } = await openChainQuery()
+
   async function worker(): Promise<void> {
     while (true) {
       const id = queue.shift()
       if (!id) return
       try {
-        const addresses = await listNodesForPlan(id)
+        const addresses = await listNodesForPlan(id, query)
         if (addresses.includes(nodeAddress)) compatibleIds.add(id)
       } catch {
         // skip individual failures; partial result is better than none
@@ -213,7 +219,11 @@ export async function listPlansForNode(nodeAddress: string): Promise<EnrichedPla
     }
   }
 
-  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()))
+  try {
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()))
+  } finally {
+    disconnect()
+  }
 
   const compatible = cache.plans.filter((p) => compatibleIds.has(p.id))
   const { providers } = getCachedProviders()
@@ -256,32 +266,55 @@ export type SubscriptionInfo = {
   inactiveAt: string | null
 }
 
+/** The paged subscriptionsForAccount read every subscription view builds on. */
+async function fetchSubscriptionsForAccount(
+  client: SentinelClient,
+  walletAddress: string,
+): Promise<ChainSubscription[]> {
+  const subs: ChainSubscription[] = []
+  let nextKey: Uint8Array = new Uint8Array()
+  while (subs.length < SUBS_MAX) {
+    const resp = await client.sentinelQuery?.subscription.subscriptionsForAccount(walletAddress, {
+      key: nextKey,
+      offset: Long.fromNumber(0, true),
+      limit: Long.fromNumber(PAGE_SIZE, true),
+      countTotal: false,
+      reverse: false,
+    })
+    const page = (resp?.subscriptions || []) as unknown as ChainSubscription[]
+    subs.push(...page)
+    const nk = resp?.pagination?.nextKey
+    if (!nk || nk.length === 0 || page.length === 0) break
+    nextKey = nk
+  }
+  return subs
+}
+
+function toSubscriptionInfo(s: ChainSubscription): SubscriptionInfo {
+  return {
+    id: s.id.toString(),
+    planId: s.planId ? s.planId.toString() : '0',
+    status: s.status,
+    renewalPricePolicy: s.renewalPricePolicy ?? 0,
+    startAt: s.startAt ? s.startAt.toISOString() : null,
+    inactiveAt: s.inactiveAt ? s.inactiveAt.toISOString() : null,
+  }
+}
+
 /**
  * Every subscription this wallet owns — plan-based AND node (per-GB/hour) ones,
  * which is what makes this different from queryPlanAllocations (plan-only, and
  * its callers depend on that filter).
  */
-export async function querySubscriptions(walletAddress: string): Promise<SubscriptionInfo[]> {
-  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+export async function querySubscriptions(walletAddress: string, sharedClient?: SentinelClient): Promise<SubscriptionInfo[]> {
+  // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
+  const own = sharedClient ? null : await openChainQuery()
+  const client = sharedClient ?? own!.query
   try {
-    const resp = await client.sentinelQuery?.subscription.subscriptionsForAccount(walletAddress, {
-      key: new Uint8Array(),
-      offset: Long.fromNumber(0, true),
-      limit: Long.fromNumber(50, true),
-      countTotal: false,
-      reverse: false,
-    })
-    const subs = (resp?.subscriptions || []) as unknown as ChainSubscription[]
-    return subs.map((s) => ({
-      id: s.id.toString(),
-      planId: s.planId ? s.planId.toString() : '0',
-      status: s.status,
-      renewalPricePolicy: s.renewalPricePolicy ?? 0,
-      startAt: s.startAt ? s.startAt.toISOString() : null,
-      inactiveAt: s.inactiveAt ? s.inactiveAt.toISOString() : null,
-    }))
+    const subs = await fetchSubscriptionsForAccount(client, walletAddress)
+    return subs.map(toSubscriptionInfo)
   } finally {
-    client.disconnect()
+    own?.disconnect()
   }
 }
 
@@ -294,25 +327,27 @@ export async function cancelSubscription(params: {
   wallet: DirectSecp256k1HdWallet
   address: string
   subscriptionId: string
+  /** Share a connect flow's signing client (see chain-clients.ts); the caller owns it. */
+  client?: SigningSentinelClient
 }): Promise<void> {
   const { wallet, address, subscriptionId } = params
-  const client = await withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    RPC_CONNECT_TIMEOUT_MS,
-    'RPC connect',
-  )
+  const ownFlow = params.client ? null : await openChainFlow(wallet)
+  const client = params.client ?? ownFlow!.signing
   try {
+    // Raw msg + signAndBroadcast rather than the SDK convenience method, which
+    // never sets a timeoutHeight — same bound as the session-creating broadcasts.
+    const msg = subscriptionCancel({
+      from: address,
+      id: Long.fromString(subscriptionId, true),
+    })
+    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.subscriptionCancel({
-        from: address,
-        id: Long.fromString(subscriptionId, true),
-        memo: 'katacomb-vpn: cancel subscription',
-      } as Parameters<typeof client.subscriptionCancel>[0]),
+      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: cancel subscription', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
     assertTxSucceeded(tx, 'Transaction')
   } finally {
-    client.disconnect()
+    ownFlow?.disconnect()
   }
 }
 
@@ -326,26 +361,27 @@ export async function renewSubscription(params: {
   address: string
   subscriptionId: string
   denom: string
+  /** Share a connect flow's signing client (see chain-clients.ts); the caller owns it. */
+  client?: SigningSentinelClient
 }): Promise<void> {
   const { wallet, address, subscriptionId, denom } = params
-  const client = await withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    RPC_CONNECT_TIMEOUT_MS,
-    'RPC connect',
-  )
+  const ownFlow = params.client ? null : await openChainFlow(wallet)
+  const client = params.client ?? ownFlow!.signing
   try {
+    // Raw msg form for the timeoutHeight, as in cancelSubscription above.
+    const msg = subscriptionRenew({
+      from: address,
+      id: Long.fromString(subscriptionId, true),
+      denom,
+    })
+    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.subscriptionRenew({
-        from: address,
-        id: Long.fromString(subscriptionId, true),
-        denom,
-        memo: 'katacomb-vpn: renew subscription',
-      } as Parameters<typeof client.subscriptionRenew>[0]),
+      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: renew subscription', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
     assertTxSucceeded(tx, 'Transaction')
   } finally {
-    client.disconnect()
+    ownFlow?.disconnect()
   }
 }
 
@@ -355,72 +391,85 @@ export async function updateSubscriptionPolicy(params: {
   address: string
   subscriptionId: string
   policy: number
+  /** Share a connect flow's signing client (see chain-clients.ts); the caller owns it. */
+  client?: SigningSentinelClient
 }): Promise<void> {
   const { wallet, address, subscriptionId, policy } = params
-  const client = await withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    RPC_CONNECT_TIMEOUT_MS,
-    'RPC connect',
-  )
+  const ownFlow = params.client ? null : await openChainFlow(wallet)
+  const client = params.client ?? ownFlow!.signing
   try {
+    // Raw msg form for the timeoutHeight, as in cancelSubscription above.
+    const msg = subscriptionUpdate({
+      from: address,
+      id: Long.fromString(subscriptionId, true),
+      renewalPricePolicy: policy as RenewalPricePolicy,
+    })
+    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.subscriptionUpdate({
-        from: address,
-        id: Long.fromString(subscriptionId, true),
-        renewalPricePolicy: policy as RenewalPricePolicy,
-        memo: 'katacomb-vpn: update renewal policy',
-      } as Parameters<typeof client.subscriptionUpdate>[0]),
+      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: update renewal policy', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
     assertTxSucceeded(tx, 'Transaction')
   } finally {
-    client.disconnect()
+    ownFlow?.disconnect()
   }
 }
 
-export async function queryPlanAllocations(walletAddress: string): Promise<PlanAllocationInfo[]> {
-  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
-  try {
-    const resp = await client.sentinelQuery?.subscription.subscriptionsForAccount(walletAddress, {
-      key: new Uint8Array(),
-      offset: Long.fromNumber(0, true),
-      limit: Long.fromNumber(50, true),
-      countTotal: false,
-      reverse: false,
-    })
-    const subs = (resp?.subscriptions || []) as unknown as ChainSubscription[]
-    // Only plan-based subscriptions (planId > 0)
-    const planSubs = subs.filter((s) => s.planId && !s.planId.isZero())
-    if (planSubs.length === 0) return []
+/**
+ * Resolve plan rows for the given ids, reading the plan cache first and hitting
+ * the chain (in parallel, best-effort) only for ids the cache doesn't know.
+ */
+async function resolvePlanDetails(client: SentinelClient, planIds: string[]): Promise<Map<string, CachedPlan>> {
+  const details = new Map<string, CachedPlan>()
+  const cachedById = new Map(getCachedPlans().plans.map((p) => [p.id, p]))
+  const missing: string[] = []
+  for (const pid of planIds) {
+    const hit = cachedById.get(pid)
+    if (hit) details.set(pid, hit)
+    else missing.push(pid)
+  }
+  await Promise.allSettled(missing.map(async (pid) => {
+    const p = await client.sentinelQuery?.plan.plan(Long.fromString(pid, true))
+    if (p) details.set(pid, toCachedPlan(p as unknown as ChainPlan))
+  }))
+  return details
+}
 
-    // Resolve plan details for each unique planId
-    const uniquePlanIds = Array.from(new Set(planSubs.map((s) => s.planId.toString())))
-    const planDetails = new Map<string, ChainPlan>()
-    for (const pid of uniquePlanIds) {
-      try {
-        const p = await client.sentinelQuery?.plan.plan(Long.fromString(pid, true))
-        if (p) planDetails.set(pid, p as unknown as ChainPlan)
-      } catch {
-        // best-effort per plan
-      }
+/** Plan-based subscriptions joined with their plan's size and validity. */
+function joinAllocations(planSubs: ChainSubscription[], planDetails: Map<string, CachedPlan>): PlanAllocationInfo[] {
+  return planSubs.map((s) => {
+    const pid = s.planId.toString()
+    const plan = planDetails.get(pid)
+    return {
+      subscriptionId: s.id.toString(),
+      planId: pid,
+      planProvAddress: plan?.provAddress || '',
+      planBytes: plan?.bytes || '0',
+      planDurationSeconds: plan ? plan.durationSeconds : null,
+      startAt: s.startAt ? s.startAt.toISOString() : null,
+      inactiveAt: s.inactiveAt ? s.inactiveAt.toISOString() : null,
+      status: s.status,
     }
+  })
+}
 
-    return planSubs.map((s) => {
-      const pid = s.planId.toString()
-      const plan = planDetails.get(pid)
-      return {
-        subscriptionId: s.id.toString(),
-        planId: pid,
-        planProvAddress: plan?.provAddress || '',
-        planBytes: plan?.bytes || '0',
-        planDurationSeconds: plan ? durationToSeconds(plan.duration) : null,
-        startAt: s.startAt ? s.startAt.toISOString() : null,
-        inactiveAt: s.inactiveAt ? s.inactiveAt.toISOString() : null,
-        status: s.status,
-      }
-    })
+function onlyPlanSubs(subs: ChainSubscription[]): ChainSubscription[] {
+  return subs.filter((s) => s.planId && !s.planId.isZero())
+}
+
+export async function queryPlanAllocations(walletAddress: string, sharedClient?: SentinelClient): Promise<PlanAllocationInfo[]> {
+  // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
+  const own = sharedClient ? null : await openChainQuery()
+  const client = sharedClient ?? own!.query
+  try {
+    const subs = await fetchSubscriptionsForAccount(client, walletAddress)
+    const planSubs = onlyPlanSubs(subs)
+    if (planSubs.length === 0) return []
+    const uniquePlanIds = Array.from(new Set(planSubs.map((s) => s.planId.toString())))
+    const planDetails = await resolvePlanDetails(client, uniquePlanIds)
+    return joinAllocations(planSubs, planDetails)
   } finally {
-    client.disconnect()
+    own?.disconnect()
   }
 }
 
@@ -433,12 +482,8 @@ export async function startSessionWithExistingSubscription(params: {
   client?: SigningSentinelClient
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, subscriptionId, nodeAddress } = params
-  const ownClient = !params.client
-  const client = params.client ?? await withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    RPC_CONNECT_TIMEOUT_MS,
-    'RPC connect',
-  )
+  const ownFlow = params.client ? null : await openChainFlow(wallet)
+  const client = params.client ?? ownFlow!.signing
   try {
     // The raw msg + signAndBroadcast form (not the SDK convenience method) so a
     // timeoutHeight can bound how late this session-creating tx can land, the
@@ -469,7 +514,7 @@ export async function startSessionWithExistingSubscription(params: {
       subscriptionId: parsed.value.subscriptionId?.toString() || subscriptionId,
     }
   } finally {
-    if (ownClient) client.disconnect()
+    ownFlow?.disconnect()
   }
 }
 
@@ -486,12 +531,8 @@ export async function subscribeToPlan(params: {
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, planId, denom, nodeAddress } = params
   const renewalPricePolicy = params.renewalPricePolicy ?? RenewalPricePolicy.RENEWAL_PRICE_POLICY_ALWAYS
-  const ownClient = !params.client
-  const client = params.client ?? await withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    RPC_CONNECT_TIMEOUT_MS,
-    'RPC connect',
-  )
+  const ownFlow = params.client ? null : await openChainFlow(wallet)
+  const client = params.client ?? ownFlow!.signing
   try {
     // Raw msg + signAndBroadcast rather than the SDK convenience method, so the
     // session-creating tx carries a timeoutHeight like subscribeToNode's (H2).
@@ -536,6 +577,6 @@ export async function subscribeToPlan(params: {
       subscriptionId: subscriptionId?.toString() || '',
     }
   } finally {
-    if (ownClient) client.disconnect()
+    ownFlow?.disconnect()
   }
 }

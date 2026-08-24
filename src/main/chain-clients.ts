@@ -16,7 +16,7 @@ const REDIRECT_PROBE_TIMEOUT_MS = 3_000
  * average. 1s costs a couple of extra getTx queries and returns that time to
  * the user on every paid connect.
  */
-const TX_POLL_INTERVAL_MS = 1_000
+export const TX_POLL_INTERVAL_MS = 1_000
 
 /**
  * The RPC base each configured endpoint actually serves from, discovered once
@@ -87,13 +87,34 @@ class FlowSigningClient extends SigningSentinelClient {
  *
  * Ownership: the handler that opened the flow calls `disconnect()` in its
  * `finally`; anything the flow's clients are passed to must never disconnect
- * them. Scope: the connect flows only — one-shot operations elsewhere keep the
- * simple connect-per-call pattern, where an extra round trip doesn't matter.
+ * them. Scope: the connect flows and the plan/subscription operations — the
+ * few remaining one-shot reads elsewhere wrap their endpoint in
+ * `resolveRpcBase` instead.
  */
 export interface ChainFlow {
   query: SentinelClient
   signing: SigningSentinelClient
   disconnect: () => void
+}
+
+/**
+ * The read-only sibling of `openChainFlow`: one query client against the
+ * redirect-resolved base, for handlers that batch several chain reads. Same
+ * ownership rule — the opener disconnects; anything handed the client must
+ * never disconnect it.
+ */
+export interface ChainQuery {
+  query: SentinelClient
+  disconnect: () => void
+}
+
+export async function openChainQuery(): Promise<ChainQuery> {
+  const base = await resolveRpcBase(getRpcEndpoint())
+  const tmClient = await withTimeout(connectComet(base), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  return {
+    query: new FlowQueryClient(tmClient),
+    disconnect: () => tmClient.disconnect(),
+  }
 }
 
 export async function openChainFlow(wallet: OfflineSigner): Promise<ChainFlow> {

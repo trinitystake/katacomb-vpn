@@ -3634,6 +3634,11 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
+    // The purchase needs the chain, which is unreachable through our own tunnel —
+    // fail fast instead of burning the RPC timeout (the renderer gates too).
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before starting a new session. The chain is unreachable through the tunnel.')
+    }
 
     // Phase A — the pre-payment checks, the shared RPC connection and the
     // handshake endpoint (read-only), all in parallel. Any failure aborts with
@@ -3717,6 +3722,10 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
+    // Fail fast while our own tunnel makes the chain unreachable (see PLAN_SUBSCRIBE).
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before starting a new session. The chain is unreachable through the tunnel.')
+    }
 
     // Phase A — same shape as the paid flows even though this one only spends
     // gas: preflight, gas-reserve check and endpoint resolve in parallel over
@@ -3814,8 +3823,21 @@ export function registerIpcHandlers(): void {
     const wallet = getWallet()
     const address = getAddress()
     if (!wallet || !address) throw new Error('Wallet not loaded')
-    await assertSufficientFunds(0)
-    await cancelSubscription({ wallet, address, subscriptionId: params.subscriptionId }).catch(noteChainError)
+    // The tx needs the chain, which is unreachable through our own tunnel — fail
+    // fast instead of hanging to the RPC timeout (same rule as WALLET_END_SESSION).
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before managing subscriptions. The chain is unreachable through the tunnel.')
+    }
+    // One connection for the funds check and the tx.
+    const flow = await openChainFlow(wallet)
+    try {
+      await assertSufficientFunds(0, flow.query)
+      await cancelSubscription({
+        wallet, address, subscriptionId: params.subscriptionId, client: flow.signing,
+      }).catch(noteChainError)
+    } finally {
+      flow.disconnect()
+    }
   })
 
   /**
@@ -3833,10 +3855,18 @@ export function registerIpcHandlers(): void {
     const wallet = getWallet()
     const address = getAddress()
     if (!wallet || !address) throw new Error('Wallet not loaded')
-    await assertSufficientFunds(cachedPlanCost(params.planId, params.denom))
-    await renewSubscription({
-      wallet, address, subscriptionId: params.subscriptionId, denom: params.denom,
-    }).catch(noteChainError)
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before managing subscriptions. The chain is unreachable through the tunnel.')
+    }
+    const flow = await openChainFlow(wallet)
+    try {
+      await assertSufficientFunds(cachedPlanCost(params.planId, params.denom), flow.query)
+      await renewSubscription({
+        wallet, address, subscriptionId: params.subscriptionId, denom: params.denom, client: flow.signing,
+      }).catch(noteChainError)
+    } finally {
+      flow.disconnect()
+    }
   })
 
   handle(IPC.SUBSCRIPTION_UPDATE_POLICY, async (_event, params: { subscriptionId: string; policy: number }) => {
@@ -3848,10 +3878,18 @@ export function registerIpcHandlers(): void {
     const wallet = getWallet()
     const address = getAddress()
     if (!wallet || !address) throw new Error('Wallet not loaded')
-    await assertSufficientFunds(0)
-    await updateSubscriptionPolicy({
-      wallet, address, subscriptionId: params.subscriptionId, policy: params.policy,
-    }).catch(noteChainError)
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before managing subscriptions. The chain is unreachable through the tunnel.')
+    }
+    const flow = await openChainFlow(wallet)
+    try {
+      await assertSufficientFunds(0, flow.query)
+      await updateSubscriptionPolicy({
+        wallet, address, subscriptionId: params.subscriptionId, policy: params.policy, client: flow.signing,
+      }).catch(noteChainError)
+    } finally {
+      flow.disconnect()
+    }
   })
 
   handle(IPC.PROVIDER_GET, async (_event, params: { address: string }) => {

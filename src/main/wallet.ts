@@ -21,6 +21,7 @@ import {
 import { WALLET_PREFIX } from '../shared/chain-constants'
 import { formatHdPath } from '../shared/hd-path'
 import { withTimeout } from './async-utils'
+import { resolveRpcBase } from './chain-clients'
 
 // BIP-44 path for Cosmos SDK chains (coin type 118). Varying the account
 // segment yields a different address from the same seed, the way Keplr /
@@ -289,7 +290,7 @@ export async function getBalanceForAddress(address: string, client?: SentinelCli
   if (!address) return []
   // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
   const own = !client
-  const c = client ?? await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  const c = client ?? await withTimeout(SentinelClient.connect(await resolveRpcBase(getRpcEndpoint())), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
     const balances = await c.getAllBalances(address)
     return balances.map((b) => ({ denom: b.denom, amount: b.amount }))
@@ -318,7 +319,7 @@ export async function findTransferBetween(
 ): Promise<{ checked: boolean; linked: boolean }> {
   if (!a || !b || a === b) return { checked: true, linked: false }
   try {
-    const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+    const client = await withTimeout(SentinelClient.connect(await resolveRpcBase(getRpcEndpoint())), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
     try {
       for (const [sender, recipient] of [[a, b], [b, a]]) {
         const hits = await client.searchTx([
@@ -447,7 +448,7 @@ export async function getSessionsForAddress(address: string, client?: SentinelCl
   try {
     // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
     const own = !client
-    const c = client ?? await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+    const c = client ?? await withTimeout(SentinelClient.connect(await resolveRpcBase(getRpcEndpoint())), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
     try {
       const result = await c.sentinelQuery?.session.sessionsForAccount(address, {
         key: new Uint8Array(),

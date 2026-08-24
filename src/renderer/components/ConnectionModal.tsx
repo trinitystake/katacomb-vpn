@@ -218,6 +218,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
         // sentinel.subscription.v3, no new subscription is created.
         const res = await window.api.planStartSessionFromSub({
           subscriptionId: matchingAllocation.subscriptionId,
+          planId: matchingAllocation.planId,
           nodeAddress: node.address,
           nodeMoniker: node.moniker,
           nodeCountry: node.country,

@@ -134,6 +134,7 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   planDiscover: (maxId: number) => ipcRenderer.invoke(IPC.PLAN_DISCOVER, maxId),
+  planOverview: () => ipcRenderer.invoke(IPC.PLAN_OVERVIEW),
   planListCached: () => ipcRenderer.invoke(IPC.PLAN_LIST_CACHED),
   planAllocations: () => ipcRenderer.invoke(IPC.PLAN_ALLOCATIONS),
   planSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SUBSCRIBE, params),

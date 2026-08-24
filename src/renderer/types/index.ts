@@ -353,6 +353,20 @@ export interface DiscoverProgress {
   phase: 'connecting' | 'fetching' | 'done'
 }
 
+/**
+ * Everything the Plans tab shows, in one IPC round-trip. `stale: true` means the
+ * subscription/allocation half is a memory of the last successful chain read
+ * (the tunnel is up, or the read failed); the plans half always answers from the
+ * disk cache with its own `fetchedAt`.
+ */
+export interface PlanOverview {
+  plans: PlanInfo[]
+  fetchedAt: number | null
+  subscriptions: SubscriptionSummary[]
+  allocations: PlanAllocation[]
+  stale: boolean
+}
+
 // --- Provider console ---
 
 export interface ProviderDetailsInput {
@@ -524,6 +538,7 @@ export interface ElectronAPI {
   networkGetIp: (includeGeo?: boolean) => Promise<IpInfo>
 
   planDiscover: (maxId: number) => Promise<PlanInfo[]>
+  planOverview: () => Promise<PlanOverview>
   planListCached: () => Promise<{ plans: PlanInfo[]; fetchedAt: number | null }>
   planAllocations: () => Promise<PlanAllocation[]>
   planSubscribe: (params: {
@@ -538,6 +553,8 @@ export interface ElectronAPI {
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
   planStartSessionFromSub: (params: {
     subscriptionId: string
+    /** The subscription's plan, for main's quota fallback when the chain row is unreadable. */
+    planId: string
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string

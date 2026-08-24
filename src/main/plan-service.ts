@@ -473,6 +473,47 @@ export async function queryPlanAllocations(walletAddress: string, sharedClient?:
   }
 }
 
+export interface PlanOverview {
+  plans: EnrichedPlan[]
+  fetchedAt: number | null
+  subscriptions: SubscriptionInfo[]
+  allocations: PlanAllocationInfo[]
+}
+
+/**
+ * Everything the Plans tab needs in one round-trip: cached plans plus ONE paged
+ * subscriptionsForAccount read feeding both the subscription list and the
+ * allocations join. Replaces the tab's separate PLAN_LIST_CACHED /
+ * SUBSCRIPTION_LIST / PLAN_ALLOCATIONS calls (three connections, two of them
+ * reading the same rows).
+ */
+export async function getPlanOverview(walletAddress: string): Promise<PlanOverview> {
+  const { query, disconnect } = await openChainQuery()
+  try {
+    const subs = await fetchSubscriptionsForAccount(query, walletAddress)
+    const planSubs = onlyPlanSubs(subs)
+    const uniquePlanIds = Array.from(new Set(planSubs.map((s) => s.planId.toString())))
+    const planDetails = await resolvePlanDetails(query, uniquePlanIds)
+    const { plans, fetchedAt } = listCachedPlans()
+    return {
+      plans,
+      fetchedAt,
+      subscriptions: subs.map(toSubscriptionInfo),
+      allocations: joinAllocations(planSubs, planDetails),
+    }
+  } finally {
+    disconnect()
+  }
+}
+
+/**
+ * A plan's last known node list, TTL ignored — for answering while our own
+ * tunnel makes the chain unreachable, where stale beats a false "no nodes".
+ */
+export function getCachedPlanNodes(planId: string): string[] | null {
+  return planNodesCache.get(planId)?.addresses ?? null
+}
+
 export async function startSessionWithExistingSubscription(params: {
   wallet: DirectSecp256k1HdWallet
   address: string

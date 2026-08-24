@@ -63,6 +63,7 @@ export const IPC = {
 
   // Plan-based subscriptions
   PLAN_DISCOVER: 'plan:discover',
+  PLAN_OVERVIEW: 'plan:overview',
   PLAN_LIST_CACHED: 'plan:list-cached',
   PLAN_ALLOCATIONS: 'plan:allocations',
   PLAN_SUBSCRIBE: 'plan:subscribe',

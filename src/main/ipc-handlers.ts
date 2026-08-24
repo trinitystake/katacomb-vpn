@@ -37,7 +37,7 @@ import type https from 'node:https'
 import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, type QuotaVerdict } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, type PlanOverview } from './plan-service'
 import {
   getMyProvider,
   getProviderDeposit,
@@ -239,17 +239,21 @@ let killSwitchTeardownFailed = false
 let lastKnownBalance: { denom: string; amount: string }[] | null = null
 let lastKnownSessions: unknown[] = []
 let cachedNodes: { address: string; moniker: string; country: string; type: number }[] = []
+// Last successful PLAN_OVERVIEW chain read, served with stale: true while the
+// tunnel is up. Wallet-scoped, so WALLET_SWITCH clears it.
+let lastPlanOverview: PlanOverview | null = null
 
 /**
  * Everything a session row carries that the chain itself doesn't: the node's name,
  * and — for a multihop chain — which end this hop is and what its partner's id is.
  *
- * All THREE writers of `lastKnownSessions` must go through this. WALLET_SESSIONS
- * returns that cache verbatim while a tunnel is up, so a writer that skips the
- * chain fields makes the Sessions tab forget it is looking at a chain for exactly
- * as long as the chain is connected — it offers "End" on one hop, which tears the
- * tunnel down and leaves the other hop paid for. Verified against a live chain
- * (#55112370 -> #55112373) after the connect handlers were missed the first time.
+ * Every writer of `lastKnownSessions` reaches this through `primeSessionsCache`
+ * below. WALLET_SESSIONS returns that cache verbatim while a tunnel is up, so a
+ * writer that skips the chain fields makes the Sessions tab forget it is looking
+ * at a chain for exactly as long as the chain is connected — it offers "End" on
+ * one hop, which tears the tunnel down and leaves the other hop paid for.
+ * Verified against a live chain (#55112370 -> #55112373) after the connect
+ * handlers were missed the first time.
  */
 function decorateSessionRow<T extends { id: string; nodeAddress: string }>(session: T): T & {
   nodeMoniker: string
@@ -266,6 +270,30 @@ function decorateSessionRow<T extends { id: string; nodeAddress: string }>(sessi
     chainPeerSessionId: saved?.chainPeerSessionId,
     chainRole: saved?.chainRole,
   }
+}
+
+/**
+ * THE writer of `lastKnownSessions`: decorate every row (see decorateSessionRow)
+ * and floor its usage at the last live measurement (see lastSessionUsage), so a
+ * fresh read can never march a gauge backwards while the chain settles. Feed it
+ * `readAllSessions()` output, never `getActiveSessions()` — the exit hop of a
+ * per-hop-wallet chain only exists in the former. Returns the enriched rows so
+ * WALLET_SESSIONS can answer with exactly what it cached.
+ */
+function primeSessionsCache(sessions: SessionInfo[]) {
+  const enriched = sessions.map((s) => {
+    const remembered = lastSessionUsage.get(s.id)
+    return {
+      ...decorateSessionRow(s),
+      downloadBytes: remembered ? maxUsageBytes(s.downloadBytes, remembered.downloadBytes) : s.downloadBytes,
+      uploadBytes: remembered ? maxUsageBytes(s.uploadBytes, remembered.uploadBytes) : s.uploadBytes,
+      durationSeconds: remembered
+        ? Math.max(s.durationSeconds ?? 0, remembered.durationSeconds)
+        : s.durationSeconds,
+    }
+  })
+  lastKnownSessions = enriched
+  return enriched
 }
 
 interface RememberedUsage {
@@ -484,22 +512,6 @@ function quotaFromSessionRow(row: SessionInfo): ActiveQuota | null {
     baselineDurationSeconds: row.durationSeconds ?? 0,
     maxBytes,
     baselineBytes: parseInt(row.downloadBytes, 10) || 0,
-  }
-}
-
-/**
- * Best-effort capture of the session's quota, split so the READ can overlap the
- * node handshake (the chain row exists from the moment the tx commits) while the
- * APPLY waits for the handshake to succeed — a refunded session must never leave
- * its quota behind as activeQuota. FAILING TO CAPTURE MUST NEVER FAIL A CONNECT —
- * the degradation is "no watchdog", nothing more.
- */
-function startQuotaCapture(sessionId: string, client?: SentinelClient): () => Promise<void> {
-  const rowsPromise = getActiveSessions(client).catch(() => null)
-  return async () => {
-    const rows = await rowsPromise
-    if (rows) setQuota(rows.find((s) => s.id === sessionId))
-    else console.log(`[quota] could not read the quota for session #${sessionId} — watchdog disabled for it`)
   }
 }
 
@@ -2411,21 +2423,7 @@ export function registerIpcHandlers(): void {
         try { await fetchNodes() } catch { /* best-effort */ }
       }
       const sessions = await readAllSessions()
-      // Enrich sessions with node metadata from saved configs or node cache, and
-      // bridge the post-disconnect gap: show max(onChain, last-measured) so usage
-      // doesn't collapse to ~0 while the chain settles (see lastSessionUsage).
-      const enriched = sessions.map((s) => {
-        const remembered = lastSessionUsage.get(s.id)
-        return {
-          ...decorateSessionRow(s),
-          downloadBytes: remembered ? maxUsageBytes(s.downloadBytes, remembered.downloadBytes) : s.downloadBytes,
-          uploadBytes: remembered ? maxUsageBytes(s.uploadBytes, remembered.uploadBytes) : s.uploadBytes,
-          durationSeconds: remembered
-            ? Math.max(s.durationSeconds ?? 0, remembered.durationSeconds)
-            : s.durationSeconds,
-        }
-      })
-      lastKnownSessions = enriched
+      const enriched = primeSessionsCache(sessions)
       // The chain DELETES settled sessions, so a remembered entry with no row left is
       // a session that is over — drop it rather than let the store grow forever.
       // NOT on an empty read, though: getSessionsForAddress swallows a failed query
@@ -2506,6 +2504,9 @@ export function registerIpcHandlers(): void {
   handle(IPC.WALLET_SWITCH, async (_event, walletId: string) => {
     assertString(walletId, 'walletId')
     const address = await switchWallet(walletId)
+    // The plan overview's chain half is wallet-scoped: a stale answer must
+    // never show the previous wallet's subscriptions.
+    lastPlanOverview = null
     return { address }
   })
 
@@ -2772,9 +2773,7 @@ export function registerIpcHandlers(): void {
 
       const sessions = await sessionsPromise
       if (sessions) {
-        lastKnownSessions = sessions.map((s) => {
-          return decorateSessionRow(s)
-        })
+        primeSessionsCache(sessions)
         setQuota(sessions.find((s) => s.id === sessionId))
       }
 
@@ -2916,9 +2915,7 @@ export function registerIpcHandlers(): void {
     // Same best-effort quota baseline as the single-hop path, for both sessions.
     try {
       const sessions = await readAllSessions()
-      lastKnownSessions = sessions.map((s) => {
-        return decorateSessionRow(s)
-      })
+      primeSessionsCache(sessions)
       setQuota(sessions.find((s) => s.id === result.entrySessionId))
       const exitRow = sessions.find((s) => s.id === result.exitSessionId)
       activeExitQuota = exitRow ? quotaFromSessionRow(exitRow) : null
@@ -3598,6 +3595,34 @@ export function registerIpcHandlers(): void {
     return listCachedPlans()
   })
 
+  handle(IPC.PLAN_OVERVIEW, async () => {
+    // Plans always answer from the disk cache; only the subscription/allocation
+    // half needs the chain. `stale: true` marks an answer whose chain half is a
+    // memory of the last successful read (tunnel up, or the read failed) — the
+    // renderer shows it as cached rather than blanking the tab.
+    const cachedHalf = () => {
+      const { plans, fetchedAt } = listCachedPlans()
+      return {
+        plans,
+        fetchedAt,
+        subscriptions: lastPlanOverview?.subscriptions ?? [],
+        allocations: lastPlanOverview?.allocations ?? [],
+        stale: true,
+      }
+    }
+    const address = getAddress()
+    if (!address) return { ...cachedHalf(), stale: false }
+    if (isVpnActive()) return cachedHalf()
+    try {
+      const overview = await getPlanOverview(address)
+      lastPlanOverview = overview
+      return { ...overview, stale: false }
+    } catch {
+      reportRpcFailure()
+      return cachedHalf()
+    }
+  })
+
   handle(IPC.PLAN_ALLOCATIONS, async () => {
     const address = getAddress()
     if (!address) return []
@@ -3668,11 +3693,11 @@ export function registerIpcHandlers(): void {
         client: flow.signing,
       }).catch(noteChainError)
 
-      // The quota READ overlaps the handshake; it is applied only on success.
-      // RPC is still reachable here (the tunnel goes up in the follow-up
-      // connect call). A plan session's caps only exist on chain, so there is
-      // no local fallback.
-      const applyQuota = startQuotaCapture(sessionId, flow.query)
+      // Pre-cache sessions CONCURRENTLY with the handshake, exactly like
+      // CONNECTION_SUBSCRIBE: the row exists from the moment the tx commits,
+      // and it feeds both the sessions cache and the quota. Applied only after
+      // the handshake succeeds, so a refunded session never primes either.
+      const sessionsPromise = readAllSessions(flow.query).catch(() => null)
 
       const result = await establishSessionOrRefund({
         sessionId,
@@ -3689,7 +3714,32 @@ export function registerIpcHandlers(): void {
       })
 
       applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
-      await applyQuota()
+
+      const sessions = await sessionsPromise
+      if (sessions) {
+        primeSessionsCache(sessions)
+        setQuota(sessions.find((s) => s.id === sessionId))
+      }
+
+      // The chain row was unreadable or hadn't appeared yet — fall back to the
+      // plan's own caps from main's plan cache, mirroring the node path's
+      // purchased-quota fallback. A session created seconds ago has metered
+      // nothing, so both baselines are 0; the chain row overtakes this at the
+      // next successful sessions read.
+      if (!activeQuota) {
+        const plan = getCachedPlans().plans.find((p) => p.id === params.planId)
+        activeQuota = {
+          sessionId,
+          maxDurationSeconds: plan?.durationSeconds ?? null,
+          baselineDurationSeconds: 0,
+          maxBytes: plan ? parseInt(plan.bytes, 10) || 0 : 0,
+          baselineBytes: 0,
+        }
+        quotaWarned = false
+      }
+
+      // A subscription (and maybe an allocation) just appeared on chain.
+      notifySessionsChanged()
 
       return {
         sessionId,
@@ -3704,6 +3754,8 @@ export function registerIpcHandlers(): void {
 
   handle(IPC.PLAN_START_SESSION_FROM_SUB, async (_event, params: {
     subscriptionId: string
+    /** The subscription's plan, for the quota fallback when the chain row is unreadable. */
+    planId: string
     nodeAddress: string
     nodeMoniker: string
     nodeCountry: string
@@ -3712,6 +3764,8 @@ export function registerIpcHandlers(): void {
   }) => {
     assertString(params.subscriptionId, 'subscriptionId')
     if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    assertString(params.planId, 'planId')
+    if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     assertSentAddress(params.nodeAddress, 'nodeAddress')
     assertString(params.nodeMoniker, 'nodeMoniker')
     assertString(params.nodeCountry, 'nodeCountry')
@@ -3755,7 +3809,7 @@ export function registerIpcHandlers(): void {
       }).catch(noteChainError)
 
       // Read overlaps the handshake, applied only on success (see PLAN_SUBSCRIBE).
-      const applyQuota = startQuotaCapture(sessionId, flow.query)
+      const sessionsPromise = readAllSessions(flow.query).catch(() => null)
 
       const result = await establishSessionOrRefund({
         sessionId,
@@ -3772,7 +3826,31 @@ export function registerIpcHandlers(): void {
       })
 
       applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
-      await applyQuota()
+
+      const sessions = await sessionsPromise
+      if (sessions) {
+        primeSessionsCache(sessions)
+        setQuota(sessions.find((s) => s.id === sessionId))
+      }
+
+      // Same fallback as PLAN_SUBSCRIBE. On this reuse path the plan-sized cap
+      // can overstate what the subscription has left, but the chain row
+      // overtakes it at the next successful sessions read, and the alternative
+      // is a session with no watchdog at all.
+      if (!activeQuota) {
+        const plan = getCachedPlans().plans.find((p) => p.id === params.planId)
+        activeQuota = {
+          sessionId,
+          maxDurationSeconds: plan?.durationSeconds ?? null,
+          baselineDurationSeconds: 0,
+          maxBytes: plan ? parseInt(plan.bytes, 10) || 0 : 0,
+          baselineBytes: 0,
+        }
+        quotaWarned = false
+      }
+
+      // A new session row exists on chain.
+      notifySessionsChanged()
 
       return {
         sessionId,
@@ -3788,12 +3866,15 @@ export function registerIpcHandlers(): void {
   handle(IPC.PLAN_NODES, async (_event, params: { planId: string }) => {
     assertString(params?.planId, 'planId')
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
-    if (isVpnActive()) return []
+    // While our own tunnel makes the chain unreachable, a stale node list beats
+    // an empty one: [] here used to render as "No nodes are linked to this
+    // plan", a false statement caused by the tunnel, not the plan.
+    if (isVpnActive()) return getCachedPlanNodes(params.planId) ?? []
     try {
       return await listNodesForPlan(params.planId)
     } catch {
       reportRpcFailure()
-      return []
+      return getCachedPlanNodes(params.planId) ?? []
     }
   })
 

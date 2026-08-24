@@ -896,18 +896,16 @@ xray-core is a strict superset of what the builder emits, so it lands in
   cannot see the exit hop, so `SavedSessionConfig.walletId` +
   `listSessionsOwnedByOtherWallets` + `getSessionsForAddress` exist to merge it back in;
   without them the exit hop vanishes from the Sessions tab with a live deposit against it.
-- **All THREE writers of `lastKnownSessions` must ALSO read `readAllSessions()`**, not
-  `getActiveSessions()`. The two connect handlers prime that cache themselves, and
-  WALLET_SESSIONS returns it verbatim while a tunnel is up — so priming it from the
-  active wallet alone drops the exit hop of a per-hop-wallet chain for exactly as long
-  as the chain is connected, leaving one row badged "partner gone" and no way to see or
-  end the other half. Live: entry #55268780 shown, exit #55268795 (second wallet) not,
-  both ACTIVE on chain throughout.
-- **All THREE writers of `lastKnownSessions` must go through `decorateSessionRow`.**
-  `WALLET_SESSIONS` returns that cache verbatim while a tunnel is up, so a writer that
-  omits `chainPeerSessionId`/`chainRole` makes the tab forget it is a chain for exactly
-  as long as the chain is connected — and then "End" on one hop kills the tunnel and
-  strands the other's deposit.
+- **Every writer of `lastKnownSessions` goes through `primeSessionsCache`, fed by
+  `readAllSessions()`** — never `getActiveSessions()`, and never a hand-rolled map.
+  The helper exists because both halves of this rule were violated live: priming
+  from the active wallet alone drops the exit hop of a per-hop-wallet chain for
+  exactly as long as the chain is connected (entry #55268780 shown, exit #55268795
+  on the second wallet not, both ACTIVE on chain throughout), and a writer that
+  skipped `decorateSessionRow` omitted `chainPeerSessionId`/`chainRole`, so the tab
+  forgot it was a chain and "End" on one hop killed the tunnel and stranded the
+  other's deposit. `WALLET_SESSIONS` returns the cache verbatim while a tunnel is
+  up, which is why one bad writer poisons the whole connected session.
 - **Ending a chain hop leaves a TOMBSTONE** (`retireSessionConfig`): credentials cleared,
   pairing kept, so the two rows stay grouped for the ~2h they take to settle. A record
   with an empty `configString` must never be reconnected.

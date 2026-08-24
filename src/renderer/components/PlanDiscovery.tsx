@@ -1762,6 +1762,7 @@ function AllocationConnectModal({ allocation, nodeIndex, onClose }: AllocationCo
     try {
       const res = await window.api.planStartSessionFromSub({
         subscriptionId: allocation.subscriptionId,
+        planId: allocation.planId,
         nodeAddress: selected.node.address,
         nodeMoniker: selected.node.moniker,
         nodeCountry: selected.node.country,

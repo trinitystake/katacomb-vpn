@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { PlanInfo, ProviderInfo, TokenPrice } from '../../types'
 import { usePlansContext } from '../../contexts/PlansContext'
 import { useNavigation } from '../../contexts/NavigationContext'
-import { formatBytes, formatDuration, planPriceDisplay, pricePerGb } from '../../utils/format'
+import { formatBytes, formatDuration, planPriceDisplay, pricePerGb, formatPerGb } from '../../utils/format'
 import PlanDetailPane from './PlanDetailPane'
 
 type SortBy = 'per-gb' | 'price' | 'data' | 'duration'
@@ -145,7 +145,7 @@ export default function PlanCatalog() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden">
           {filtered.length === 0 ? (
             <p className="text-text-secondary text-sm p-4">
               {overview.plans.length === 0
@@ -180,11 +180,11 @@ export default function PlanCatalog() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2 text-xs text-text-tertiary mt-0.5">
-                    <span className="truncate">
+                    <span className="truncate min-w-0">
                       {prov?.name || `${plan.provAddress.slice(0, 14)}...`}
                     </span>
-                    <span className="font-mono">#{plan.id}</span>
-                    {perGb !== null && <span className="ml-auto">{perGb.toFixed(4)} P2P/GB</span>}
+                    <span className="font-mono shrink-0">#{plan.id}</span>
+                    {perGb !== null && <span className="ml-auto shrink-0">{formatPerGb(perGb)} P2P/GB</span>}
                   </div>
                 </button>
               )

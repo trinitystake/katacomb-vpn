@@ -1027,16 +1027,54 @@ deliberately the narrower sibling of `replaceDnsLines` (see the node-DNS invaria
 this path removes DNS because resolvconf is missing, so it wins over a chosen resolver —
 any `DNS =` line fails the bring-up here, including one we picked.
 
-**Subscriptions.** `plan-service.ts` has `querySubscriptions` / `cancelSubscription` /
-`renewSubscription` / `updateSubscriptionPolicy` behind `SUBSCRIPTION_*` IPC, surfaced
-as "Manage subscriptions" in the Plans tab. `RenewalPricePolicy` 0 (UNSPECIFIED) is the
-hub's own "never renew" (`Subscription.RenewalAt()` returns the zero time for it; cancel
-sets it to 0); 7 (ALWAYS) stays the default. Cancel marks the subscription
-inactive-pending — it is NOT an instant refund, so don't word it as one. Renew is
-plan-only (a node subscription has no plan price to charge). `SubscriptionManager` takes
-an `onSubscriptionsChanged` callback: it must refresh `usePlans().allocations` too, or
-the allocations footer and `ConnectionModal` keep offering a cancelled subscription for
-up to the 120 s poll. `subscriptionShare` exists in the SDK and is deliberately unwired.
+**Plans tab (consumer side).** Rebuilt 2026-08-24 around three pieces; the invariants
+each carries:
+- **`PlansContext` is the ONE data source** (`components/plans/`, the NodesContext
+  pattern, mounted above the tab so switching tabs keeps state). It reads
+  `PLAN_OVERVIEW` — plans + subscriptions + allocations in one round-trip over one
+  connection — and refreshes on `onSessionsChanged` pushes, after every mutation, and
+  one slow backstop. Don't add per-component plan polls (the retired `usePlans` ran
+  two independent 120 s allocation polls) and don't resurrect the superseded
+  `PLAN_LIST_CACHED` / `PLAN_ALLOCATIONS` / `SUBSCRIPTION_LIST` channels. The
+  overview's `stale: true` means "chain half is a memory" (tunnel up, or the read
+  failed; main serves `lastPlanOverview`, cleared on WALLET_SWITCH) — the tab shows
+  cached data and disables mutations rather than blanking. `PLAN_NODES` likewise
+  answers from its cache while the VPN is active: `[]` there used to render as a false
+  "No nodes are linked to this plan".
+- **Smart connect (`PLAN_SMART_CONNECT`) spends the plan price AT MOST ONCE.** The
+  pure module `plan-connect.ts` (unit-tested) owns the decisions: `rankPlanCandidates`
+  admits nodes on positive evidence only (directory row, active, healthy, runnable
+  protocol, probe not failed; latency buckets, then `PROTOCOL_PREFERENCE`, then
+  address for determinism), `shouldTryNextCandidate` walks the ladder (nothing-spent
+  failures advance freely; refunded failures advance within `MAX_TX_ATTEMPTS`;
+  tx-timeout / funds / chain stop cold — a second MsgStartSession after a timeout
+  could buy a second subscription), and `ladderNextTx` states the money rule: once a
+  subscription commits, every further attempt is a gas-only session on it. The handler
+  runs every attempt through `preflightConnect` + `establishSessionOrRefund`, and a
+  failed REFUND stops the ladder (`REFUND_FAILED_TAIL`, shared with
+  `sessionFailureMessage`). A ladder that exhausts after a fresh purchase reports the
+  surviving subscription instead of losing it. Progress rides `CONNECTION_PROGRESS`
+  as `plan:rank/buy/session/handshake` (`sendPlanProgress`, the chain-hop precedent).
+- **Plan/subscription mutations fail fast while the tunnel is up** (`isVpnActive()`
+  throw in the handlers, wording per WALLET_END_SESSION) and ride `openChainFlow`
+  with a `timeoutHeight` (raw msgs, not the SDK convenience methods, which never set
+  one). Money figures still come from main's plan cache (`cachedPlanCost`), never the
+  renderer.
+- Formatting: plan bytes are DECIMAL on chain (`BYTES_PER_GB = 1e9`), so everything
+  plan-shaped goes through `utils/format.ts` (import-free, unit-tested) —
+  `formatBytes` decimal units, `planPriceDisplay` gives non-udvpn plans their real
+  denom with `udvpn: null` (never zero: they used to render as free and sort
+  cheapest), `formatPerGb` keeps significant digits on huge plans. ActiveSessions'
+  own gauge formatters are deliberately untouched (its `formatDuration` must render
+  0 as "0m").
+
+**Subscription chain facts** (unchanged by the rebuild): `RenewalPricePolicy` 0
+(UNSPECIFIED) is the hub's own "never renew" (`Subscription.RenewalAt()` returns the
+zero time for it; cancel sets it to 0); 7 (ALWAYS) stays the default. Cancel marks the
+subscription inactive-pending — it is NOT an instant refund, so don't word it as one
+(`SubscriptionActionModal` states this). Renew is plan-only (a node subscription has
+no plan price to charge). `subscriptionShare` exists in the SDK and is deliberately
+unwired.
 
 ### Provider console (acting AS a provider)
 

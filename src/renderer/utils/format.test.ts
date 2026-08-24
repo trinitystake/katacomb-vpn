@@ -8,6 +8,7 @@ import {
   planPriceDisplay,
   pricePerGb,
   pricePerDay,
+  formatPerGb,
   UNLIMITED_BYTES_THRESHOLD,
 } from './format.ts'
 
@@ -125,6 +126,13 @@ test('pricePerDay: udvpn price over days, null without a duration', () => {
   assert.ok(perDay !== null)
   assert.ok(Math.abs(perDay - 7.4 / 30) < 1e-9)
   assert.equal(pricePerDay({ prices, durationSeconds: null }), null)
+})
+
+test('formatPerGb: tiny per-GB rates keep significant digits instead of rounding to 0.0000', () => {
+  // A 100 TB plan at 1 P2P is 0.00001 P2P/GB; toFixed(4) showed it as 0.0000.
+  assert.equal(formatPerGb(0.00001), '0.000010')
+  assert.equal(formatPerGb(0.0296), '0.0296')
+  assert.ok(!formatPerGb(0.00001).startsWith('0.0000 '))
 })
 
 // --- time formatting ---

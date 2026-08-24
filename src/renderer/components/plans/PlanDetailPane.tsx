@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { PlanInfo, ProviderInfo, SentNode, TokenPrice } from '../../types'
 import { useNodesContext } from '../../contexts/NodesContext'
 import { useConnection } from '../../hooks/useConnection'
-import { formatBytes, formatDuration, planPriceDisplay, pricePerGb } from '../../utils/format'
+import { formatBytes, formatDuration, planPriceDisplay, pricePerGb, formatPerGb } from '../../utils/format'
 import { formatUsd } from '../provider/ProviderConsole'
 import { protocolMeta } from '../../utils/protocols'
 import Spinner from '../Spinner'
@@ -77,7 +77,7 @@ export default function PlanDetailPane({ plan, provider, tokenPrice, activeSubsc
           <div className="text-text-tertiary text-[10px] font-medium uppercase tracking-wide">Data</div>
           <div className="text-accent text-lg font-semibold mt-0.5">{formatBytes(plan.bytes)}</div>
           {perGb !== null && (
-            <div className="text-text-tertiary text-xs">{perGb.toFixed(4)} P2P per GB</div>
+            <div className="text-text-tertiary text-xs">{formatPerGb(perGb)} P2P per GB</div>
           )}
         </div>
         <div className="bg-bg-tertiary border border-border rounded-md px-4 py-3">

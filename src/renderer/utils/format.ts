@@ -101,6 +101,14 @@ export function planPriceDisplay(prices: PlanPrice[]): { amount: string; denomLa
   return { amount: '', denomLabel: '', udvpn: null }
 }
 
+/**
+ * Display form of a per-GB rate. Tiny rates (huge plans) keep two significant
+ * digits; toFixed(4) rendered a 100 TB plan's real price as 0.0000.
+ */
+export function formatPerGb(perGb: number): string {
+  return perGb < 0.001 ? perGb.toPrecision(2) : String(parseFloat(perGb.toFixed(4)))
+}
+
 /** P2P per decimal GB; null for foreign denoms and unlimited plans. */
 export function pricePerGb(plan: { prices: PlanPrice[]; bytes: string }): number | null {
   const { udvpn } = planPriceDisplay(plan.prices)

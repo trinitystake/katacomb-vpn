@@ -15,6 +15,14 @@ export default function IpDisplay({ connected }: Props) {
   const prevConnected = useRef(connected)
   const [ipStale, setIpStale] = useState(false)
 
+  // Two stages so the IP is on screen as fast as the network allows. Stage 1 is
+  // the IP itself (icanhazip, ~100ms, unmetered) — retried, rendered the moment
+  // it lands, and the thing whose total failure means "unreachable". Stage 2 is
+  // the geo enrichment (ipapi.co), best-effort and never retried: its free tier
+  // meters the SOURCE address, which through a tunnel is the exit node's shared
+  // IP, so on a busy node it answers 429 more often than not. Blocking the IP on
+  // it was most of why the refresh felt slow.
+  //
   // `clearOnFailure` is set only by the connect/disconnect effect below. Keeping
   // the previous answer there would leave the IP from BEFORE the transition on
   // screen — i.e. the user's real IP, in the green "connected" style, which reads
@@ -22,32 +30,41 @@ export default function IpDisplay({ connected }: Props) {
   // blip on the idle poll or a manual refresh still keeps the last good value.
   const fetchIp = useCallback(async (retries = 2, includeGeo = true, clearOnFailure = false) => {
     setLoading(true)
+    let ip = ''
     for (let i = 0; i <= retries; i++) {
       try {
-        const result = await window.api.networkGetIp(includeGeo)
+        const result = await window.api.networkGetIp(false)
         // Main reports an unreachable lookup as an empty ip rather than throwing
         // (it is not a fault worth a stack trace) — retry it like any other miss.
         if (!result.ip) throw new Error('no ip')
+        ip = result.ip
         setIpInfo((prev) => {
-          // If polled refresh returned no geo but we had geo before and the IP
-          // didn't change, preserve the existing geo instead of blanking it.
-          if (!includeGeo && prev && prev.ip === result.ip) {
-            return { ...prev, ip: result.ip }
-          }
-          return result
+          // Same IP as before: keep the geo already on screen. A different IP
+          // makes the old geo wrong, so it blanks until stage 2 refills it.
+          if (prev && prev.ip === ip) return { ...prev, ip }
+          return { ip, country: '', city: '', asn: '', org: '' }
         })
         setIpStale(false)
         setLoading(false)
-        return
+        break
       } catch {
         if (i < retries) {
-          await new Promise((r) => setTimeout(r, 2000))
+          await new Promise((r) => setTimeout(r, 1000))
         }
       }
     }
-    if (clearOnFailure) setIpInfo(null)
-    setIpStale(false)
-    setLoading(false)
+    if (!ip) {
+      if (clearOnFailure) setIpInfo(null)
+      setIpStale(false)
+      setLoading(false)
+      return
+    }
+    if (includeGeo) {
+      const geo = await window.api.networkGetIp(true).catch(() => null)
+      // Apply only while the shown IP is still the one it describes — a
+      // transition mid-lookup would otherwise pin the wrong location on it.
+      if (geo?.ip) setIpInfo((prev) => (prev && prev.ip === geo.ip ? geo : prev))
+    }
   }, [])
 
   useEffect(() => {
@@ -60,9 +77,11 @@ export default function IpDisplay({ connected }: Props) {
       setRevealed(false)
       setIpStale(true)
       setLoading(true)
-      const delay = connected ? 1500 : 1000
-      const timer = setTimeout(() => fetchIp(2, true, true), delay)
-      return () => clearTimeout(timer)
+      // No settle delay: `connected` flips at interface-up at the earliest,
+      // when the tunnel is already routing traffic (usually later, at the
+      // verified push), and the retry ladder above absorbs whatever the
+      // transition still has in flight — a fixed pause only added latency.
+      fetchIp(2, true, true)
     }
   }, [connected, fetchIp])
 

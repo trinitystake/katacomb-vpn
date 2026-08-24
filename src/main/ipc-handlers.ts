@@ -115,7 +115,7 @@ const RECONNECT_MAX_ATTEMPTS = 5
 // Bound the refund (endSession) so a slow RPC during the failure path can't itself
 // hang the connect flow — see establishSessionOrRefund (finding H1). Generous on
 // purpose: one cancel is an RPC connect (up to RPC_CONNECT_TIMEOUT_MS on its own),
-// a gas simulation, a broadcast and a wait for inclusion at ~6s per block, so the
+// a gas simulation, a broadcast and a wait for inclusion at ~3.6s per block, so the
 // old 10s could expire on a cancel that was going to succeed — and this is the path
 // that protects money the user has already spent. Refunds run sequentially, so a
 // two-hop chain can spend up to twice this before giving up.
@@ -136,6 +136,10 @@ const CHAIN_ELIGIBILITY_CONCURRENCY = 8
 // one is generous because a timeout there strands a paid entry session, whereas a
 // slow answer here only costs one row in the picker.
 const CHAIN_ELIGIBILITY_VIA_PROXY_TIMEOUT_MS = 15_000
+// Public IP lookups (NETWORK_GET_IP). Short on purpose: icanhazip answers in
+// ~100ms on a working path, and a hung service should fail into the renderer's
+// retry ladder rather than hold the status-bar spinner for 15s.
+const IP_LOOKUP_TIMEOUT_MS = 5_000
 
 /** How a node graded for each end of a chain. `reachable: false` means unknown. */
 interface ChainEligibilityResult {
@@ -3517,15 +3521,20 @@ export function registerIpcHandlers(): void {
     return out
   })
 
-  // Network: public IP lookup. includeGeo=true (default) hits ipapi.co for
-  // country/city/ASN/org; includeGeo=false uses icanhazip.com only (no rate
-  // limits) — intended for polled refreshes so we don't burn the 1000/day
-  // free tier on ipapi.co.
+  // Network: public IP lookup, two single-purpose modes the renderer stages.
+  // includeGeo=false is the IP itself from icanhazip.com (fast, unmetered) —
+  // rendered immediately, and the thing whose failure means "unreachable".
+  // includeGeo=true is the ipapi.co geo enrichment ONLY: its free tier is
+  // limited per SOURCE IP, and through a tunnel the source is the exit node's
+  // shared address, so 429 is the ordinary case on a busy node (measured live
+  // through a Sydney exit) — the renderer treats it as best-effort decoration
+  // and never blocks the IP on it. Failures return an empty ip rather than
+  // throwing: a dead lookup is what an idle tunnel looks like, not a fault, and
+  // letting the AbortError escape logged a handler stack trace on every poll.
   handle(IPC.NETWORK_GET_IP, async (_event, includeGeo?: boolean) => {
-    const geo = includeGeo !== false
-    if (geo) {
+    if (includeGeo !== false) {
       try {
-        const response = await net.fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(15000) })
+        const response = await net.fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(IP_LOOKUP_TIMEOUT_MS) })
         if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`)
         const json = await response.json() as {
           ip?: string; country_name?: string; city?: string; asn?: string; org?: string
@@ -3538,15 +3547,11 @@ export function registerIpcHandlers(): void {
           org: json.org || '',
         }
       } catch {
-        // fall through
+        return { ip: '', country: '', city: '', asn: '', org: '' }
       }
     }
-    // A failed lookup is an ordinary outcome, not a fault: it is exactly what a
-    // tunnel that isn't passing traffic looks like. Letting the AbortError escape
-    // made Electron log a handler stack trace on every poll, burying real errors.
-    // The renderer treats an empty ip as "unknown" and says so.
     try {
-      const response = await net.fetch('https://icanhazip.com', { signal: AbortSignal.timeout(15000) })
+      const response = await net.fetch('https://icanhazip.com', { signal: AbortSignal.timeout(IP_LOOKUP_TIMEOUT_MS) })
       if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`)
       const ip = (await response.text()).trim()
       return { ip, country: '', city: '', asn: '', org: '' }

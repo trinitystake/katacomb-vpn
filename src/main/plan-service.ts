@@ -40,7 +40,9 @@ const PAGE_SIZE = 50
 const SUBS_MAX = 400
 // A session-creating tx may confirm after we stop polling — surface that instead of a
 // raw CosmJS TimeoutError so the user can check the Session tab (finding H2).
-const TX_TIMEOUT_MESSAGE =
+// Exported so PLAN_SMART_CONNECT can recognize a timeout and STOP its ladder
+// (the tx may still land; a second one could buy a second subscription).
+export const TX_TIMEOUT_MESSAGE =
   'The transaction timed out before confirmation. It may still be processing. Check ' +
   'the Session tab shortly and cancel any unexpected session.'
 

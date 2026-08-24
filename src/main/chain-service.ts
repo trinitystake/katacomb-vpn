@@ -726,6 +726,16 @@ export function sendChainHopProgress(role: 'entry' | 'exit', phase: 'buy' | 'pro
 }
 
 /**
+ * Smart connect's progress markers, on the same channel (the chain-hop
+ * precedent). `detail` names the node being tried and which attempt this is,
+ * so the modal can show honest per-attempt state instead of replaying the
+ * 1/5..5/5 purchase steps.
+ */
+export function sendPlanProgress(phase: 'rank' | 'buy' | 'session' | 'handshake', detail: string): void {
+  sendProgress(`plan:${phase}`, detail)
+}
+
+/**
  * Which hop of a chain an error came from. Recorded on the error object itself
  * (non-enumerable, so it never shows up in a serialized log line) rather than by
  * wrapping it, because the callers still need `err instanceof V2RayPolicyError` and

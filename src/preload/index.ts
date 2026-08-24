@@ -139,6 +139,7 @@ contextBridge.exposeInMainWorld('api', {
   planAllocations: () => ipcRenderer.invoke(IPC.PLAN_ALLOCATIONS),
   planSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SUBSCRIBE, params),
   planStartSessionFromSub: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_START_SESSION_FROM_SUB, params),
+  planSmartConnect: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SMART_CONNECT, params),
   planNodes: (planId: string) => ipcRenderer.invoke(IPC.PLAN_NODES, { planId }),
   planListForNode: (nodeAddress: string) => ipcRenderer.invoke(IPC.PLAN_LIST_FOR_NODE, { nodeAddress }),
   subscriptionList: () => ipcRenderer.invoke(IPC.SUBSCRIPTION_LIST),

@@ -68,6 +68,7 @@ export const IPC = {
   PLAN_ALLOCATIONS: 'plan:allocations',
   PLAN_SUBSCRIBE: 'plan:subscribe',
   PLAN_START_SESSION_FROM_SUB: 'plan:start-session-from-sub',
+  PLAN_SMART_CONNECT: 'plan:smart-connect',
   PLAN_NODES: 'plan:nodes',
   PLAN_LIST_FOR_NODE: 'plan:list-for-node',
 

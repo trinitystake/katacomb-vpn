@@ -30,14 +30,15 @@ import {
   logout,
   type SessionInfo,
 } from './wallet'
-import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
+import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, sendPlanProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
 import { openChainFlow } from './chain-clients'
 import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
 import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, type QuotaVerdict } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, type PlanOverview } from './plan-service'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './connect-decisions'
+import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
+import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plan-connect'
 import {
   getMyProvider,
   getProviderDeposit,
@@ -238,7 +239,32 @@ let killSwitchTeardownFailed = false
 // unreachable RPC as 0 would grey out the pay buttons of a funded wallet.
 let lastKnownBalance: { denom: string; amount: string }[] | null = null
 let lastKnownSessions: unknown[] = []
-let cachedNodes: { address: string; moniker: string; country: string; type: number }[] = []
+interface CachedNodeMeta {
+  address: string
+  moniker: string
+  country: string
+  type: number
+  /** '' when the aggregator has no usable API base for the node. */
+  api: string
+  isActive: boolean
+  isHealthy: boolean
+}
+let cachedNodes: CachedNodeMeta[] = []
+
+/** The one projection from aggregator rows to cachedNodes, shared by both feed points. */
+function toCachedNodeMeta(nodes: unknown[]): CachedNodeMeta[] {
+  return (nodes as { address?: string; moniker?: string; country?: string; type?: number; api?: string; isActive?: boolean; isHealthy?: boolean }[])
+    .filter((n) => n.address)
+    .map((n) => ({
+      address: n.address!,
+      moniker: n.moniker || '',
+      country: n.country || '',
+      type: n.type ?? 0,
+      api: n.api || '',
+      isActive: n.isActive === true,
+      isHealthy: n.isHealthy === true,
+    }))
+}
 // Last successful PLAN_OVERVIEW chain read, served with stale: true while the
 // tunnel is up. Wallet-scoped, so WALLET_SWITCH clears it.
 let lastPlanOverview: PlanOverview | null = null
@@ -1116,6 +1142,13 @@ function describeHandshakeError(err: unknown): string {
 const NODE_TYPE_TO_PROTOCOL: Record<number, 'wireguard' | 'v2ray' | 'xray' | 'amneziawg' | 'hysteria2' | 'openvpn'> = {
   1: 'wireguard', 2: 'v2ray', 3: 'openvpn', 4: 'xray', 5: 'amneziawg', 6: 'hysteria2',
 }
+
+// Smart connect (PLAN_SMART_CONNECT): how many top-ranked candidates get a live
+// probe, how long the probe batch may run, and how fresh a cached probe result
+// must be to count as a measurement.
+const SMART_PROBE_TOP_N = 6
+const SMART_PROBE_WINDOW_MS = 4_000
+const SMART_LATENCY_FRESH_MS = 10 * 60 * 1000
 
 /**
  * Checks that run BEFORE the paying tx is broadcast, so a mislabeled node or a
@@ -2173,10 +2206,8 @@ async function fetchNodes(): Promise<unknown[]> {
     Array.from({ length: Math.min(first.lastPage, MAX_NODE_PAGES) - 1 }, (_, i) => fetchNodesPage(i + 2)),
   )
   const nodes = normalizeNodes([first, ...rest].flatMap((p) => p.nodes))
-  // Cache node metadata for session enrichment
-  cachedNodes = (nodes as { address?: string; moniker?: string; country?: string; type?: number }[])
-    .filter((n) => n.address)
-    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '', type: n.type ?? 0 }))
+  // Cache node metadata for session enrichment and the smart-connect join
+  cachedNodes = toCachedNodeMeta(nodes)
   // Update shared cache: in-memory, disk, and broadcast to all renderer windows
   nodesMemoryCache = { nodes, fetchedAt: Date.now() }
   saveNodesCache(nodes)
@@ -2198,9 +2229,7 @@ export function bootstrapNodesCache(): void {
   // still has the nulls.
   disk.nodes = normalizeNodes(disk.nodes)
   nodesMemoryCache = disk
-  cachedNodes = (disk.nodes as { address?: string; moniker?: string; country?: string; type?: number }[])
-    .filter((n) => n.address)
-    .map((n) => ({ address: n.address!, moniker: n.moniker || '', country: n.country || '', type: n.type ?? 0 }))
+  cachedNodes = toCachedNodeMeta(disk.nodes)
 }
 
 /**
@@ -3858,6 +3887,261 @@ export function registerIpcHandlers(): void {
         protocol: result.protocol,
         configString: result.configString,
       }
+    } finally {
+      flow.disconnect()
+    }
+  })
+
+  handle(IPC.PLAN_SMART_CONNECT, async (_event, params: {
+    planId: string
+    /** Present = reuse this subscription (gas only); absent = subscribe first, denom required. */
+    subscriptionId?: string
+    denom?: string
+    renewalPolicy?: number
+    /** Only offer nodes local-proxy mode can run (v2ray/xray/hysteria2). */
+    requireProxyCapable?: boolean
+  }) => {
+    assertString(params.planId, 'planId')
+    if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
+    if (params.subscriptionId !== undefined) {
+      assertString(params.subscriptionId, 'subscriptionId')
+      if (!/^\d+$/.test(params.subscriptionId)) throw new Error('Invalid subscriptionId')
+    } else {
+      assertString(params.denom, 'denom')
+    }
+    if (params.renewalPolicy !== undefined) assertNumber(params.renewalPolicy, 'renewalPolicy', 0, 7)
+
+    const wallet = getWallet()
+    const address = getAddress()
+    const privKey = getPrivKey()
+    if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
+    if (isVpnActive()) {
+      throw new Error('Disconnect the VPN before starting a new session. The chain is unreachable through the tunnel.')
+    }
+
+    const flow = await openChainFlow(wallet)
+    try {
+      // One funds check for the whole ladder: the plan price is spent at most
+      // once (see ladderNextTx), and every later attempt is gas only.
+      await assertSufficientFunds(
+        params.subscriptionId ? 0 : cachedPlanCost(params.planId, params.denom!),
+        flow.query,
+      )
+
+      sendPlanProgress('rank', 'Finding the best node')
+      const addresses = await listNodesForPlan(params.planId, flow.query)
+      if (addresses.length === 0) {
+        throw new Error('This plan has no active nodes linked right now. Nothing was purchased.')
+      }
+
+      // Join the plan's node addresses against the aggregator metadata; a node
+      // without a row can't be preflighted or probed, so rankPlanCandidates
+      // excludes it with a reason.
+      if (cachedNodes.length === 0) {
+        try { await fetchNodes() } catch { /* best-effort */ }
+      }
+      const metaByAddress = new Map(cachedNodes.map((n) => [n.address, n]))
+      const probeCache = getAllCachedResults()
+      const now = Date.now()
+      const toCandidate = (addr: string): PlanNodeCandidate => {
+        const meta = metaByAddress.get(addr)
+        const probe = probeCache[addr]
+        const fresh = probe !== undefined && now - probe.timestamp < SMART_LATENCY_FRESH_MS
+        const protocol = meta ? NODE_TYPE_TO_PROTOCOL[meta.type] : undefined
+        const needsRoot = protocol === 'wireguard' || protocol === 'amneziawg' || protocol === 'openvpn'
+        return {
+          address: addr,
+          moniker: meta?.moniker || addr,
+          country: meta?.country || '',
+          type: meta?.type ?? 0,
+          api: meta?.api || '',
+          isActive: meta?.isActive === true,
+          isHealthy: meta?.isHealthy === true,
+          latencyMs: fresh ? probe.latencyMs : null,
+          probeFailed: fresh ? !probe.reachable : false,
+          runtimeOk: protocol !== undefined
+            && protocolRuntimeError(protocol) === null
+            && (!needsRoot || canEscalatePrivileges()),
+        }
+      }
+
+      const requireProxyCapable = params.requireProxyCapable === true
+      const provisional = rankPlanCandidates(addresses.map(toCandidate), { requireProxyCapable })
+
+      // Live-probe the provisional top so the pick reflects the network now,
+      // not the last batch test. Bounded: probes race a fixed window, and a
+      // node that hasn't answered by then just stays unprobed (still eligible,
+      // ranked after the probed ones). nodeFetch's own timeout does not cover
+      // the TCP connect, hence the window around the whole batch.
+      const probeResults = new Map<string, { reachable: boolean; latencyMs: number | null }>()
+      const toProbe = provisional.ranked.slice(0, SMART_PROBE_TOP_N)
+      if (toProbe.length > 0) {
+        await withTimeout(
+          Promise.allSettled(toProbe.map(async (c) => {
+            const r = await probeNode(c.api, c.address)
+            probeResults.set(c.address, { reachable: r.reachable, latencyMs: r.latencyMs })
+          })),
+          SMART_PROBE_WINDOW_MS,
+          'plan probe',
+        ).catch(() => { /* window elapsed — whatever answered is in the map */ })
+      }
+      const { ranked, excluded } = rankPlanCandidates(
+        provisional.ranked.map((c) => {
+          const p = probeResults.get(c.address)
+          return p ? { ...c, latencyMs: p.latencyMs, probeFailed: !p.reachable } : c
+        }),
+        { requireProxyCapable },
+      )
+      const allExcluded = [...provisional.excluded, ...excluded]
+
+      if (ranked.length === 0) {
+        const why = allExcluded.slice(0, 5)
+          .map((e) => `${metaByAddress.get(e.address)?.moniker || e.address}: ${e.reason}`)
+          .join('; ')
+        throw new Error(`No node in this plan is usable right now. Nothing was purchased. ${why}`)
+      }
+
+      // The ladder. Refunded failures advance to the next candidate while the
+      // tx budget lasts; anything that may have left money in flight stops it.
+      let subscriptionId: string | null = params.subscriptionId ?? null
+      let txAttempts = 0
+      const attempts: { moniker: string; reason: string }[] = []
+
+      for (const candidate of ranked) {
+        const attemptLabel = `${candidate.moniker}, attempt ${attempts.length + 1}`
+        const recordAndDecide = (failure: SmartConnectFailure, err: unknown): boolean => {
+          attempts.push({
+            moniker: candidate.moniker,
+            reason: err instanceof Error ? err.message : 'unknown failure',
+          })
+          return shouldTryNextCandidate(failure, txAttempts)
+        }
+
+        // Pre-payment checks for THIS node; failures here cost nothing.
+        sendPlanProgress('rank', `Checking ${attemptLabel}`)
+        try {
+          await preflightConnect(candidate.type, candidate.api)
+        } catch (err) {
+          if (recordAndDecide('preflight', err)) continue
+          break
+        }
+        let remoteUrl: string
+        try {
+          remoteUrl = await resolveNodeRemoteUrl(candidate.address, candidate.api, flow.query)
+        } catch (err) {
+          if (recordAndDecide('endpoint', err)) continue
+          break
+        }
+
+        // The tx. ladderNextTx enforces the money rule: before a subscription
+        // exists the attempt buys one; from the moment one commits, every
+        // further attempt rides it for gas only (a refund cancels the SESSION,
+        // never the subscription).
+        let sessionId: string
+        try {
+          if (ladderNextTx(subscriptionId) === 'plan-subscribe') {
+            sendPlanProgress('buy', attemptLabel)
+            const res = await subscribeToPlan({
+              wallet,
+              address,
+              planId: params.planId,
+              denom: params.denom!,
+              nodeAddress: candidate.address,
+              renewalPricePolicy: params.renewalPolicy,
+              client: flow.signing,
+            }).catch(noteChainError)
+            txAttempts++
+            sessionId = res.sessionId
+            if (res.subscriptionId) subscriptionId = res.subscriptionId
+          } else {
+            sendPlanProgress('session', attemptLabel)
+            const res = await startSessionWithExistingSubscription({
+              wallet,
+              address,
+              subscriptionId: subscriptionId!,
+              nodeAddress: candidate.address,
+              client: flow.signing,
+            }).catch(noteChainError)
+            txAttempts++
+            sessionId = res.sessionId
+          }
+        } catch (err) {
+          // A timed-out tx may still land (a second one could buy a second
+          // subscription), and a chain rejection would fail every candidate:
+          // both classifications stop the ladder, so surface the error as-is.
+          const msg = err instanceof Error ? err.message : ''
+          const failure: SmartConnectFailure = msg === PLAN_TX_TIMEOUT_MESSAGE ? 'tx-timeout' : 'chain'
+          if (recordAndDecide(failure, err)) continue
+          throw err
+        }
+
+        sendPlanProgress('handshake', attemptLabel)
+        const sessionsPromise = readAllSessions(flow.query).catch(() => null)
+        try {
+          const result = await establishSessionOrRefund({
+            sessionId,
+            nodeAddress: candidate.address,
+            nodeType: candidate.type,
+            apiField: candidate.api,
+            nodeMoniker: candidate.moniker,
+            nodeCountry: candidate.country,
+            wallet,
+            address,
+            privKey,
+            isDeposit: false,
+            remoteUrl,
+          })
+
+          applySession(sessionId, candidate.address, candidate.moniker, candidate.country, candidate.type, result)
+          const sessions = await sessionsPromise
+          if (sessions) {
+            primeSessionsCache(sessions)
+            setQuota(sessions.find((s) => s.id === sessionId))
+          }
+          // Same fallback as the two plan handlers above.
+          if (!activeQuota) {
+            const plan = getCachedPlans().plans.find((p) => p.id === params.planId)
+            activeQuota = {
+              sessionId,
+              maxDurationSeconds: plan?.durationSeconds ?? null,
+              baselineDurationSeconds: 0,
+              maxBytes: plan ? parseInt(plan.bytes, 10) || 0 : 0,
+              baselineBytes: 0,
+            }
+            quotaWarned = false
+          }
+          notifySessionsChanged()
+
+          return {
+            sessionId,
+            subscriptionId: subscriptionId ?? '',
+            protocol: result.protocol,
+            configString: result.configString,
+            node: {
+              address: candidate.address,
+              moniker: candidate.moniker,
+              country: candidate.country,
+              type: candidate.type,
+            },
+            attempts,
+          }
+        } catch (err) {
+          // A failed REFUND leaves a live session needing manual cleanup —
+          // never buy another one behind it.
+          const msg = err instanceof Error ? err.message : ''
+          const failure: SmartConnectFailure = msg.includes(REFUND_FAILED_TAIL) ? 'chain' : 'handshake'
+          if (failure === 'handshake' && recordAndDecide('handshake', err)) continue
+          throw err
+        }
+      }
+
+      // Ladder exhausted without a tunnel. A subscription bought along the way
+      // survives its refunded sessions, so hand it back instead of losing it.
+      let summary = smartConnectFailureSummary(attempts)
+      if (!params.subscriptionId && subscriptionId) {
+        summary += ` Your new subscription #${subscriptionId} was created and can be connected from My plans without paying again.`
+      }
+      throw new Error(summary)
     } finally {
       flow.disconnect()
     }

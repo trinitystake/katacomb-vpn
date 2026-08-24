@@ -3,6 +3,14 @@
 // concurrency (reconnect) decisions are unit-testable in isolation.
 
 /**
+ * The tail sessionFailureMessage emits when the auto-refund itself failed. Also
+ * how PLAN_SMART_CONNECT recognizes that case: its ladder must STOP there, since
+ * the un-cancelled session is still live on chain and buying another one behind
+ * it would compound the manual cleanup the message is asking for.
+ */
+export const REFUND_FAILED_TAIL = 'Could not auto-cancel the session'
+
+/**
  * User-facing message for a session that was created on-chain but then failed to
  * establish a tunnel. `policyRejected` selects the VLess-none preamble; otherwise
  * the underlying `reason` is included. The tail reports the refund outcome — and
@@ -21,7 +29,7 @@ export function sessionFailureMessage(opts: {
     : `Could not establish the tunnel to "${opts.nodeMoniker}": ${trimTrailingStop(opts.reason)}`
   const tail = opts.refunded
     ? `The session was cancelled${opts.isDeposit ? ' and your deposit refunded' : ''}.`
-    : `Could not auto-cancel the session. Open the Session tab and cancel session #${opts.sessionId} manually.`
+    : `${REFUND_FAILED_TAIL}. Open the Session tab and cancel session #${opts.sessionId} manually.`
   return `${preamble}. ${tail}`
 }
 

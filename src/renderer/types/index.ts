@@ -353,6 +353,17 @@ export interface DiscoverProgress {
   phase: 'connecting' | 'fetching' | 'done'
 }
 
+export interface SmartConnectResult {
+  sessionId: string
+  subscriptionId: string
+  protocol: string
+  configString: string
+  /** The node the ladder settled on. */
+  node: { address: string; moniker: string; country: string; type: number }
+  /** Nodes tried and passed over before this one, with why. */
+  attempts: { moniker: string; reason: string }[]
+}
+
 /**
  * Everything the Plans tab shows, in one IPC round-trip. `stale: true` means the
  * subscription/allocation half is a memory of the last successful chain read
@@ -561,6 +572,19 @@ export interface ElectronAPI {
     nodeType: number
     apiField: string
   }) => Promise<{ sessionId: string; subscriptionId: string; protocol: string; configString: string }>
+  /**
+   * Smart connect: main ranks the plan's nodes (health, protocol runtime,
+   * latency) and walks them until one carries a session. The plan price is
+   * spent at most once; `subscriptionId` present means reuse (gas only).
+   * The returned session still needs the connectionConnect follow-up.
+   */
+  planSmartConnect: (params: {
+    planId: string
+    subscriptionId?: string
+    denom?: string
+    renewalPolicy?: number
+    requireProxyCapable?: boolean
+  }) => Promise<SmartConnectResult>
   planNodes: (planId: string) => Promise<string[]>
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
   subscriptionList: () => Promise<SubscriptionSummary[]>

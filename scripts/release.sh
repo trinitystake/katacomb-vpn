@@ -31,7 +31,10 @@
 #                 previous release's word for word: 1.0.3 and 1.1.0 both shipped
 #                 1.0.2's Highlights because nothing used to check. That tripwire
 #                 only catches prose left completely untouched, so it is a floor,
-#                 not a proofread.
+#                 not a proofread. Re-read Known limitations too: its items are
+#                 MEANT to carry forward until actually fixed (identical is that
+#                 section's healthy state), so no diff can police it - only you
+#                 can notice a fixed limitation still listed, or a new one missing.
 #                 You do NOT have to work out whether step 2 applies: preflight
 #                 diffs electron-builder.yml and resources/linux/ against the last
 #                 tag and says so, and the closing output prints the steps that

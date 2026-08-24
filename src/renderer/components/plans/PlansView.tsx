@@ -79,8 +79,10 @@ export default function PlansView() {
           <Spinner className="text-accent" />
           {progress.phase === 'connecting'
             ? 'Connecting to the chain...'
-            : `Scanning plans: ${progress.done}${progress.phase === 'done' ? ' loaded' : ''}`}
-          {progress.phase === 'fetching' && progress.done > 0 && (
+            : progress.phase === 'nodes'
+              ? `Checking node availability: ${progress.done} of ${progress.total}`
+              : `Scanning plans: ${progress.done}${progress.phase === 'done' ? ' loaded' : ''}`}
+          {(progress.phase === 'fetching' || progress.phase === 'nodes') && progress.done > 0 && (
             <div className="flex-1 h-1 bg-bg-tertiary rounded-full overflow-hidden">
               <div
                 className="h-full bg-accent transition-all"

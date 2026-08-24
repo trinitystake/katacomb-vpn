@@ -326,6 +326,11 @@ export interface PlanInfo {
   private: boolean
   status: number
   isTest: boolean
+  /**
+   * Linked ACTIVE nodes, counted at the catalog's own fetchedAt. null =
+   * never counted (old cache): keep visible, only a counted 0 hides a plan.
+   */
+  nodeCount: number | null
 }
 
 export interface ProviderInfo {
@@ -350,7 +355,7 @@ export interface PlanAllocation {
 export interface DiscoverProgress {
   done: number
   total: number
-  phase: 'connecting' | 'fetching' | 'done'
+  phase: 'connecting' | 'fetching' | 'nodes' | 'done'
 }
 
 export interface SmartConnectResult {

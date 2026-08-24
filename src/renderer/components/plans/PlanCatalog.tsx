@@ -47,6 +47,10 @@ export default function PlanCatalog() {
   const { plansNodeFilter, clearPlansNodeFilter } = useNavigation()
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<SortBy>('per-gb')
+  // Hide plans whose availability scan counted ZERO nodes (nothing to connect
+  // to, so nothing to buy). On by default; plans never counted (null) stay
+  // visible either way, and the count line below says what is hidden.
+  const [readyOnly, setReadyOnly] = useState(true)
   const [showTests, setShowTests] = useState(false)
   const [showPrivate, setShowPrivate] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -82,7 +86,7 @@ export default function PlanCatalog() {
     return m
   }, [overview.allocations])
 
-  const filtered = useMemo(() => {
+  const { filtered, hiddenNodeless } = useMemo(() => {
     const q = search.trim().toLowerCase()
     let list = overview.plans.filter((p) => p.status === 1)
     if (!showTests) list = list.filter((p) => !p.isTest)
@@ -96,9 +100,17 @@ export default function PlanCatalog() {
           (prov && (prov.name.toLowerCase().includes(q) || prov.description.toLowerCase().includes(q)))
       })
     }
-    return [...list].sort((a, b) =>
+    // Only a COUNTED zero hides a plan; nodeCount null (never scanned) stays.
+    let hiddenNodeless = 0
+    if (readyOnly) {
+      const before = list.length
+      list = list.filter((p) => p.nodeCount !== 0)
+      hiddenNodeless = before - list.length
+    }
+    const sorted = [...list].sort((a, b) =>
       sortValue(a, sortBy) - sortValue(b, sortBy) || Number(a.id) - Number(b.id))
-  }, [overview.plans, search, sortBy, showTests, showPrivate, nodeFilterPlanIds, providerByAddr])
+    return { filtered: sorted, hiddenNodeless }
+  }, [overview.plans, search, sortBy, readyOnly, showTests, showPrivate, nodeFilterPlanIds, providerByAddr])
 
   const selected = selectedId ? filtered.find((p) => p.id === selectedId) ?? null : null
 
@@ -135,6 +147,10 @@ export default function PlanCatalog() {
               ))}
             </select>
             <label className="flex items-center gap-1.5 cursor-pointer text-text-secondary">
+              <input type="checkbox" checked={readyOnly} onChange={(e) => setReadyOnly(e.target.checked)} className="accent-accent" />
+              Ready to connect
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer text-text-secondary">
               <input type="checkbox" checked={showTests} onChange={(e) => setShowTests(e.target.checked)} className="accent-accent" />
               Test plans
             </label>
@@ -143,6 +159,14 @@ export default function PlanCatalog() {
               Private
             </label>
           </div>
+          {hiddenNodeless > 0 && (
+            <p className="text-text-tertiary text-xs">
+              {hiddenNodeless} plan{hiddenNodeless === 1 ? '' : 's'} with no linked nodes hidden.{' '}
+              <button type="button" onClick={() => setReadyOnly(false)} className="text-accent hover:underline">
+                Show all
+              </button>
+            </p>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
@@ -184,6 +208,12 @@ export default function PlanCatalog() {
                       {prov?.name || `${plan.provAddress.slice(0, 14)}...`}
                     </span>
                     <span className="font-mono shrink-0">#{plan.id}</span>
+                    {plan.nodeCount !== null && plan.nodeCount > 0 && (
+                      <span className="text-success shrink-0">
+                        {plan.nodeCount} node{plan.nodeCount === 1 ? '' : 's'}
+                      </span>
+                    )}
+                    {plan.nodeCount === 0 && <span className="text-warning shrink-0">no nodes</span>}
                     {perGb !== null && <span className="ml-auto shrink-0">{formatPerGb(perGb)} P2P/GB</span>}
                   </div>
                 </button>

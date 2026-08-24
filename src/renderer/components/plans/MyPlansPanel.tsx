@@ -157,6 +157,7 @@ export default function MyPlansPanel({ onBrowse }: { onBrowse: () => void }) {
               private: false,
               status: 1,
               isTest: false,
+              nodeCount: null,
             }
           }
           subscriptionId={connectTarget.row.subscription.id}

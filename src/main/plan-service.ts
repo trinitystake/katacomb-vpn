@@ -78,13 +78,51 @@ function toCachedPlan(p: ChainPlan): CachedPlan {
     })),
     private: p.private,
     status: p.status,
+    // Filled by the availability scan below; null = unknown stays VISIBLE in
+    // the catalog, only a counted 0 hides a plan.
+    nodeCount: null,
   }
 }
 
-function sendDiscoverProgress(done: number, total: number, phase: 'connecting' | 'fetching' | 'done'): void {
+function sendDiscoverProgress(done: number, total: number, phase: 'connecting' | 'fetching' | 'nodes' | 'done'): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.PLAN_DISCOVER_PROGRESS, { done, total, phase })
   }
+}
+
+// The availability scan inside discoverPlans: one nodesForPlan query per plan
+// (the chain has no bulk form), so it runs a bounded worker pool over the
+// discover's own connection. 8 wide clears ~500 plans in seconds behind the
+// progress bar.
+const NODE_SCAN_CONCURRENCY = 8
+
+/**
+ * Count each plan's linked ACTIVE nodes, writing `nodeCount` in place. This is
+ * what lets the catalog hide unbuyable plans WITHOUT the per-visit bulk scan
+ * the old tab did: availability is fetched once per rescan and persisted with
+ * the plans, so it is exactly as fresh as `fetchedAt` and costs nothing to
+ * render. A plan whose count fails stays null (unknown, shown). Also warms
+ * listNodesForPlan's own cache for the detail pane.
+ */
+async function scanPlanNodeCounts(plans: CachedPlan[], client: SentinelClient): Promise<void> {
+  let done = 0
+  const queue = [...plans]
+  sendDiscoverProgress(0, plans.length, 'nodes')
+  async function worker(): Promise<void> {
+    while (true) {
+      const plan = queue.shift()
+      if (!plan) return
+      try {
+        const addresses = await listNodesForPlan(plan.id, client)
+        plan.nodeCount = addresses.length
+      } catch {
+        // Unknown, not zero: a failed count must not hide the plan.
+      }
+      done++
+      sendDiscoverProgress(done, plans.length, 'nodes')
+    }
+  }
+  await Promise.all(Array.from({ length: NODE_SCAN_CONCURRENCY }, () => worker()))
 }
 
 export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
@@ -122,6 +160,8 @@ export async function discoverPlans(maxCount: number): Promise<EnrichedPlan[]> {
       if (!nk || nk.length === 0) break
       nextKey = nk
     }
+
+    await scanPlanNodeCounts(results, client)
 
     setCachedPlans(results)
     sendDiscoverProgress(results.length, results.length, 'done')

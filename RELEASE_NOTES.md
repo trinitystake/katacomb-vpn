@@ -4,28 +4,27 @@ A desktop client for the Sentinel decentralized VPN network. Pick a node, pay fo
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-A maintenance release. No new features: it corrects how a paid session is measured,
-reported and recovered.
+A feature release. The Plans tab is rebuilt around buying and using subscription
+plans, and can now pick a node and connect for you.
 
 ## Highlights
 
-- **Usage is no longer billed against a tunnel that has gone away.** With
-  auto-reconnect off, a dropped interface left the clock running, so a session could
-  report hours it never ran, and that figure was written down as a floor the chain
-  could not undercut. Time now accrues only up to the last confirmed sign of life.
-- **Auto-reconnect works with the kill switch armed.** Names only resolve through the
-  tunnel, so re-pinning the node's endpoint failed at precisely the moment reconnect
-  needed it. The last known good address is kept for that case, and a reconnect that
-  fails is now torn down before the next attempt instead of being left half-built.
-- **A live session no longer reads as "No active sessions".** A paid, connected
-  session could be missing from the Sessions tab for as long as the connection lasted.
-- **The resolver you choose replaces the node's on WireGuard and AmneziaWG**, rather
-  than being added behind it. A node that lists a dead resolver first cost roughly 30
-  seconds of failed lookups on the first page you opened after connecting, once per
-  connection, which is why it read as a slow start rather than a fault.
-- **Stricter OpenVPN config validation.** Directives whose arguments cannot be parsed
-  are now refused rather than passed through, in the privileged helper as well as in
-  the app.
+- **The Plans tab is rebuilt, around My plans and Catalog.** Plans, subscriptions and
+  allocations now arrive together in one round trip rather than from several independent
+  polls, so the tab shows one consistent picture. It keeps showing it while a tunnel is
+  up, marking the figures as cached and disabling anything that spends money, instead of
+  blanking when your own connection puts the chain out of reach.
+- **Smart connect picks a node for a plan, and spends the plan price at most once.** It
+  ranks the plan's nodes on evidence it actually holds, then works down the list.
+  A failure that spent nothing moves on freely, a refunded one is retried within a
+  limit, and anything that could buy a second subscription stops the ladder cold.
+- **Plans priced in anything other than `udvpn` now show their real price.** They used to
+  render as free, which also sorted them to the top as the cheapest thing on offer.
+- **Plans you cannot buy are hidden by default**, and each plan's node count is worked out
+  during the rescan rather than left blank.
+- **Resuming a session is now labelled Reconnect**, with a tooltip for how its cost
+  differs from buying a new one. Plan and subscription calls also ride the faster connect
+  path, and plan sessions get the same cache and quota protection node sessions had.
 
 ## Fixes in 1.1.0
 

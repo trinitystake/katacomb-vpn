@@ -135,14 +135,11 @@ contextBridge.exposeInMainWorld('api', {
 
   planDiscover: (maxId: number) => ipcRenderer.invoke(IPC.PLAN_DISCOVER, maxId),
   planOverview: () => ipcRenderer.invoke(IPC.PLAN_OVERVIEW),
-  planListCached: () => ipcRenderer.invoke(IPC.PLAN_LIST_CACHED),
-  planAllocations: () => ipcRenderer.invoke(IPC.PLAN_ALLOCATIONS),
   planSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SUBSCRIBE, params),
   planStartSessionFromSub: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_START_SESSION_FROM_SUB, params),
   planSmartConnect: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SMART_CONNECT, params),
   planNodes: (planId: string) => ipcRenderer.invoke(IPC.PLAN_NODES, { planId }),
   planListForNode: (nodeAddress: string) => ipcRenderer.invoke(IPC.PLAN_LIST_FOR_NODE, { nodeAddress }),
-  subscriptionList: () => ipcRenderer.invoke(IPC.SUBSCRIPTION_LIST),
   subscriptionCancel: (subscriptionId: string) => ipcRenderer.invoke(IPC.SUBSCRIPTION_CANCEL, { subscriptionId }),
   subscriptionRenew: (subscriptionId: string, planId: string, denom: string) =>
     ipcRenderer.invoke(IPC.SUBSCRIPTION_RENEW, { subscriptionId, planId, denom }),

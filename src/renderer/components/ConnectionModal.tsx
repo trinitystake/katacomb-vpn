@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../types'
+import type { SentNode, NodeProbeResult, PlanInfo } from '../types'
 import { useConnectFlow } from '../hooks/useConnectFlow'
+import { usePlansContext } from '../contexts/PlansContext'
 import ConnectErrorActions from './ConnectErrorActions'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
@@ -45,8 +46,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
     (status.state === 'connected' || status.state === 'reconnecting')
   // Plans compatible with THIS node. null = still loading.
   const [compatiblePlans, setCompatiblePlans] = useState<PlanInfo[] | null>(null)
-  // User's existing plan allocations (subscriptions). Used to detect reuse vs. fresh subscribe.
-  const [allocations, setAllocations] = useState<PlanAllocation[]>([])
+  // The wallet's plan allocations, for the reuse-vs-fresh-subscribe decision.
+  const { overview: { allocations } } = usePlansContext()
   const [subType, setSubType] = useState<'gigabytes' | 'hours'>('gigabytes')
   const [amount, setAmount] = useState(1)
   const { udvpn, display: balance, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
@@ -86,21 +87,6 @@ export default function ConnectionModal({ node, onClose }: Props) {
       cancelled = true
     }
   }, [node.address])
-
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .planAllocations()
-      .then((allocs) => {
-        if (!cancelled) setAllocations(allocs)
-      })
-      .catch(() => {
-        if (!cancelled) setAllocations([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   // Active allocation whose plan covers this node. When present we silently
   // reuse it instead of charging the user per-GB or creating a new subscription.

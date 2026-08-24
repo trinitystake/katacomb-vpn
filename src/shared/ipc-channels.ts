@@ -64,8 +64,6 @@ export const IPC = {
   // Plan-based subscriptions
   PLAN_DISCOVER: 'plan:discover',
   PLAN_OVERVIEW: 'plan:overview',
-  PLAN_LIST_CACHED: 'plan:list-cached',
-  PLAN_ALLOCATIONS: 'plan:allocations',
   PLAN_SUBSCRIBE: 'plan:subscribe',
   PLAN_START_SESSION_FROM_SUB: 'plan:start-session-from-sub',
   PLAN_SMART_CONNECT: 'plan:smart-connect',
@@ -73,7 +71,6 @@ export const IPC = {
   PLAN_LIST_FOR_NODE: 'plan:list-for-node',
 
   // Subscription management (cancel / renew / auto-renewal policy)
-  SUBSCRIPTION_LIST: 'subscription:list',
   SUBSCRIPTION_CANCEL: 'subscription:cancel',
   SUBSCRIPTION_RENEW: 'subscription:renew',
   SUBSCRIPTION_UPDATE_POLICY: 'subscription:update-policy',

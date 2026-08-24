@@ -37,7 +37,7 @@ import type https from 'node:https'
 import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
 import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plan-connect'
 import {
   getMyProvider,
@@ -3620,10 +3620,6 @@ export function registerIpcHandlers(): void {
     return discoverPlans(maxCount)
   })
 
-  handle(IPC.PLAN_LIST_CACHED, async () => {
-    return listCachedPlans()
-  })
-
   handle(IPC.PLAN_OVERVIEW, async () => {
     // Plans always answer from the disk cache; only the subscription/allocation
     // half needs the chain. `stale: true` marks an answer whose chain half is a
@@ -3649,18 +3645,6 @@ export function registerIpcHandlers(): void {
     } catch {
       reportRpcFailure()
       return cachedHalf()
-    }
-  })
-
-  handle(IPC.PLAN_ALLOCATIONS, async () => {
-    const address = getAddress()
-    if (!address) return []
-    if (isVpnActive()) return []
-    try {
-      return await queryPlanAllocations(address)
-    } catch {
-      reportRpcFailure()
-      return []
     }
   })
 
@@ -4171,15 +4155,6 @@ export function registerIpcHandlers(): void {
       reportRpcFailure()
       return []
     }
-  })
-
-  handle(IPC.SUBSCRIPTION_LIST, async () => {
-    const address = getAddress()
-    if (!address) throw new Error('Wallet not loaded')
-    // RPC is unreachable through the tunnel; there's no cache for this list, so
-    // the UI hides the section while connected rather than showing stale rows.
-    if (isVpnActive()) return []
-    return await querySubscriptions(address).catch(noteChainError)
   })
 
   handle(IPC.SUBSCRIPTION_CANCEL, async (_event, params: { subscriptionId: string }) => {

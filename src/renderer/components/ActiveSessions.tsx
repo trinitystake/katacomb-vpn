@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useConnection } from '../hooks/useConnection'
-import { usePlans } from '../hooks/usePlans'
+import { usePlansContext } from '../contexts/PlansContext'
+import { formatBytes as formatPlanBytes, formatDuration as formatPlanDuration } from '../utils/format'
 import { useTrafficStats } from '../hooks/useTrafficStats'
 import { useReconnect } from '../hooks/useReconnect'
 import Spinner from './Spinner'
@@ -75,7 +76,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const { status, refresh: refreshConnection } = useConnection()
-  const { allocations } = usePlans()
+  const { overview: { allocations } } = usePlansContext()
   const reconnect = useReconnect()
   const vpnConnected = status.state === 'connected'
   // Refresh asks the chain, and WALLET_SESSIONS returns lastKnownSessions verbatim
@@ -328,7 +329,8 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                     </span>
                   </div>
                   <div className="text-text-secondary text-xs mt-1">
-                    {formatBytes(a.planBytes)} · {formatDuration(a.planDurationSeconds)}
+                    {/* Plan bytes are decimal on chain, so the shared plan formatter. */}
+                    {formatPlanBytes(a.planBytes)} · {formatPlanDuration(a.planDurationSeconds)}
                   </div>
                 </div>
               ))}

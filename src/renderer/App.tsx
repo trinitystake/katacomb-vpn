@@ -16,13 +16,14 @@ import DisconnectButton from './components/DisconnectButton'
 import StatusBar from './components/StatusBar'
 import RpcBanner from './components/RpcBanner'
 import ActiveSessions from './components/ActiveSessions'
-import PlanDiscovery from './components/PlanDiscovery'
+import PlansView from './components/plans/PlansView'
 import ProviderConsole from './components/provider/ProviderConsole'
 import { useProvider } from './hooks/useProvider'
 import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { NodesProvider } from './contexts/NodesContext'
+import { PlansProvider } from './contexts/PlansContext'
 import { ChainDraftProvider, useChainDraft } from './contexts/ChainDraftContext'
 import { NavigationProvider, useNavigation, type MainTab } from './contexts/NavigationContext'
 import Spinner from './components/Spinner'
@@ -337,7 +338,7 @@ function AppInner() {
         {mainTab === 'map' && <MapView />}
         {mainTab === 'nodes' && <NodeTable />}
         {mainTab === 'multihop' && <MultihopView />}
-        {mainTab === 'plans' && <PlanDiscovery />}
+        {mainTab === 'plans' && <PlansView />}
         {mainTab === 'sessions' && (
           <ActiveSessions
             sessions={sessionsState.sessions}
@@ -375,13 +376,17 @@ export default function App() {
   return (
     <SettingsProvider>
       <NodesProvider>
-        <NavigationProvider>
-          {/* Above the tab, not inside it: leaving the Multi-hop tab must keep the
-              half-built chain AND the grades it took hundreds of requests to collect. */}
-          <ChainDraftProvider>
-            <AppInner />
-          </ChainDraftProvider>
-        </NavigationProvider>
+        {/* Above the tab for the same reason as ChainDraftProvider: leaving the
+            Plans tab must keep the overview, selection and scan results. */}
+        <PlansProvider>
+          <NavigationProvider>
+            {/* Above the tab, not inside it: leaving the Multi-hop tab must keep the
+                half-built chain AND the grades it took hundreds of requests to collect. */}
+            <ChainDraftProvider>
+              <AppInner />
+            </ChainDraftProvider>
+          </NavigationProvider>
+        </PlansProvider>
       </NodesProvider>
     </SettingsProvider>
   )

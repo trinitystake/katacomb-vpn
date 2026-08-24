@@ -550,8 +550,6 @@ export interface ElectronAPI {
 
   planDiscover: (maxId: number) => Promise<PlanInfo[]>
   planOverview: () => Promise<PlanOverview>
-  planListCached: () => Promise<{ plans: PlanInfo[]; fetchedAt: number | null }>
-  planAllocations: () => Promise<PlanAllocation[]>
   planSubscribe: (params: {
     planId: string
     denom: string
@@ -587,7 +585,6 @@ export interface ElectronAPI {
   }) => Promise<SmartConnectResult>
   planNodes: (planId: string) => Promise<string[]>
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
-  subscriptionList: () => Promise<SubscriptionSummary[]>
   subscriptionCancel: (subscriptionId: string) => Promise<void>
   subscriptionRenew: (subscriptionId: string, planId: string, denom: string) => Promise<void>
   subscriptionUpdatePolicy: (subscriptionId: string, policy: number) => Promise<void>

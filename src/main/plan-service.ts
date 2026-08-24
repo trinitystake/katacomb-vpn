@@ -304,23 +304,6 @@ function toSubscriptionInfo(s: ChainSubscription): SubscriptionInfo {
 }
 
 /**
- * Every subscription this wallet owns — plan-based AND node (per-GB/hour) ones,
- * which is what makes this different from queryPlanAllocations (plan-only, and
- * its callers depend on that filter).
- */
-export async function querySubscriptions(walletAddress: string, sharedClient?: SentinelClient): Promise<SubscriptionInfo[]> {
-  // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
-  const own = sharedClient ? null : await openChainQuery()
-  const client = sharedClient ?? own!.query
-  try {
-    const subs = await fetchSubscriptionsForAccount(client, walletAddress)
-    return subs.map(toSubscriptionInfo)
-  } finally {
-    own?.disconnect()
-  }
-}
-
-/**
  * Cancel a subscription. On-chain this marks it inactive-pending and clears its
  * renewal policy — it stops renewing and its sessions end; it is NOT an instant
  * refund. Only an ACTIVE subscription can be cancelled (the hub rejects others).
@@ -457,22 +440,6 @@ function joinAllocations(planSubs: ChainSubscription[], planDetails: Map<string,
 
 function onlyPlanSubs(subs: ChainSubscription[]): ChainSubscription[] {
   return subs.filter((s) => s.planId && !s.planId.isZero())
-}
-
-export async function queryPlanAllocations(walletAddress: string, sharedClient?: SentinelClient): Promise<PlanAllocationInfo[]> {
-  // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
-  const own = sharedClient ? null : await openChainQuery()
-  const client = sharedClient ?? own!.query
-  try {
-    const subs = await fetchSubscriptionsForAccount(client, walletAddress)
-    const planSubs = onlyPlanSubs(subs)
-    if (planSubs.length === 0) return []
-    const uniquePlanIds = Array.from(new Set(planSubs.map((s) => s.planId.toString())))
-    const planDetails = await resolvePlanDetails(client, uniquePlanIds)
-    return joinAllocations(planSubs, planDetails)
-  } finally {
-    own?.disconnect()
-  }
 }
 
 export interface PlanOverview {

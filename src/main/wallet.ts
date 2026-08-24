@@ -275,9 +275,9 @@ export function getPrivKey(): Uint8Array | null {
   return state.privKey
 }
 
-export async function getBalance(): Promise<{ denom: string; amount: string }[]> {
+export async function getBalance(client?: SentinelClient): Promise<{ denom: string; amount: string }[]> {
   if (!state.address) return []
-  return getBalanceForAddress(state.address)
+  return getBalanceForAddress(state.address, client)
 }
 
 /**
@@ -285,14 +285,16 @@ export async function getBalance(): Promise<{ denom: string; amount: string }[]>
  * chain has to know the second account can afford the hop it is buying, and summing
  * both hops against the active balance would let a broke second wallet through.
  */
-export async function getBalanceForAddress(address: string): Promise<{ denom: string; amount: string }[]> {
+export async function getBalanceForAddress(address: string, client?: SentinelClient): Promise<{ denom: string; amount: string }[]> {
   if (!address) return []
-  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+  // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
+  const own = !client
+  const c = client ?? await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
-    const balances = await client.getAllBalances(address)
+    const balances = await c.getAllBalances(address)
     return balances.map((b) => ({ denom: b.denom, amount: b.amount }))
   } finally {
-    client.disconnect()
+    if (own) c.disconnect()
   }
 }
 
@@ -425,9 +427,9 @@ function decodeSession(any: { typeUrl: string; value: Uint8Array }): SessionInfo
   }
 }
 
-export async function getActiveSessions(): Promise<SessionInfo[]> {
+export async function getActiveSessions(client?: SentinelClient): Promise<SessionInfo[]> {
   if (!state.address) return []
-  return getSessionsForAddress(state.address)
+  return getSessionsForAddress(state.address, client)
 }
 
 /**
@@ -439,13 +441,15 @@ export async function getActiveSessions(): Promise<SessionInfo[]> {
  * uncancellable. Callers merge the results; the session ids are globally unique, so
  * there is nothing to reconcile.
  */
-export async function getSessionsForAddress(address: string): Promise<SessionInfo[]> {
+export async function getSessionsForAddress(address: string, client?: SentinelClient): Promise<SessionInfo[]> {
   if (!address) return []
 
   try {
-    const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+    // A shared connect-flow client stays the caller's to close (see chain-clients.ts).
+    const own = !client
+    const c = client ?? await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
     try {
-      const result = await client.sentinelQuery?.session.sessionsForAccount(address, {
+      const result = await c.sentinelQuery?.session.sessionsForAccount(address, {
         key: new Uint8Array(),
         offset: Long.fromNumber(0, true),
         limit: Long.fromNumber(20, true),
@@ -464,7 +468,7 @@ export async function getSessionsForAddress(address: string): Promise<SessionInf
         .map((s: { typeUrl: string; value: Uint8Array }) => decodeSession(s))
         .filter((s): s is SessionInfo => s !== null && (s.status === 'active' || s.status === 'inactive_pending'))
     } finally {
-      client.disconnect()
+      if (own) c.disconnect()
     }
   } catch {
     return []

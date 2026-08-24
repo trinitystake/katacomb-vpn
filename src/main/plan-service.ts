@@ -9,12 +9,14 @@ import {
   SubscriptionEventCreate,
   Status,
   RenewalPricePolicy,
+  planStartSession,
+  subscriptionStartSession,
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow } from 'electron'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
 import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
-import { GAS_PRICE_STR } from '../shared/chain-constants'
+import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
 import { getCachedProviders } from './provider-cache'
@@ -427,21 +429,28 @@ export async function startSessionWithExistingSubscription(params: {
   address: string
   subscriptionId: string
   nodeAddress: string
+  /** Share a connect flow's signing client (see chain-clients.ts); the caller owns it. */
+  client?: SigningSentinelClient
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, subscriptionId, nodeAddress } = params
-  const client = await withTimeout(
+  const ownClient = !params.client
+  const client = params.client ?? await withTimeout(
     SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
     RPC_CONNECT_TIMEOUT_MS,
     'RPC connect',
   )
   try {
+    // The raw msg + signAndBroadcast form (not the SDK convenience method) so a
+    // timeoutHeight can bound how late this session-creating tx can land, the
+    // same way subscribeToNode's does (H2).
+    const msg = subscriptionStartSession({
+      from: address,
+      id: Long.fromString(subscriptionId, true),
+      nodeAddress,
+    })
+    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.subscriptionStartSession({
-        from: address,
-        id: Long.fromString(subscriptionId, true),
-        nodeAddress,
-        memo: 'katacomb-vpn: subscription start session',
-      } as Parameters<typeof client.subscriptionStartSession>[0]),
+      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: subscription start session', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
 
@@ -460,7 +469,7 @@ export async function startSessionWithExistingSubscription(params: {
       subscriptionId: parsed.value.subscriptionId?.toString() || subscriptionId,
     }
   } finally {
-    client.disconnect()
+    if (ownClient) client.disconnect()
   }
 }
 
@@ -472,24 +481,30 @@ export async function subscribeToPlan(params: {
   nodeAddress: string
   /** sentinel.types.v1.RenewalPricePolicy; defaults to ALWAYS (previous behavior). */
   renewalPricePolicy?: number
+  /** Share a connect flow's signing client (see chain-clients.ts); the caller owns it. */
+  client?: SigningSentinelClient
 }): Promise<{ sessionId: string; subscriptionId: string }> {
   const { wallet, address, planId, denom, nodeAddress } = params
   const renewalPricePolicy = params.renewalPricePolicy ?? RenewalPricePolicy.RENEWAL_PRICE_POLICY_ALWAYS
-  const client = await withTimeout(
+  const ownClient = !params.client
+  const client = params.client ?? await withTimeout(
     SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
     RPC_CONNECT_TIMEOUT_MS,
     'RPC connect',
   )
   try {
+    // Raw msg + signAndBroadcast rather than the SDK convenience method, so the
+    // session-creating tx carries a timeoutHeight like subscribeToNode's (H2).
+    const msg = planStartSession({
+      from: address,
+      id: Long.fromString(planId, true),
+      denom,
+      renewalPricePolicy: renewalPricePolicy as RenewalPricePolicy,
+      nodeAddress,
+    })
+    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.planStartSession({
-        from: address,
-        id: Long.fromString(planId, true),
-        denom,
-        renewalPricePolicy: renewalPricePolicy as RenewalPricePolicy,
-        nodeAddress,
-        memo: 'katacomb-vpn: plan start session',
-      } as Parameters<typeof client.planStartSession>[0]),
+      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: plan start session', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
 
@@ -521,6 +536,6 @@ export async function subscribeToPlan(params: {
       subscriptionId: subscriptionId?.toString() || '',
     }
   } finally {
-    client.disconnect()
+    if (ownClient) client.disconnect()
   }
 }

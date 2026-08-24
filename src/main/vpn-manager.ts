@@ -1147,6 +1147,36 @@ export function isProxyChildAlive(): boolean {
   return isChildProxy(activeProtocol) && !!activeChild && activeChild.exitCode === null
 }
 
+/**
+ * Wait until the active child proxy's SOCKS listener accepts a TCP connect, up
+ * to timeoutMs. Resolves early on readiness OR when the child exits (so the
+ * caller's isProxyChildAlive() check fails without waiting out the cap), and
+ * resolves at the cap otherwise. Never rejects: readiness only SHORTENS the
+ * caller's wait — the liveness verdict stays with the caller. The sibling of
+ * waitForListener above, with the opposite failure contract for that reason.
+ */
+export function waitForChildProxyListener(timeoutMs: number): Promise<void> {
+  const child = activeChild
+  if (!child || child.exitCode !== null) return Promise.resolve()
+  const deadline = Date.now() + timeoutMs
+  return new Promise((resolve) => {
+    const attempt = (): void => {
+      if (child.exitCode !== null || Date.now() > deadline) {
+        resolve()
+        return
+      }
+      const probe = netConnect({ host: '127.0.0.1', port: SOCKS_PORT })
+      probe.once('connect', () => { probe.destroy(); resolve() })
+      probe.once('error', () => {
+        probe.destroy()
+        if (Date.now() > deadline) resolve()
+        else setTimeout(attempt, 100)
+      })
+    }
+    attempt()
+  })
+}
+
 export function getConnectionStatus(): {
   connected: boolean
   protocol: string | null

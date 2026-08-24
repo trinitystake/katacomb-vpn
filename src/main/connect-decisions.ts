@@ -460,6 +460,27 @@ export function describeNodeApiError(err: unknown): { status: number | null; mes
   return { status, message: typeof e?.message === 'string' ? e.message : String(err) }
 }
 
+/** Pause between session-handshake retries: covers a block-plus (~3.6s) of RPC
+ * divergence across the two attempts without stretching the refund path much. */
+export const HANDSHAKE_RETRY_DELAY_MS = 2000
+export const HANDSHAKE_RETRY_MAX_RETRIES = 2
+
+/**
+ * Should a just-created session's failed handshake be retried?
+ *
+ * The node validates the session against the chain LIVE when it answers a
+ * handshake (dvpnx api/handshake/handlers.go queries its own RPC and returns
+ * HTTP 404 for a session it cannot see). Our broadcast poll can discover the
+ * committed tx within ~1s, so arriving before the node's RPC has the block is
+ * an ordinary race, not a dead node — and refunding a healthy purchase over it
+ * wastes the session, the gas and the user's time. Every OTHER status is a real
+ * verdict from a node that could see the session, so retrying it only delays
+ * the refund. `attempt` is 0-based: 0 is the first failure.
+ */
+export function shouldRetrySessionHandshake(status: number | null, attempt: number): boolean {
+  return status === 404 && attempt < HANDSHAKE_RETRY_MAX_RETRIES
+}
+
 /**
  * What to do to the kill-switch chain after the user toggles Kill Switch or Local
  * Network Sharing mid-session. The ARMED MARKER decides, not the connection

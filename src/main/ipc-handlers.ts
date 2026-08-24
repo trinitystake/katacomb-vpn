@@ -31,9 +31,11 @@ import {
   type SessionInfo,
 } from './wallet'
 import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
+import { openChainFlow } from './chain-clients'
+import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, type QuotaVerdict } from './connect-decisions'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, queryPlanAllocations, subscribeToPlan, startSessionWithExistingSubscription, querySubscriptions, cancelSubscription, renewSubscription, updateSubscriptionPolicy } from './plan-service'
 import {
   getMyProvider,
@@ -73,6 +75,7 @@ import {
   disconnect,
   getConnectionStatus,
   isProxyChildAlive,
+  waitForChildProxyListener,
   isVpnActive,
   detectOtherVpn,
   getV2RayError,
@@ -480,16 +483,18 @@ function quotaFromSessionRow(row: SessionInfo): ActiveQuota | null {
 }
 
 /**
- * Best-effort capture of the session's quota. Called between session creation and
- * tunnel bring-up, while RPC is still reachable. FAILING TO CAPTURE MUST NEVER FAIL
- * A CONNECT — the degradation is "no watchdog", nothing more.
+ * Best-effort capture of the session's quota, split so the READ can overlap the
+ * node handshake (the chain row exists from the moment the tx commits) while the
+ * APPLY waits for the handshake to succeed — a refunded session must never leave
+ * its quota behind as activeQuota. FAILING TO CAPTURE MUST NEVER FAIL A CONNECT —
+ * the degradation is "no watchdog", nothing more.
  */
-async function captureQuota(sessionId: string): Promise<void> {
-  try {
-    const rows = await getActiveSessions()
-    setQuota(rows.find((s) => s.id === sessionId))
-  } catch {
-    console.log(`[quota] could not read the quota for session #${sessionId} — watchdog disabled for it`)
+function startQuotaCapture(sessionId: string, client?: SentinelClient): () => Promise<void> {
+  const rowsPromise = getActiveSessions(client).catch(() => null)
+  return async () => {
+    const rows = await rowsPromise
+    if (rows) setQuota(rows.find((s) => s.id === sessionId))
+    else console.log(`[quota] could not read the quota for session #${sessionId} — watchdog disabled for it`)
   }
 }
 
@@ -886,14 +891,24 @@ const TUNNEL_PROBE_ATTEMPTS = 3
 async function tunnelCarriesTraffic(): Promise<boolean> {
   const before = readTunnelBytes()
   for (let attempt = 0; attempt < TUNNEL_PROBE_ATTEMPTS; attempt++) {
-    // By name first (proves the whole path, DNS included), then by IP (proves
-    // routing even when DNS is what is broken).
-    for (const url of [TUNNEL_PROBE_URL, TUNNEL_PROBE_IP_URL]) {
-      try {
-        const res = await net.fetch(url, { signal: AbortSignal.timeout(TUNNEL_PROBE_TIMEOUT_MS) })
-        if (res.ok) return true
-      } catch { /* the byte check below is the second opinion */ }
-    }
+    // Both targets at once, first success wins: by name (proves the whole path,
+    // DNS included) and by IP (proves routing even when DNS is what is broken).
+    // Either succeeding was already a pass when they ran in sequence — racing
+    // them just stops a node that blackholes one target from costing that
+    // target's whole timeout before the other gets its turn.
+    const probes = [TUNNEL_PROBE_URL, TUNNEL_PROBE_IP_URL].map((url) => {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), TUNNEL_PROBE_TIMEOUT_MS)
+      const done = net.fetch(url, { signal: ctrl.signal })
+        .then((res) => { if (!res.ok) throw new Error(`${url} answered ${res.status}`) })
+        .finally(() => clearTimeout(timer))
+      return { done, ctrl }
+    })
+    // Promise.any: resolves on the first success, rejects only when BOTH failed
+    // (and swallows the individual rejections either way).
+    const passed = await Promise.any(probes.map((p) => p.done)).then(() => true, () => false)
+    for (const p of probes) p.ctrl.abort()
+    if (passed) return true
     const now = readTunnelBytes()
     if (before && now && now.rx - before.rx >= TUNNEL_PROBE_MIN_RX_BYTES) return true
   }
@@ -1184,10 +1199,10 @@ async function assertChainEligible(
  * someone from ending a session because we couldn't reach an RPC is worse than the
  * on-chain failure, which `assertTxSucceeded` now reports readably anyway.
  */
-async function assertSufficientFunds(costUdvpn: number): Promise<void> {
+async function assertSufficientFunds(costUdvpn: number, client?: SentinelClient): Promise<void> {
   let balances: { denom: string; amount: string }[]
   try {
-    balances = await getBalance()
+    balances = await getBalance(client)
   } catch {
     reportRpcFailure()
     return
@@ -1294,11 +1309,26 @@ async function establishSessionOrRefund(params: {
   address: string
   privKey: Uint8Array
   isDeposit: boolean
+  /** Already-resolved handshake endpoint (the purchase fetched the node row anyway). */
+  remoteUrl?: string
 }): Promise<Awaited<ReturnType<typeof performHandshake>>> {
   const { sessionId, nodeAddress, nodeType, apiField, nodeMoniker, nodeCountry, wallet, address, privKey, isDeposit } = params
   try {
-    const remoteUrl = await resolveNodeRemoteUrl(nodeAddress, apiField)
-    return await performHandshake({ sessionId, nodeAddress, nodeType, remoteUrl, privKey, nodeMoniker, nodeCountry })
+    const remoteUrl = params.remoteUrl ?? await resolveNodeRemoteUrl(nodeAddress, apiField)
+    // A 404 here is usually the node's own RPC not having our session's block
+    // yet, not a dead node — the handshake handler validates the session against
+    // the chain LIVE (see shouldRetrySessionHandshake). Bounded retries keep a
+    // healthy purchase out of the refund path; anything else fails immediately.
+    // A fresh keypair per attempt is fine: 404 means the node registered nothing.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await performHandshake({ sessionId, nodeAddress, nodeType, remoteUrl, privKey, nodeMoniker, nodeCountry })
+      } catch (err) {
+        if (!shouldRetrySessionHandshake(describeNodeApiError(err).status, attempt)) throw err
+        console.log(`[connect] node cannot see session #${sessionId} yet (chain lag), retrying in ${HANDSHAKE_RETRY_DELAY_MS}ms`)
+        await new Promise((r) => setTimeout(r, HANDSHAKE_RETRY_DELAY_MS))
+      }
+    }
   } catch (err) {
     let refunded = false
     try {
@@ -2032,12 +2062,17 @@ const SAVED_CONFIG_HINT =
  * spawn-wait site goes through here, and the predicate MUST stay
  * isProxyChildAlive() — pointed at the traffic predicate this fails every
  * tunnel-mode connect while the tun-up polkit dialog is open (see CLAUDE.md).
+ *
+ * The wait is a readiness poll, not a flat sleep: it returns the moment the
+ * core's SOCKS listener accepts (typically a few hundred ms) and only a core
+ * that never listens waits out the full window — same cap, so a config the
+ * core rejects still gets caught by the liveness check below.
  */
 async function assertProxyChildStarted(
   label: 'V2Ray' | 'Xray' | 'Hysteria2',
   fromSavedConfig: boolean,
 ): Promise<void> {
-  await new Promise((r) => setTimeout(r, CHILD_PROXY_STARTUP_MS))
+  await waitForChildProxyListener(CHILD_PROXY_STARTUP_MS)
   if (isProxyChildAlive()) return
   const errMsg = getV2RayError()
   // When replaying a saved config (reconnect), a failure to start usually means
@@ -2169,8 +2204,8 @@ async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
  * Best-effort: an account we cannot read simply contributes nothing, exactly as an
  * unreachable RPC does for the active wallet.
  */
-async function readAllSessions(): Promise<SessionInfo[]> {
-  return [...await getActiveSessions(), ...await getOtherWalletSessions()]
+async function readAllSessions(client?: SentinelClient): Promise<SessionInfo[]> {
+  return [...await getActiveSessions(client), ...await getOtherWalletSessions()]
 }
 
 /**
@@ -2648,70 +2683,94 @@ export function registerIpcHandlers(): void {
       throw new Error('Wallet not loaded. Please re-import your mnemonic.')
     }
 
-    // Verify the node + our runtime BEFORE spending anything (see preflightConnect).
-    await preflightConnect(params.nodeType, params.apiField)
-
-    // The deposit is only priced in udvpn for the udvpn denom; for any other the
-    // cost is unknown here, so check the gas reserve alone and let the chain judge.
-    await assertSufficientFunds(
-      params.denom === 'udvpn' ? parseInt(params.quoteValue, 10) * params.amount : 0,
-    )
-
-    // Subscribe on-chain
-    const sessionId = await subscribeToNode({
-      wallet,
-      address,
-      nodeAddress: params.nodeAddress,
-      type: params.type,
-      amount: params.amount,
-      denom: params.denom,
-    }).catch(noteChainError)
-
-    // Resolve the node endpoint + handshake. On ANY failure the just-created
-    // session is auto-cancelled (refund) instead of orphaning the deposit (H1).
-    const result = await establishSessionOrRefund({
-      sessionId,
-      nodeAddress: params.nodeAddress,
-      nodeType: params.nodeType,
-      apiField: params.apiField,
-      nodeMoniker: params.nodeMoniker,
-      nodeCountry: params.nodeCountry,
-      wallet,
-      address,
-      privKey,
-      isDeposit: true,
-    })
-
-    applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
-
-    // Pre-cache sessions now (RPC is still reachable before tunnel goes up), and
-    // take the quota watchdog's baseline off the same read.
+    // Phase A — everything that must hold BEFORE money moves, in parallel: the
+    // node's own protocol check (see preflightConnect), a fresh balance read,
+    // and the one RPC connection the rest of the flow shares. Any failure
+    // aborts with nothing spent and the connection closed.
+    const flowPromise = openChainFlow(wallet)
     try {
-      const sessions = await readAllSessions()
-      lastKnownSessions = sessions.map((s) => {
-        return decorateSessionRow(s)
-      })
-      setQuota(sessions.find((s) => s.id === sessionId))
-    } catch { /* best-effort */ }
-
-    // The chain row was unreadable or hadn't appeared yet — fall back to what the
-    // user just bought. A session created seconds ago has metered nothing, so both
-    // baselines are 0.
-    if (!activeQuota) {
-      activeQuota = {
-        sessionId,
-        maxDurationSeconds: params.type === 'hours' ? params.amount * 3600 : null,
-        baselineDurationSeconds: 0,
-        maxBytes: params.type === 'gigabytes' ? params.amount * 1024 ** 3 : 0,
-        baselineBytes: 0,
-      }
-      quotaWarned = false
+      await Promise.all([
+        preflightConnect(params.nodeType, params.apiField),
+        // The deposit is only priced in udvpn for the udvpn denom; for any other the
+        // cost is unknown here, so check the gas reserve alone and let the chain judge.
+        flowPromise.then((f) => assertSufficientFunds(
+          params.denom === 'udvpn' ? parseInt(params.quoteValue, 10) * params.amount : 0,
+          f.query,
+        )),
+      ])
+    } catch (err) {
+      flowPromise.then((f) => f.disconnect(), () => {})
+      throw err
     }
+    const flow = await flowPromise
 
-    return {
-      sessionId,
-      protocol: result.protocol,
-      configString: result.configString,
+    try {
+      // Subscribe on-chain. The purchase resolves the handshake endpoint from
+      // the node row it fetches for prices anyway.
+      const { sessionId, remoteUrl } = await subscribeToNode({
+        wallet,
+        address,
+        nodeAddress: params.nodeAddress,
+        apiField: params.apiField,
+        type: params.type,
+        amount: params.amount,
+        denom: params.denom,
+        clients: { query: flow.query, signing: flow.signing },
+      }).catch(noteChainError)
+
+      // Pre-cache sessions CONCURRENTLY with the handshake: the row exists from
+      // the moment the tx commits, and RPC is still reachable (the tunnel goes
+      // up in the follow-up connect call). Applied only after the handshake
+      // succeeds, so a refunded session never primes the cache or the quota.
+      const sessionsPromise = readAllSessions(flow.query).catch(() => null)
+
+      // Handshake. On ANY failure the just-created session is auto-cancelled
+      // (refund) instead of orphaning the deposit (H1).
+      const result = await establishSessionOrRefund({
+        sessionId,
+        nodeAddress: params.nodeAddress,
+        nodeType: params.nodeType,
+        apiField: params.apiField,
+        nodeMoniker: params.nodeMoniker,
+        nodeCountry: params.nodeCountry,
+        wallet,
+        address,
+        privKey,
+        isDeposit: true,
+        remoteUrl,
+      })
+
+      applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
+
+      const sessions = await sessionsPromise
+      if (sessions) {
+        lastKnownSessions = sessions.map((s) => {
+          return decorateSessionRow(s)
+        })
+        setQuota(sessions.find((s) => s.id === sessionId))
+      }
+
+      // The chain row was unreadable or hadn't appeared yet — fall back to what the
+      // user just bought. A session created seconds ago has metered nothing, so both
+      // baselines are 0.
+      if (!activeQuota) {
+        activeQuota = {
+          sessionId,
+          maxDurationSeconds: params.type === 'hours' ? params.amount * 3600 : null,
+          baselineDurationSeconds: 0,
+          maxBytes: params.type === 'gigabytes' ? params.amount * 1024 ** 3 : 0,
+          baselineBytes: 0,
+        }
+        quotaWarned = false
+      }
+
+      return {
+        sessionId,
+        protocol: result.protocol,
+        configString: result.configString,
+      }
+    } finally {
+      flow.disconnect()
     }
   })
 
@@ -2815,8 +2874,9 @@ export function registerIpcHandlers(): void {
       startSession: (hop, signer) =>
         subscribeToNode({
           wallet: signer.wallet, address: signer.address, nodeAddress: hop.nodeAddress,
+          apiField: hop.apiField,
           type: params.type, amount: params.amount, denom: params.denom,
-        }).catch(noteChainError),
+        }).then((r) => r.sessionId).catch(noteChainError),
       entrySigner: activeSigner,
       exitSigner,
     })
@@ -3547,41 +3607,65 @@ export function registerIpcHandlers(): void {
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
 
-    await preflightConnect(params.nodeType, params.apiField)
-    await assertSufficientFunds(cachedPlanCost(params.planId, params.denom))
+    // Phase A — the pre-payment checks, the shared RPC connection and the
+    // handshake endpoint (read-only), all in parallel. Any failure aborts with
+    // nothing spent and the connection closed.
+    const flowPromise = openChainFlow(wallet)
+    let remoteUrl: string
+    try {
+      ;[, , remoteUrl] = await Promise.all([
+        preflightConnect(params.nodeType, params.apiField),
+        flowPromise.then((f) => assertSufficientFunds(cachedPlanCost(params.planId, params.denom), f.query)),
+        flowPromise.then((f) => resolveNodeRemoteUrl(params.nodeAddress, params.apiField, f.query)),
+      ])
+    } catch (err) {
+      flowPromise.then((f) => f.disconnect(), () => {})
+      throw err
+    }
+    const flow = await flowPromise
 
-    const { sessionId, subscriptionId } = await subscribeToPlan({
-      wallet,
-      address,
-      planId: params.planId,
-      denom: params.denom,
-      nodeAddress: params.nodeAddress,
-      renewalPricePolicy: params.renewalPolicy,
-    }).catch(noteChainError)
+    try {
+      const { sessionId, subscriptionId } = await subscribeToPlan({
+        wallet,
+        address,
+        planId: params.planId,
+        denom: params.denom,
+        nodeAddress: params.nodeAddress,
+        renewalPricePolicy: params.renewalPolicy,
+        client: flow.signing,
+      }).catch(noteChainError)
 
-    const result = await establishSessionOrRefund({
-      sessionId,
-      nodeAddress: params.nodeAddress,
-      nodeType: params.nodeType,
-      apiField: params.apiField,
-      nodeMoniker: params.nodeMoniker,
-      nodeCountry: params.nodeCountry,
-      wallet,
-      address,
-      privKey,
-      isDeposit: false,
-    })
+      // The quota READ overlaps the handshake; it is applied only on success.
+      // RPC is still reachable here (the tunnel goes up in the follow-up
+      // connect call). A plan session's caps only exist on chain, so there is
+      // no local fallback.
+      const applyQuota = startQuotaCapture(sessionId, flow.query)
 
-    applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
-    // RPC is still reachable here (the tunnel goes up in the follow-up connect call).
-    // A plan session's caps only exist on chain, so there is no local fallback.
-    await captureQuota(sessionId)
+      const result = await establishSessionOrRefund({
+        sessionId,
+        nodeAddress: params.nodeAddress,
+        nodeType: params.nodeType,
+        apiField: params.apiField,
+        nodeMoniker: params.nodeMoniker,
+        nodeCountry: params.nodeCountry,
+        wallet,
+        address,
+        privKey,
+        isDeposit: false,
+        remoteUrl,
+      })
 
-    return {
-      sessionId,
-      subscriptionId,
-      protocol: result.protocol,
-      configString: result.configString,
+      applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
+      await applyQuota()
+
+      return {
+        sessionId,
+        subscriptionId,
+        protocol: result.protocol,
+        configString: result.configString,
+      }
+    } finally {
+      flow.disconnect()
     }
   })
 
@@ -3606,38 +3690,61 @@ export function registerIpcHandlers(): void {
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
 
-    await preflightConnect(params.nodeType, params.apiField)
-    // Reusing a prepaid allocation — gas only, no new subscription is bought.
-    await assertSufficientFunds(0)
+    // Phase A — same shape as the paid flows even though this one only spends
+    // gas: preflight, gas-reserve check and endpoint resolve in parallel over
+    // the shared connection.
+    const flowPromise = openChainFlow(wallet)
+    let remoteUrl: string
+    try {
+      ;[, , remoteUrl] = await Promise.all([
+        preflightConnect(params.nodeType, params.apiField),
+        // Reusing a prepaid allocation — gas only, no new subscription is bought.
+        flowPromise.then((f) => assertSufficientFunds(0, f.query)),
+        flowPromise.then((f) => resolveNodeRemoteUrl(params.nodeAddress, params.apiField, f.query)),
+      ])
+    } catch (err) {
+      flowPromise.then((f) => f.disconnect(), () => {})
+      throw err
+    }
+    const flow = await flowPromise
 
-    const { sessionId, subscriptionId } = await startSessionWithExistingSubscription({
-      wallet,
-      address,
-      subscriptionId: params.subscriptionId,
-      nodeAddress: params.nodeAddress,
-    }).catch(noteChainError)
+    try {
+      const { sessionId, subscriptionId } = await startSessionWithExistingSubscription({
+        wallet,
+        address,
+        subscriptionId: params.subscriptionId,
+        nodeAddress: params.nodeAddress,
+        client: flow.signing,
+      }).catch(noteChainError)
 
-    const result = await establishSessionOrRefund({
-      sessionId,
-      nodeAddress: params.nodeAddress,
-      nodeType: params.nodeType,
-      apiField: params.apiField,
-      nodeMoniker: params.nodeMoniker,
-      nodeCountry: params.nodeCountry,
-      wallet,
-      address,
-      privKey,
-      isDeposit: false,
-    })
+      // Read overlaps the handshake, applied only on success (see PLAN_SUBSCRIBE).
+      const applyQuota = startQuotaCapture(sessionId, flow.query)
 
-    applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
-    await captureQuota(sessionId)
+      const result = await establishSessionOrRefund({
+        sessionId,
+        nodeAddress: params.nodeAddress,
+        nodeType: params.nodeType,
+        apiField: params.apiField,
+        nodeMoniker: params.nodeMoniker,
+        nodeCountry: params.nodeCountry,
+        wallet,
+        address,
+        privKey,
+        isDeposit: false,
+        remoteUrl,
+      })
 
-    return {
-      sessionId,
-      subscriptionId,
-      protocol: result.protocol,
-      configString: result.configString,
+      applySession(sessionId, params.nodeAddress, params.nodeMoniker, params.nodeCountry, params.nodeType, result)
+      await applyQuota()
+
+      return {
+        sessionId,
+        subscriptionId,
+        protocol: result.protocol,
+        configString: result.configString,
+      }
+    } finally {
+      flow.disconnect()
     }
   })
 

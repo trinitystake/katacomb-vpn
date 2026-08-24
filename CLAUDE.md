@@ -231,6 +231,26 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   (binaries present + SHA-verified; WG/AWG also need `canEscalatePrivileges()`), then
   the node's own `service_type` — fetched from its ROOT path, `/info` 404s — mapped via
   the pure `serviceTypeToNodeType()` and required to match the aggregator's type.
+- **The connect flow rides ONE RPC connection, and its handshake retries a 404 —
+  nothing else.** `chain-clients.ts` owns the speed path: `resolveRpcBase` follows the
+  endpoint's 307/308 redirect once per launch (the default rpc.sentinel.co redirects
+  EVERY request to another host, ~100ms each; fail-open, never persisted, never shown
+  in the UI), and `openChainFlow` builds the query + signing clients over a single
+  CometBFT connection with a 1s broadcast poll (blocks are ~3.6s measured, and CosmJS
+  sleeps a full poll interval before its FIRST getTx — the 3s default discovered every
+  committed tx late). Ownership rule: the handler that opens a flow disconnects it in
+  its `finally`, and anything handed a flow client (`subscribeToNode`, `subscribeToPlan`,
+  `startSessionWithExistingSubscription`, `getBalance`, `getActiveSessions`,
+  `queryNodeOnChain`) must never disconnect a client it was given. The purchase resolves
+  the handshake endpoint from the node row it already fetched for prices, BEFORE the tx
+  (an unresolvable node now costs nothing instead of a refund), so
+  `establishSessionOrRefund` only queries when no `remoteUrl` was passed. Its handshake
+  retries on HTTP 404 ONLY (`shouldRetrySessionHandshake`, bounded at 2 x 2s): dvpnx's
+  handler validates the session against the chain LIVE, so a 404 moments after our tx
+  commits is the node's own RPC lagging ours, not a verdict — while every other status
+  refunds immediately, and the RECONNECT path's handshake semantics (409 = normal,
+  404 = session gone) are deliberately untouched. All three session-creating broadcasts
+  now really do set a `timeoutHeight` (the plan paths used to skip it).
 - **Retry, don't re-buy.** A failed bring-up leaves the paid session's config stashed in
   main (cleared only by `performDisconnect`), so the connect modals offer "Retry
   connection" (`connectionConnect` alone) instead of resetting to the subscribe form.

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, shouldRetrySessionHandshake, HANDSHAKE_RETRY_MAX_RETRIES, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
 
 // --- isChildProxyCarryingTraffic (the spawn-to-tun-up window) ---
 
@@ -497,6 +497,24 @@ test('describeNodeApiError: survives shapes it was never given', () => {
   assert.deepEqual(describeNodeApiError(null), { status: null, message: 'null' })
   assert.deepEqual(describeNodeApiError('plain string'), { status: null, message: 'plain string' })
   assert.equal(describeNodeApiError({ response: { status: '409' } }).status, null)
+})
+
+// --- shouldRetrySessionHandshake ---
+
+test('shouldRetrySessionHandshake: retries a 404 (node RPC lag) up to the cap', () => {
+  // The node answers 404 when its own RPC has not seen our session's block yet
+  // (dvpnx handlers.go queries the chain live) — retryable, twice.
+  assert.equal(shouldRetrySessionHandshake(404, 0), true)
+  assert.equal(shouldRetrySessionHandshake(404, 1), true)
+  assert.equal(shouldRetrySessionHandshake(404, HANDSHAKE_RETRY_MAX_RETRIES), false)
+})
+
+test('shouldRetrySessionHandshake: every other outcome is a real verdict, never retried', () => {
+  // 409 = the node holds a record; 400/401 = the session or signer is wrong;
+  // 500 = the node itself failed; null = no HTTP response at all (timeout etc.).
+  for (const status of [409, 400, 401, 500, 502, null]) {
+    assert.equal(shouldRetrySessionHandshake(status, 0), false)
+  }
 })
 
 // --- deadTunnelMessage ---

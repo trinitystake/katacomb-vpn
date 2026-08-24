@@ -29,7 +29,8 @@ import { buildHandshakeBody, postHandshake } from './node-handshake'
 import { buildHysteria2Config } from './hysteria-config'
 import { buildAmneziaWgConfig } from './amneziawg-config'
 import { buildOpenVpnConfig } from './openvpn-config'
-import { GAS_PRICE_STR } from '../shared/chain-constants'
+import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
+import { resolveRpcBase } from './chain-clients'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 // A node in this app's threat model may accept the TLS connection but never reply
@@ -42,10 +43,6 @@ const HANDSHAKE_TIMEOUT_MS = 15_000
 const PROXIED_HANDSHAKE_TIMEOUT_MS = 30_000
 // Fail fast instead of hanging if the configured RPC is slow/unreachable (finding L2).
 const RPC_CONNECT_TIMEOUT_MS = 10_000
-// Blocks of validity for a session-creating tx (~6s/block on chain → ~3 min).
-// Past this height the chain rejects the tx, so it can't confirm long after we've
-// stopped polling (finding H2).
-const TX_TIMEOUT_HEIGHT_OFFSET = 30
 const SESSION_TX_TIMEOUT_MESSAGE =
   'The transaction timed out before confirmation. It may still be processing. Check ' +
   'the Session tab shortly and cancel any unexpected session to reclaim your funds.'
@@ -236,30 +233,28 @@ interface OnChainNode {
   remoteAddrs: string[]
 }
 
-async function queryNodeOnChain(nodeAddress: string): Promise<OnChainNode> {
-  const client = await withTimeout(SentinelClient.connect(getRpcEndpoint()), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
+async function queryNodeOnChain(nodeAddress: string, client?: SentinelClient): Promise<OnChainNode> {
+  // A caller sharing a connect flow's client keeps ownership of it; only a
+  // connection opened here is closed here (see chain-clients.ts). A standalone
+  // connection still goes to the redirect-resolved base: this is the reconnect
+  // path's one chain call, and the multihop resolves ride it too.
+  const own = !client
+  const c = client ?? await withTimeout(SentinelClient.connect(await resolveRpcBase(getRpcEndpoint())), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   try {
-    const result = await client.sentinelQuery?.node.node(nodeAddress)
+    const result = await c.sentinelQuery?.node.node(nodeAddress)
     if (!result) throw new Error('Node not found on chain')
     return result as OnChainNode
   } finally {
-    client.disconnect()
+    if (own) c.disconnect()
   }
 }
 
-export async function resolveNodeRemoteUrl(
-  nodeAddress: string,
-  apiField: string
-): Promise<string> {
-  try {
-    const node = await queryNodeOnChain(nodeAddress)
-    if (node.remoteAddrs && node.remoteAddrs.length > 0) {
-      return node.remoteAddrs[0]
-    }
-  } catch {
-    // Fall through to API field
+/** The endpoint rule shared by resolveNodeRemoteUrl and subscribeToNode: the
+ * chain's remoteAddrs first, the (validated) aggregator apiField as fallback. */
+function remoteUrlFromNode(node: OnChainNode | null, apiField: string): string {
+  if (node?.remoteAddrs && node.remoteAddrs.length > 0) {
+    return node.remoteAddrs[0]
   }
-
   if (apiField) {
     // apiField is renderer-supplied: parse + constrain it before it becomes the
     // handshake endpoint (which we hit with the wallet private key). Reject
@@ -268,39 +263,82 @@ export async function resolveNodeRemoteUrl(
     if (!isSafeNodeApiUrl(apiField)) throw new Error('Invalid node API endpoint')
     return apiField.startsWith('http') ? apiField : `https://${apiField}`
   }
-
   throw new Error('Cannot resolve node remote address')
+}
+
+export async function resolveNodeRemoteUrl(
+  nodeAddress: string,
+  apiField: string,
+  client?: SentinelClient,
+): Promise<string> {
+  let node: OnChainNode | null = null
+  try {
+    node = await queryNodeOnChain(nodeAddress, client)
+  } catch {
+    // Fall through to API field
+  }
+  return remoteUrlFromNode(node, apiField)
 }
 
 export async function subscribeToNode(params: {
   wallet: DirectSecp256k1HdWallet
   address: string
   nodeAddress: string
+  /** Aggregator fallback for the returned remoteUrl when the chain row has no remoteAddrs. */
+  apiField: string
   type: 'gigabytes' | 'hours'
   amount: number
   denom: string
-}): Promise<string> {
-  const { wallet, address, nodeAddress, type, amount, denom } = params
+  /**
+   * Share a connect flow's clients (one RPC connection, see chain-clients.ts)
+   * instead of opening a fresh one. The caller owns their lifecycle. The
+   * multihop purchases stay in standalone mode: a chain can pay its hops from
+   * two wallets, and a signing client is bound to one.
+   */
+  clients?: { query: SentinelClient; signing: SigningSentinelClient }
+}): Promise<{ sessionId: string; remoteUrl: string }> {
+  const { wallet, address, nodeAddress, apiField, type, amount, denom, clients } = params
 
   // Step 1: Create signing client and fetch on-chain prices
   sendProgress('1/5', 'Creating signing client...')
-  // Start the signing client and the on-chain price query in parallel. If the query
-  // rejects, disconnect the client spun up alongside it so it can't leak (finding L1).
-  const clientPromise = withTimeout(
-    SigningSentinelClient.connectWithSigner(getRpcEndpoint(), wallet, { gasPrice: GAS_PRICE }),
-    RPC_CONNECT_TIMEOUT_MS,
-    'RPC connect',
-  )
+  let client: SigningSentinelClient
   let onChainNode: OnChainNode
-  try {
-    onChainNode = await queryNodeOnChain(nodeAddress)
-  } catch (err) {
-    clientPromise.then((c) => c.disconnect(), () => {})
-    throw err
+  let height: number
+  let ownClient = false
+  if (clients) {
+    // One shared connection, so the two reads the tx needs go out together.
+    client = clients.signing
+    ;[onChainNode, height] = await Promise.all([
+      queryNodeOnChain(nodeAddress, clients.query),
+      clients.signing.getHeight(),
+    ])
+  } else {
+    // Standalone: start the signing client and the on-chain price query in
+    // parallel. If the query rejects, disconnect the client spun up alongside
+    // it so it can't leak (finding L1).
+    ownClient = true
+    const clientPromise = withTimeout(
+      resolveRpcBase(getRpcEndpoint()).then((base) =>
+        SigningSentinelClient.connectWithSigner(base, wallet, { gasPrice: GAS_PRICE })),
+      RPC_CONNECT_TIMEOUT_MS,
+      'RPC connect',
+    )
+    try {
+      onChainNode = await queryNodeOnChain(nodeAddress)
+    } catch (err) {
+      clientPromise.then((c) => c.disconnect(), () => {})
+      throw err
+    }
+    client = await clientPromise
+    height = await client.getHeight()
   }
-  const client = await clientPromise
 
   try {
+    // Resolve the handshake endpoint from the row already in hand, BEFORE the tx:
+    // the post-tx path used to re-query the chain for this exact row, and a node
+    // with no usable address should cost nothing rather than a purchase + refund.
+    const remoteUrl = remoteUrlFromNode(onChainNode, apiField)
+
     // Find the matching on-chain Price for the selected denom and subscription type
     const priceList = type === 'gigabytes' ? onChainNode.gigabytePrices : onChainNode.hourlyPrices
     const price = priceList.find((p) => p.denom === denom)
@@ -325,7 +363,8 @@ export async function subscribeToNode(params: {
     const msg = nodeStartSession(msgArgs as unknown as Parameters<typeof nodeStartSession>[0])
     // Bound how late this money tx can land: set a timeoutHeight so the chain rejects
     // it past the window rather than confirming after we've stopped polling (H2).
-    const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
+    // The height is at most a couple of seconds stale against a ~110s window.
+    const timeoutHeight = BigInt(height + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
       client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn', timeoutHeight),
       SESSION_TX_TIMEOUT_MESSAGE,
@@ -346,9 +385,9 @@ export async function subscribeToNode(params: {
       throw new Error('Session ID not found in event')
     }
 
-    return sessionId.toString()
+    return { sessionId: sessionId.toString(), remoteUrl }
   } finally {
-    client.disconnect()
+    if (ownClient) client.disconnect()
   }
 }
 

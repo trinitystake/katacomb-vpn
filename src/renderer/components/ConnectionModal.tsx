@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation, TunnelProtocol } from '../types'
+import type { SentNode, NodeProbeResult, PlanInfo, PlanAllocation } from '../types'
+import { useConnectFlow } from '../hooks/useConnectFlow'
 import ConnectErrorActions from './ConnectErrorActions'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
@@ -38,7 +39,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
   // "Connected" panel + Disconnect instead of the subscribe form (which would create
   // a redundant second session). `reconnecting` counts so we don't flash the form
   // during a same-node reconnect blip.
-  const { status, disconnect: disconnectVpn } = useConnection()
+  const { status } = useConnection()
   const onThisNode =
     status.nodeAddress === node.address &&
     (status.state === 'connected' || status.state === 'reconnecting')
@@ -49,21 +50,17 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [subType, setSubType] = useState<'gigabytes' | 'hours'>('gigabytes')
   const [amount, setAmount] = useState(1)
   const { udvpn, display: balance, refresh: refreshBalance, refreshing: refreshingBalance } = useBalance()
-  const [connecting, setConnecting] = useState(false)
-  const [currentStep, setCurrentStep] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [tunnelConnected, setTunnelConnected] = useState(false)
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  // Protocol of the session we already paid for. Kept so a failed bring-up can be
-  // retried against that session instead of buying a second one.
-  const [paidProtocol, setPaidProtocol] = useState<TunnelProtocol | null>(null)
+  // The purchase-then-tunnel state machine, shared with the Plans tab's modal.
+  const {
+    connecting, currentStep, error, tunnelConnected, sessionId, paidProtocol, disconnecting,
+    start, retryTunnel, disconnect: disconnectFlow, reset,
+  } = useConnectFlow()
   // Full tunnel vs. local SOCKS proxy. Only the child-proxy protocols expose a
   // local listener, so the choice is hidden (and forced to 'tunnel') otherwise.
   const [mode, setMode] = useState<'tunnel' | 'proxy'>('tunnel')
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
-  const [disconnecting, setDisconnecting] = useState(false)
 
   // v2ray(2)/xray(4)/hysteria2(6) run a local SOCKS5 listener, so they can be used
   // as a plain proxy. WireGuard/AmneziaWG are the routing change — no proxy mode.
@@ -118,13 +115,6 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const funds = udvpn === null ? null : checkFunds(udvpn, matchingAllocation ? 0 : costUdvpn)
   const cantAfford = funds !== null && !funds.ok
 
-  useEffect(() => {
-    const unsub = window.api.onConnectionProgress((step, _detail) => {
-      setCurrentStep(step)
-    })
-    return unsub
-  }, [])
-
   // Auto-probe latency as soon as the modal opens — saves the user a click and
   // surfaces reachability inline with the rest of the node details.
   useEffect(() => {
@@ -155,43 +145,6 @@ export default function ConnectionModal({ node, onClose }: Props) {
     }
   }, [node.address, node.api])
 
-  /**
-   * The tunnel bring-up step on its own. Main keeps the paid session's config
-   * (activeWg/activeV2ray/…) until disconnect, so calling this after a failed
-   * bring-up reuses that session — no second subscribe tx, no second payment.
-   */
-  async function connectTunnelOnly(protocol: TunnelProtocol, dnsFallback = false) {
-    setCurrentStep('5/5')
-    await window.api.connectionConnect({
-      protocol,
-      ...(proxyCapable && mode === 'proxy' ? { mode: 'proxy' as const } : {}),
-      ...(dnsFallback ? { dnsFallback: true } : {}),
-    })
-    setTunnelConnected(true)
-  }
-
-  /** Error-state retry when the payment succeeded but the tunnel didn't come up. */
-  async function handleRetryTunnel(dnsFallback = false) {
-    if (!paidProtocol) return
-    setConnecting(true)
-    setError(null)
-    try {
-      await connectTunnelOnly(paidProtocol, dnsFallback)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Connection failed')
-    } finally {
-      setConnecting(false)
-    }
-  }
-
-  /** Drop the paid-session context and go back to the subscribe form. */
-  function resetToSubscribe() {
-    setError(null)
-    setCurrentStep(null)
-    setSessionId(null)
-    setPaidProtocol(null)
-  }
-
   async function handleSubscribe() {
     if (!matchingAllocation && !selectedPrice) return
 
@@ -206,17 +159,11 @@ export default function ConnectionModal({ node, onClose }: Props) {
     }
     setVpnWarning(null)
 
-    setConnecting(true)
-    setError(null)
-    setCurrentStep('1/5')
-
-    try {
-      let protocol: string
-
+    await start(async () => {
       if (matchingAllocation) {
         // Reuse existing on-chain subscription — single MsgStartSession in
         // sentinel.subscription.v3, no new subscription is created.
-        const res = await window.api.planStartSessionFromSub({
+        return window.api.planStartSessionFromSub({
           subscriptionId: matchingAllocation.subscriptionId,
           planId: matchingAllocation.planId,
           nodeAddress: node.address,
@@ -225,34 +172,20 @@ export default function ConnectionModal({ node, onClose }: Props) {
           nodeType: node.type,
           apiField: node.api,
         })
-        setSessionId(res.sessionId)
-        protocol = res.protocol
-      } else if (selectedPrice) {
-        const res = await window.api.connectionSubscribe({
-          nodeAddress: node.address,
-          nodeMoniker: node.moniker,
-          nodeCountry: node.country,
-          nodeType: node.type,
-          apiField: node.api,
-          type: subType,
-          amount,
-          denom: 'udvpn',
-          quoteValue: selectedPrice.raw,
-        })
-        setSessionId(res.sessionId)
-        protocol = res.protocol
-      } else {
-        throw new Error('No valid subscription selected')
       }
-
-      const tunnelProtocol = protocol as TunnelProtocol
-      setPaidProtocol(tunnelProtocol)
-      await connectTunnelOnly(tunnelProtocol)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Connection failed')
-    } finally {
-      setConnecting(false)
-    }
+      if (!selectedPrice) throw new Error('No valid subscription selected')
+      return window.api.connectionSubscribe({
+        nodeAddress: node.address,
+        nodeMoniker: node.moniker,
+        nodeCountry: node.country,
+        nodeType: node.type,
+        apiField: node.api,
+        type: subType,
+        amount,
+        denom: 'udvpn',
+        quoteValue: selectedPrice.raw,
+      })
+    }, { mode: proxyCapable && mode === 'proxy' ? 'proxy' : 'tunnel' })
   }
 
   function handleSeePlansForNode() {
@@ -261,13 +194,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
   }
 
   async function handleDisconnect() {
-    setDisconnecting(true)
-    try {
-      await disconnectVpn()
-    } finally {
-      setDisconnecting(false)
-      onClose()
-    }
+    // Only close on success: a failed disconnect used to vanish with the modal,
+    // leaving the button looking ignored (the audited catch-less pattern).
+    if (await disconnectFlow()) onClose()
   }
 
   const title = onThisNode
@@ -643,9 +572,9 @@ export default function ConnectionModal({ node, onClose }: Props) {
           <ConnectErrorActions
             error={error}
             paidSessionId={paidProtocol ? sessionId : null}
-            onRetryTunnel={() => handleRetryTunnel()}
-            onStartOver={resetToSubscribe}
-            onRetryWithoutDns={paidProtocol ? () => handleRetryTunnel(true) : undefined}
+            onRetryTunnel={() => retryTunnel()}
+            onStartOver={reset}
+            onRetryWithoutDns={paidProtocol ? () => retryTunnel(true) : undefined}
           />
         )}
 

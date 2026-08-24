@@ -117,7 +117,7 @@ export default function MyPlansPanel({ onBrowse }: { onBrowse: () => void }) {
                   <button
                     onClick={() => setConnectTarget({ row, manual: false })}
                     disabled={!canConnect}
-                    title={tunnelUp ? 'Disconnect first to start a new session' : undefined}
+                    title={tunnelUp ? 'Disconnect first to start a new session' : 'Start a new session on this plan (small network fee)'}
                     className="btn btn-primary text-xs px-3 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Connect

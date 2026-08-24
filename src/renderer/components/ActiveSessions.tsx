@@ -468,7 +468,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                                   ? 'Disconnect current VPN first'
                                   : isChain
                                     ? 'Rebuilds both hops of the chain'
-                                    : undefined
+                                    : 'Resume this session on the same node. No new transaction.'
                             }
                           >
                             {/* Not "Connect chain" / "End both": the card is headed
@@ -477,7 +477,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                                 labels used to carry is still carried, and more precisely
                                 — the title here, and for End a confirm that names the
                                 peer session it is about to close. */}
-                            {isBusy ? <Spinner /> : 'Connect'}
+                            {isBusy ? <Spinner /> : 'Reconnect'}
                           </button>
                         )}
                         <button

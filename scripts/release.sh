@@ -26,8 +26,12 @@
 #                 release changed what the app does. Every version STRING in both
 #                 (notes title, "Fixes in", README status line, and the install
 #                 commands in both) is rewritten for you in step 1 and committed as
-#                 "Update docs for <version>" - do not hand-edit those. What no
-#                 script can tell you is that the BODY is stale.
+#                 "Update docs for <version>" - do not hand-edit those. The BODY
+#                 is yours, and preflight refuses the cut if it still matches the
+#                 previous release's word for word: 1.0.3 and 1.1.0 both shipped
+#                 1.0.2's Highlights because nothing used to check. That tripwire
+#                 only catches prose left completely untouched, so it is a floor,
+#                 not a proofread.
 #                 You do NOT have to work out whether step 2 applies: preflight
 #                 diffs electron-builder.yml and resources/linux/ against the last
 #                 tag and says so, and the closing output prints the steps that
@@ -197,6 +201,55 @@ generate_readme() {
     die "$src_readme: no '**Status:** release (x.y.z)' line to bump. Reword generate_readme() in scripts/release.sh to match the new wording."
 }
 
+# The prose the generator does NOT touch — the summary line under the title and
+# ## Highlights — is step 0's job, and until now nothing noticed when step 0 was
+# skipped. 1.0.3 and 1.1.0 both shipped 1.0.2's Highlights verbatim: once the
+# title, the fixes list and the install filenames have been rewritten, a file
+# carried forward wholesale and one genuinely rewritten look identical.
+#
+# So ask the question directly rather than trying to parse "the prose": put BOTH
+# the working copy and the PREVIOUS release's copy through the generator for this
+# same version, and compare the results. Generating both sides normalises the
+# three mechanical rewrites identically, so what is left to differ is exactly the
+# prose. Using the generator as its own oracle also means there is no list of
+# section headings here to keep in step with the one above.
+#
+# Both sides must be generated. Comparing the raw working copy against a
+# generated one instead looks like it works and does not: before the docs commit
+# lands, the file still carries the PREVIOUS version's fixes list and filenames,
+# so the two differ for mechanical reasons and a stale file reads as rewritten —
+# a miss at exactly the moment this runs.
+#
+# Safe to re-run: on a second attempt the docs commit has already landed, but
+# both sides still get the same fixes list, so the answer turns only on the prose.
+#
+# What it cannot see: ANY edit to the prose since the last tag reads as "step 0
+# was done", including one made for some other reason - a typo fix, or a
+# correction to the notes of the release before this one. It catches the case
+# that actually happened, prose left entirely alone, and is a floor rather than
+# a proofread.
+assert_notes_prose_rewritten() {
+  local version=$1 prev_tag=$2 notes=$3 from_worktree=$4
+
+  [ -n "$prev_tag" ] || return 0
+  [ -s "$from_worktree" ] || return 0
+  git cat-file -e "$prev_tag:$notes" 2>/dev/null || return 0
+
+  local prev_notes carried stale=0
+  prev_notes="$(mktemp)"
+  carried="$(mktemp)"
+  git show "$prev_tag:$notes" > "$prev_notes"
+  generate_release_notes "$version" "$prev_tag" "$prev_notes" "$carried"
+  diff -q "$from_worktree" "$carried" >/dev/null 2>&1 && stale=1
+  rm -f "$prev_notes" "$carried"
+
+  [ "$stale" = 0 ] || die "$notes is still $prev_tag's notes with the version strings bumped.
+        Its '## Highlights' and the summary line under the title describe
+        ${prev_tag#v}, not $version. Rewrite them (step 0) and re-run. That is
+        the one part of the notes no script can write for you."
+  ok "$notes prose rewritten since $prev_tag"
+}
+
 usage() {
   sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -335,6 +388,7 @@ sync_doc() {
 NOTES_TMP="$(mktemp)"
 README_TMP="$(mktemp)"
 generate_release_notes "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
+assert_notes_prose_rewritten "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
 generate_readme "$VERSION" "$READMEDOC" "$README_TMP"
 sync_doc "$NOTES" "$NOTES_TMP"
 sync_doc "$READMEDOC" "$README_TMP"

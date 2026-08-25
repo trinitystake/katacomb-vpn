@@ -8,7 +8,7 @@ import Spinner from './Spinner'
 import { useNavigation } from '../contexts/NavigationContext'
 import { useConnection } from '../hooks/useConnection'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
-import { protocolMeta, isProtocolSupported } from '../utils/protocols'
+import { protocolMeta, isProtocolSupported, isProxyCapable } from '../utils/protocols'
 import { nodeStatusMeta, isNodeConnectable } from '../utils/node-status'
 import { useBalance } from '../hooks/useBalance'
 import { checkFunds, formatP2p, insufficientFundsMessage } from '../../shared/funds'
@@ -65,7 +65,7 @@ export default function ConnectionModal({ node, onClose }: Props) {
 
   // v2ray(2)/xray(4)/hysteria2(6) run a local SOCKS5 listener, so they can be used
   // as a plain proxy. WireGuard/AmneziaWG are the routing change — no proxy mode.
-  const proxyCapable = node.type === 2 || node.type === 4 || node.type === 6
+  const proxyCapable = isProxyCapable(node.type)
 
   const gbPrice = getUdvpnPrice(node.gigabytePrices)
   const hrPrice = getUdvpnPrice(node.hourlyPrices)

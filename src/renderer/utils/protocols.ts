@@ -45,6 +45,12 @@ export function isProtocolSupported(type: number): boolean {
   return protocolMeta(type).supported
 }
 
+// The child-proxy protocols (local SOCKS5 listener): the only ones local
+// proxy mode can run. Mirrors main's isChildProxy branch set.
+export function isProxyCapable(type: number): boolean {
+  return type === 2 || type === 4 || type === 6
+}
+
 // Ordered options for the protocol filter dropdown (skips type 0 / unknown).
 export const PROTOCOL_FILTER_OPTIONS: { value: ProtocolType; label: string }[] = [
   { value: 1, label: 'WireGuard' },

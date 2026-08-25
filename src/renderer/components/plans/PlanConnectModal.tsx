@@ -7,7 +7,7 @@ import { usePlansContext } from '../../contexts/PlansContext'
 import { useBalance } from '../../hooks/useBalance'
 import { checkFunds, insufficientFundsMessage } from '../../../shared/funds'
 import { planPriceDisplay, formatBytes, formatDuration } from '../../utils/format'
-import { protocolMeta, isProtocolSupported } from '../../utils/protocols'
+import { protocolMeta, isProtocolSupported, isProxyCapable } from '../../utils/protocols'
 import { nodeStatusMeta, isNodeConnectable } from '../../utils/node-status'
 import { SOCKS_DISPLAY_ADDR } from '../../../shared/socks'
 import ConnectErrorActions from '../ConnectErrorActions'
@@ -185,6 +185,13 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
   }, [planNodeAddrs, nodeIndex])
   const selectedNode = selectedAddr ? nodeIndex.get(selectedAddr) ?? null : null
 
+  function handleProxyModeChange(checked: boolean) {
+    setProxyMode(checked)
+    // Ticking the box makes a selected non-proxy node ineligible: clear it so
+    // the greyed-out row and the connect button agree.
+    if (checked && selectedNode && !isProxyCapable(selectedNode.type)) setSelectedAddr(null)
+  }
+
   async function checkOtherVpns(): Promise<boolean> {
     if (vpnWarning) {
       // Second press = Continue anyway.
@@ -223,7 +230,8 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
     setKind(isReuse ? 'manual-reuse' : 'manual-fresh')
     setSmartResult(null)
     const node = selectedNode
-    const proxy = proxyMode && (node.type === 2 || node.type === 4 || node.type === 6)
+    // The picker refuses non-proxy nodes while the box is ticked, so proxyMode
+    // alone decides the mode (it used to be silently ignored for such nodes).
     await start(async () => {
       const params = {
         nodeAddress: node.address,
@@ -237,7 +245,7 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
         : await window.api.planSubscribe({ planId: plan.id, denom, renewalPolicy, ...params })
       void refreshOverview()
       return res
-    }, { mode: proxy ? 'proxy' : 'tunnel' })
+    }, { mode: proxyMode ? 'proxy' : 'tunnel' })
   }
 
   async function handleDisconnect() {
@@ -259,6 +267,28 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
         : `Subscribe to plan #${plan.id}`
 
   const showForm = !connecting && !error && !tunnelConnected && !vpnWarning
+
+  // One toggle rendered in both branches, just above the action button: an
+  // advanced option that should not push the primary flow down the modal.
+  const proxyToggle = (
+    <label
+      className="flex items-start gap-2 cursor-pointer text-sm"
+      title={`Runs a SOCKS5 proxy on ${SOCKS_DISPLAY_ADDR} instead of routing the whole device. Only apps configured to use the proxy are tunneled, and the kill switch is not available. Only nodes running v2ray, xray or hysteria2 qualify.`}
+    >
+      <input
+        type="checkbox"
+        checked={proxyMode}
+        onChange={(e) => handleProxyModeChange(e.target.checked)}
+        className="accent-accent mt-0.5"
+      />
+      <span>
+        <span className="text-text-secondary">Local proxy mode</span>
+        <span className="block text-xs text-text-tertiary">
+          SOCKS5 proxy at {SOCKS_DISPLAY_ADDR}, no kill switch
+        </span>
+      </span>
+    </label>
+  )
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting ? undefined : onClose}>
@@ -361,25 +391,13 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
               />
             )}
 
-            <label className="flex items-start gap-2 cursor-pointer text-sm">
-              <input
-                type="checkbox"
-                checked={proxyMode}
-                onChange={(e) => setProxyMode(e.target.checked)}
-                className="accent-accent mt-0.5"
-              />
-              <span className="text-text-secondary">
-                Local proxy mode: run a SOCKS5 proxy on {SOCKS_DISPLAY_ADDR} instead of routing
-                the whole device. Only nodes running v2ray, xray or hysteria2 qualify. No kill switch.
-              </span>
-            </label>
-
             {!manual ? (
               <div className="space-y-3">
                 <p className="text-text-tertiary text-xs">
                   Smart connect checks the plan's nodes and picks the fastest healthy one. If the
                   first choice fails, the next is tried without paying the plan price again.
                 </p>
+                {proxyToggle}
                 <button
                   onClick={handleSmartConnect}
                   disabled={cantAfford}
@@ -419,14 +437,17 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
                   <div className="max-h-56 overflow-y-auto border border-border rounded-md divide-y divide-border">
                     {manualRows.map(({ addr, node }) => {
                       const meta = node ? nodeStatusMeta(node) : null
+                      const proxyBlocked = proxyMode && node !== null && !isProxyCapable(node.type)
                       const clickable = node !== null &&
                         isProtocolSupported(node.type) &&
+                        !proxyBlocked &&
                         (isNodeConnectable(node) || (meta?.state === 'unhealthy' && healthAcknowledged))
                       return (
                         <button
                           key={addr}
                           type="button"
                           disabled={!clickable}
+                          title={proxyBlocked ? 'Not available in local proxy mode, needs v2ray, xray or hysteria2' : undefined}
                           onClick={() => setSelectedAddr(addr)}
                           className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 transition-colors ${
                             selectedAddr === addr ? 'bg-accent/10' : 'hover:bg-bg-tertiary'
@@ -461,6 +482,7 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
                     </span>
                   </label>
                 )}
+                {proxyToggle}
                 <button
                   onClick={handleManualConnect}
                   disabled={!selectedNode || cantAfford}

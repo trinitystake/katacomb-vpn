@@ -15,7 +15,7 @@ type Section = 'mine' | 'catalog'
  * tab, so switching tabs no longer resets it.
  */
 export default function PlansView() {
-  const { overview, discovering, progress, discoverError, discover } = usePlansContext()
+  const { overview, discovering, progress, discoverError, discover, ensureFreshCatalog } = usePlansContext()
   const { plansNodeFilter } = useNavigation()
   const { status } = useConnection()
   // Rescan needs the chain, which our own tunnel makes unreachable (proxy mode
@@ -29,6 +29,11 @@ export default function PlansView() {
   useEffect(() => {
     if (plansNodeFilter) setSection('catalog')
   }, [plansNodeFilter])
+
+  // An old catalog rescans when someone actually looks at it, not at launch.
+  useEffect(() => {
+    if (section === 'catalog') void ensureFreshCatalog()
+  }, [section, ensureFreshCatalog])
 
   const staleness = overview.fetchedAt
     ? `Catalog updated ${formatTimeAgo(overview.fetchedAt)}`

@@ -1,12 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from 'react'
 import type { PlanOverview, DiscoverProgress } from '../types'
+import { shouldAutoRescanCatalog } from '../utils/catalog-refresh'
 
 // One slow backstop; the real refresh triggers are pushes (onSessionsChanged)
 // and explicit actions. While the tunnel is up main answers from memory with
 // stale: true, so the poll costs nothing there.
 const BACKSTOP_POLL_MS = 300_000
-// A catalog older than this triggers one automatic rescan on mount.
-const AUTO_DISCOVER_STALE_MS = 6 * 3600_000
 const DISCOVER_MAX = 500
 
 const EMPTY_OVERVIEW: PlanOverview = {
@@ -29,6 +28,11 @@ interface PlansContextValue {
   refreshOverview: () => Promise<void>
   /** Full on-chain rescan of the plan catalog. */
   discover: () => Promise<void>
+  /**
+   * Auto-rescan hook for the Catalog panel becoming visible: no-op unless the
+   * catalog is empty or old and the chain reachable, at most once per session.
+   */
+  ensureFreshCatalog: () => Promise<void>
 }
 
 const PlansContext = createContext<PlansContextValue | null>(null)
@@ -77,8 +81,9 @@ export function PlansProvider({ children }: { children: ReactNode }) {
   }, [refreshOverview])
 
   // Mount: one overview, then at most one automatic catalog rescan when the
-  // disk cache is empty or old, and only when the chain half answered live
-  // (stale means our own tunnel is up and a rescan would return the cache).
+  // disk cache is EMPTY (a merely old catalog waits for ensureFreshCatalog,
+  // so a My-plans-only session never pays for it) and the chain half answered
+  // live (stale means our own tunnel is up and a rescan would return the cache).
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -87,8 +92,7 @@ export function PlansProvider({ children }: { children: ReactNode }) {
         if (cancelled) return
         setOverview(res)
         setLoading(false)
-        const catalogOld = res.fetchedAt === null || Date.now() - res.fetchedAt > AUTO_DISCOVER_STALE_MS
-        if (!res.stale && catalogOld && !autoDiscovered.current) {
+        if (shouldAutoRescanCatalog('launch', res.stale, res.fetchedAt, Date.now()) && !autoDiscovered.current) {
           autoDiscovered.current = true
           await discover()
         }
@@ -100,6 +104,15 @@ export function PlansProvider({ children }: { children: ReactNode }) {
       cancelled = true
     }
   }, [discover])
+
+  const ensureFreshCatalog = useCallback(async () => {
+    // `loading` guards the first-second race: before the overview lands,
+    // fetchedAt reads null and would kick a needless scan over a fresh cache.
+    if (loading || discovering || autoDiscovered.current) return
+    if (!shouldAutoRescanCatalog('catalog-visible', overview.stale, overview.fetchedAt, Date.now())) return
+    autoDiscovered.current = true
+    await discover()
+  }, [loading, discovering, overview.stale, overview.fetchedAt, discover])
 
   // Sessions changing on chain (a purchase, a refund, an End, settlement) is
   // exactly when subscriptions and allocations move.
@@ -121,8 +134,8 @@ export function PlansProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo(
-    () => ({ overview, loading, discovering, progress, discoverError, refreshOverview, discover }),
-    [overview, loading, discovering, progress, discoverError, refreshOverview, discover],
+    () => ({ overview, loading, discovering, progress, discoverError, refreshOverview, discover, ensureFreshCatalog }),
+    [overview, loading, discovering, progress, discoverError, refreshOverview, discover, ensureFreshCatalog],
   )
 
   return <PlansContext.Provider value={value}>{children}</PlansContext.Provider>

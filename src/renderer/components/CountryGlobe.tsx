@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import Globe, { type GlobeMethods } from 'react-globe.gl'
-import * as THREE from 'three'
+import { geoOrthographic, geoPath, geoGraticule10 } from 'd3-geo'
 import geoUrl from '../assets/world-countries-110m.geojson?url'
 import { polyKey, type PolyFeature } from '../utils/country-normalization'
 import Spinner from './Spinner'
@@ -66,51 +65,45 @@ function makeColorFns(counts: Map<string, number>) {
   return { capColor, strokeColor }
 }
 
-// CPU-idle behavior. Globe.gl runs a continuous Three.js requestAnimationFrame
-// loop at host refresh rate (~60 Hz). On a static chloropleth that's a sustained
-// CPU + GPU draw for nothing changing on screen. We pauseAnimation() after
-// IDLE_PAUSE_MS of no interaction and resumeAnimation() on:
-//   - any pointer event on the canvas (drag/hover/wheel)
-//   - window focus / document becoming visible
-//   - the underlying `counts` prop changing
-// We also pause immediately on window blur or tab/window hidden.
-const IDLE_PAUSE_MS = 1200
-
 // Parse the 436 KB GeoJSON once per process. The globe unmounts on every tab
 // switch, so without this cache it re-fetches + re-parses each time (finding L15).
 let cachedFeatures: Feature[] | null = null
 
+// The view the globe opens on and the recenter button returns to. Kept as a
+// lat/lng pair rather than a rotation so it reads the same as the old camera.
+const HOME = { lat: 35, lng: 15 }
+const RECENTER_MS = 1000
+
+// How far the pointer must travel before a press counts as a drag rather than
+// a click on a country.
+const DRAG_THRESHOLD_PX = 4
+
+// Zoom bounds, as multiples of the scale that fits the sphere to the container.
+const MIN_ZOOM = 0.85
+const MAX_ZOOM = 4
+
+// d3 wants the rotation that BRINGS a point to the centre, which is its negation.
+function rotationFor(lat: number, lng: number): [number, number] {
+  return [-lng, -lat]
+}
+
 export default function CountryGlobe({ counts, onSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const globeRef = useRef<GlobeMethods | undefined>(undefined)
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
+  const sphereRef = useRef<SVGPathElement>(null)
+  const graticuleRef = useRef<SVGPathElement>(null)
+  const countryRefs = useRef<(SVGPathElement | null)[]>([])
+  const tooltipRef = useRef<HTMLDivElement>(null)
+
   const [features, setFeatures] = useState<Feature[]>([])
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
-  // Hidden until onGlobeReady has fired and the initial camera is set,
-  // otherwise the user sees one frame at globe.gl's default altitude
-  // (camera appears as a tiny sphere) before our pointOfView lands.
-  const [ready, setReady] = useState(false)
+  const [hover, setHover] = useState<{ name: string; count: number } | null>(null)
 
-  const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const isPausedRef = useRef(false)
-
-  const doPause = () => {
-    if (!globeRef.current || isPausedRef.current) return
-    globeRef.current.pauseAnimation()
-    isPausedRef.current = true
-  }
-  const doResume = () => {
-    if (!globeRef.current) return
-    if (isPausedRef.current) {
-      globeRef.current.resumeAnimation()
-      isPausedRef.current = false
-    }
-    armAutoPause()
-  }
-  const armAutoPause = () => {
-    if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current)
-    pauseTimerRef.current = setTimeout(doPause, IDLE_PAUSE_MS)
-  }
+  // Camera state lives in refs, not state: a drag moves it every pointermove and
+  // the paths are rewritten imperatively below, so re-rendering 177 React
+  // elements per frame would be pure waste. Nothing else reads these.
+  const rotationRef = useRef<[number, number]>(rotationFor(HOME.lat, HOME.lng))
+  const zoomRef = useRef(1)
 
   // Load GeoJSON once (cached at module level across remounts)
   useEffect(() => {
@@ -126,14 +119,14 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
         if (!cancelled) setFeatures(cachedFeatures)
       })
       .catch(() => {
-        // silent — globe will render bare sphere
+        // silent — globe will render as a bare sphere
       })
     return () => {
       cancelled = true
     }
   }, [])
 
-  // Track container size for the canvas
+  // Track container size so the projection can be refitted.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -147,119 +140,140 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     return () => ro.disconnect()
   }, [])
 
-  // Pointer activity on the container resumes (and re-arms the auto-pause).
+  const fitScale = size.w > 0 && size.h > 0 ? (Math.min(size.w, size.h) / 2) * 0.92 : 0
+
+  // One projection instance for the life of the component; the draw below mutates
+  // its rotation/scale in place rather than rebuilding the path generator.
+  const projection = useMemo(() => geoOrthographic().clipAngle(90), [])
+  const pathGen = useMemo(() => geoPath(projection), [projection])
+  const graticule = useMemo(() => geoGraticule10(), [])
+
+  // Write every `d` attribute straight to the DOM. Called on drag, zoom, resize
+  // and after the feature list arrives.
+  const draw = useCallback(() => {
+    if (!fitScale) return
+    projection
+      .rotate(rotationRef.current)
+      .scale(fitScale * zoomRef.current)
+      .translate([size.w / 2, size.h / 2])
+
+    sphereRef.current?.setAttribute('d', pathGen({ type: 'Sphere' }) ?? '')
+    graticuleRef.current?.setAttribute('d', pathGen(graticule) ?? '')
+    for (let i = 0; i < features.length; i++) {
+      const el = countryRefs.current[i]
+      if (!el) continue
+      // Back-hemisphere features project to nothing; geoPath returns null and the
+      // empty `d` hides them, which is the clipping we want for free.
+      el.setAttribute('d', pathGen(features[i] as Parameters<typeof pathGen>[0]) ?? '')
+    }
+  }, [fitScale, features, graticule, pathGen, projection, size.w, size.h])
+
+  // Redraw whenever geometry inputs change. Colours are React's job, not this one.
   useEffect(() => {
-    const el = containerRef.current
+    draw()
+  }, [draw])
+
+  // Drag to rotate. Scaled by zoom so a dragged pixel moves the same amount of
+  // surface however far in the user is.
+  useEffect(() => {
+    const el = svgRef.current
     if (!el) return
-    const onActivity = () => doResume()
-    const events: (keyof HTMLElementEventMap)[] = ['pointermove', 'pointerdown', 'wheel', 'touchstart']
-    events.forEach((e) => el.addEventListener(e, onActivity, { passive: true }))
+    // `pressed` is "the button is down", `dragging` is "it has moved far enough
+    // to be a drag". They are separate because pointer capture is what breaks a
+    // click: capturing on pointerdown retargets the whole gesture to this <svg>,
+    // so the pointerup lands here rather than on the <path> and the browser
+    // never synthesises a click on the country. Capture only once the pointer
+    // has actually travelled, and a plain click still reaches the path.
+    let pressed = false
+    let dragging = false
+    let downX = 0
+    let downY = 0
+    let lastX = 0
+    let lastY = 0
+    let frame = 0
+
+    const onDown = (e: PointerEvent) => {
+      pressed = true
+      dragging = false
+      downX = lastX = e.clientX
+      downY = lastY = e.clientY
+    }
+    const onMove = (e: PointerEvent) => {
+      if (tooltipRef.current) {
+        const rect = el.getBoundingClientRect()
+        tooltipRef.current.style.transform =
+          `translate(${e.clientX - rect.left + 12}px, ${e.clientY - rect.top + 12}px)`
+      }
+      if (!pressed) return
+      if (!dragging) {
+        if (Math.hypot(e.clientX - downX, e.clientY - downY) < DRAG_THRESHOLD_PX) return
+        dragging = true
+        el.setPointerCapture(e.pointerId)
+      }
+      // Degrees per pixel at the current scale, so the surface tracks the cursor
+      // instead of the globe spinning faster the further the user zooms in.
+      const k = 360 / (projection.scale() * 2 * Math.PI)
+      const [lambda, phi] = rotationRef.current
+      // Latitude is clamped so the pole never rolls past vertical, which would
+      // flip the globe and read as a glitch rather than a rotation.
+      rotationRef.current = [
+        lambda + (e.clientX - lastX) * k,
+        Math.max(-90, Math.min(90, phi - (e.clientY - lastY) * k)),
+      ]
+      lastX = e.clientX
+      lastY = e.clientY
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; draw() })
+    }
+    const onUp = (e: PointerEvent) => {
+      pressed = false
+      dragging = false
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+    }
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const next = zoomRef.current * (e.deltaY < 0 ? 1.1 : 1 / 1.1)
+      zoomRef.current = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next))
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; draw() })
+    }
+
+    el.addEventListener('pointerdown', onDown)
+    el.addEventListener('pointermove', onMove)
+    el.addEventListener('pointerup', onUp)
+    el.addEventListener('pointercancel', onUp)
+    el.addEventListener('wheel', onWheel, { passive: false })
     return () => {
-      events.forEach((e) => el.removeEventListener(e, onActivity))
+      if (frame) cancelAnimationFrame(frame)
+      el.removeEventListener('pointerdown', onDown)
+      el.removeEventListener('pointermove', onMove)
+      el.removeEventListener('pointerup', onUp)
+      el.removeEventListener('pointercancel', onUp)
+      el.removeEventListener('wheel', onWheel)
     }
-  }, [])
+  }, [draw, projection])
 
-  // Window/tab visibility: pause immediately when hidden or blurred.
-  useEffect(() => {
-    const onBlur = () => doPause()
-    const onFocus = () => doResume()
-    const onVisibility = () => {
-      if (document.hidden) doPause()
-      else doResume()
+  const recenter = useCallback(() => {
+    const from: [number, number] = [...rotationRef.current]
+    const to = rotationFor(HOME.lat, HOME.lng)
+    const fromZoom = zoomRef.current
+    const start = performance.now()
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / RECENTER_MS)
+      // easeOutCubic, so it settles rather than stopping dead
+      const e = 1 - Math.pow(1 - t, 3)
+      rotationRef.current = [from[0] + (to[0] - from[0]) * e, from[1] + (to[1] - from[1]) * e]
+      zoomRef.current = fromZoom + (1 - fromZoom) * e
+      draw()
+      if (t < 1) requestAnimationFrame(step)
     }
-    window.addEventListener('blur', onBlur)
-    window.addEventListener('focus', onFocus)
-    document.addEventListener('visibilitychange', onVisibility)
-    return () => {
-      window.removeEventListener('blur', onBlur)
-      window.removeEventListener('focus', onFocus)
-      document.removeEventListener('visibilitychange', onVisibility)
-    }
-  }, [])
-
-  // Clean up the pause timer when the Globe unmounts (tab switch).
-  useEffect(() => {
-    return () => {
-      if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current)
-    }
-  }, [])
-
-  // Resume on data change so the user sees the new chloropleth render in.
-  useEffect(() => {
-    if (ready) doResume()
-  }, [counts, ready])
-
-  // Resume on container resize. Without this, the render loop stays paused
-  // and the canvas appears frozen at the old size until the user interacts —
-  // visible as a 1+ second lag when dragging the window edge.
-  useEffect(() => {
-    if (ready) doResume()
-  }, [size.w, size.h, ready])
-
-  // gunmetal-950 — the sphere reads as the app's deepest surface, so the ocean
-  // recedes behind the bronze landmasses instead of framing them in cold black.
-  const darkMatte = useMemo(
-    () => new THREE.MeshPhongMaterial({ color: 0x101114 }),
-    [],
-  )
-
-  // Free the WebGL context + app-owned material on unmount (tab switch). globe.gl
-  // disposes its own objects but never releases the GL context, so each remount
-  // would leak one until Chromium drops the oldest and the globe goes black
-  // (findings H8/M8).
-  useEffect(() => {
-    return () => {
-      const renderer = rendererRef.current
-      try { renderer?.forceContextLoss() } catch { /* ignore */ }
-      try { renderer?.dispose() } catch { /* ignore */ }
-      darkMatte.dispose()
-    }
-  }, [darkMatte])
+    requestAnimationFrame(step)
+  }, [draw])
 
   const { capColor, strokeColor } = useMemo(() => makeColorFns(counts), [counts])
 
-  // Memoize the accessors react-globe.gl calls per polygon. New function
-  // identities cause react-globe.gl to re-run accessors against every feature,
-  // so keeping these stable across renders avoids redundant work on each tick.
   const countFor = useCallback(
-    (d: object) => counts.get(polyKey(d as Feature)) ?? 0,
+    (f: Feature) => counts.get(polyKey(f)) ?? 0,
     [counts],
   )
-  const polygonCapColorFn = useCallback(
-    (d: object) => capColor(countFor(d)),
-    [capColor, countFor],
-  )
-  const polygonSideColorFn = useCallback(() => 'rgba(0,0,0,0)', [])
-  const polygonStrokeColorFn = useCallback(
-    (d: object) => strokeColor(countFor(d)),
-    [strokeColor, countFor],
-  )
-  const polygonLabelFn = useCallback(
-    (d: object) => {
-      const name = polyKey(d as Feature)
-      const c = countFor(d)
-      // globe.gl takes raw HTML, so this is styled inline rather than by class —
-      // but the custom properties still resolve against :root, so it tracks the
-      // theme tokens like everything else.
-      return `<div style="background:var(--color-bg-primary);color:var(--color-text-primary);padding:4px 8px;border:1px solid var(--color-border);border-radius:3px;font-size:12px;">${name}${c > 0 ? ` (${c})` : ''}</div>`
-    },
-    [countFor],
-  )
-  const onPolygonClickFn = useCallback(
-    (d: object) => {
-      const c = countFor(d)
-      if (c > 0) onSelect(polyKey(d as Feature))
-    },
-    [countFor, onSelect],
-  )
-
-  const recenter = useCallback(() => {
-    const g = globeRef.current
-    if (!g) return
-    g.pointOfView({ lat: 35, lng: 15, altitude: 2.2 }, 1000)
-    // Need the render loop running for the 1 s tween to actually animate.
-    doResume()
-  }, [])
 
   // Aggregate stats for the bottom-right chip.
   const totalNodes = useMemo(
@@ -272,11 +286,10 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
   )
   const fmtNum = (n: number) => n.toLocaleString('en')
 
+  const ready = features.length > 0 && fitScale > 0
+
   return (
     <div ref={containerRef} className="absolute inset-0">
-      {/* Loader covers the globe area until the canvas is fully composed.
-          Hides the dark-empty gap between tab-mount and the chloropleth
-          fade-in. Hidden once `ready` flips after onGlobeReady + 2 rAFs. */}
       {!ready && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-text-secondary text-sm flex items-center gap-2">
@@ -286,57 +299,67 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
         </div>
       )}
 
-      {/*
-        Mount the Globe only once we have BOTH container dimensions AND the
-        country polygons. Mounting earlier shows a bare dark sphere for a
-        few frames while the GeoJSON fetch resolves — visible as the "small
-        black sphere" flash the user otherwise sees on first load.
-      */}
-      {size.w > 0 && size.h > 0 && features.length > 0 && (
-        <div
-          className={`absolute inset-0 transition-opacity duration-300 ${ready ? 'opacity-100' : 'opacity-0'}`}
+      {ready && (
+        <svg
+          ref={svgRef}
+          width={size.w}
+          height={size.h}
+          className="absolute inset-0 touch-none select-none cursor-grab active:cursor-grabbing"
         >
-          <Globe
-            ref={globeRef}
-            width={size.w}
-            height={size.h}
-            backgroundColor="rgba(0,0,0,0)"
-            showAtmosphere={false}
-            globeMaterial={darkMatte}
-            polygonsData={features}
-            polygonAltitude={0.008}
-            polygonCapColor={polygonCapColorFn}
-            polygonSideColor={polygonSideColorFn}
-            polygonStrokeColor={polygonStrokeColorFn}
-            polygonLabel={polygonLabelFn}
-            onPolygonClick={onPolygonClickFn}
-            polygonsTransitionDuration={0}
-            onGlobeReady={() => {
-              const g = globeRef.current
-              if (!g) return
-              // Cap the WebGL renderer at 1x device pixel ratio. On HiDPI
-              // displays the default 2x means 4x the fragment-shader work for
-              // a flat chloropleth that gains almost nothing from super-sampling.
-              const renderer = g.renderer()
-              if (renderer && typeof renderer.setPixelRatio === 'function') {
-                renderer.setPixelRatio(1)
-              }
-              rendererRef.current = renderer
-              g.pointOfView({ lat: 35, lng: 15, altitude: 2.2 }, 0)
-              // Wait two animation frames before fading in: onGlobeReady
-              // fires before the polygon meshes have actually rendered, so
-              // flipping opacity immediately can still show a bare sphere
-              // for one frame.
-              requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                  setReady(true)
-                  armAutoPause()
-                })
-              })
-            }}
+          <defs>
+            {/* Limb shading. Not a light model: a soft darkening toward the edge
+                is enough to read the disc as a sphere against the app's own
+                near-black background. */}
+            <radialGradient id="globe-limb" cx="50%" cy="50%" r="50%">
+              <stop offset="60%" stopColor="#000" stopOpacity="0" />
+              <stop offset="100%" stopColor="#000" stopOpacity="0.55" />
+            </radialGradient>
+          </defs>
+
+          {/* gunmetal-950 — the sphere reads as the app's deepest surface, so the
+              ocean recedes behind the bronze landmasses instead of framing them
+              in cold black. */}
+          <path ref={sphereRef} fill="#101114" />
+          <path
+            ref={graticuleRef}
+            fill="none"
+            stroke="rgba(225, 188, 153, 0.07)"
+            strokeWidth={0.5}
           />
-        </div>
+
+          {features.map((f, i) => {
+            const count = countFor(f)
+            return (
+              <path
+                key={polyKey(f) || i}
+                ref={(el) => { countryRefs.current[i] = el }}
+                fill={capColor(count)}
+                stroke={strokeColor(count)}
+                strokeWidth={0.5}
+                style={{ cursor: count > 0 ? 'pointer' : 'default' }}
+                onPointerEnter={() => setHover({ name: polyKey(f), count })}
+                onPointerLeave={() => setHover(null)}
+                onClick={() => { if (count > 0) onSelect(polyKey(f)) }}
+              />
+            )
+          })}
+
+          <path d={pathGen({ type: 'Sphere' }) ?? ''} fill="url(#globe-limb)" pointerEvents="none" />
+        </svg>
       )}
+
+      {/* Follows the pointer via a transform written in the move handler, so
+          hovering does not re-render on every mouse position. */}
+      <div
+        ref={tooltipRef}
+        className={`absolute top-0 left-0 pointer-events-none z-10 ${hover ? '' : 'hidden'}`}
+      >
+        {hover && (
+          <div className="px-2 py-1 rounded-sm bg-bg-primary border border-border text-text-primary text-xs whitespace-nowrap">
+            {hover.name}{hover.count > 0 ? ` (${hover.count})` : ''}
+          </div>
+        )}
+      </div>
 
       {ready && (
         <>

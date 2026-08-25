@@ -1,4 +1,4 @@
-# Katacomb VPN 1.1.0
+# Katacomb VPN 1.2.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
@@ -26,16 +26,18 @@ plans, and can now pick a node and connect for you.
   differs from buying a new one. Plan and subscription calls also ride the faster connect
   path, and plan sessions get the same cache and quota protection node sessions had.
 
-## Fixes in 1.1.0
+## Fixes in 1.2.0
 
-- Label session resume as Reconnect, tooltip the cost difference
-- Count each plan's nodes during rescan and hide unbuyable plans by default
-- Polish the Plans tab from live screenshots and document the rebuild
-- Rebuild the Plans tab: My plans + Catalog with smart connect
-- Extract the shared connect flow and the plan formatters
-- Add smart connect for plans: ranked auto-pick with a money-safe ladder
-- Give plan sessions the same cache and quota safety as node sessions
-- Route plan and subscription chain calls through the fast path
+- Replace native confirm() dialogs with in-app modals
+- Fix double-connect and stale plan data while connected
+- Add About modal with GitHub link; move About from tray to app UI
+- Destroy tray on quit; quit on window close when no tray host exists
+- Refresh chain-backed lists on disconnect
+- Add Smart RPC: automatic endpoint selection
+- Enforce proxy mode node eligibility in plan connections
+- Name Known limitations as a step 0 review item
+- Rewrite 1.1.0's notes to describe the Plans release
+- Refuse to cut a release whose notes prose was never rewritten
 
 ## Known limitations
 
@@ -63,7 +65,7 @@ Pop!\_OS, Zorin).
 **Recommended: .deb**
 
 ```bash
-sudo apt install ./katacomb-vpn_1.1.0_amd64.deb
+sudo apt install ./katacomb-vpn_1.2.0_amd64.deb
 ```
 
 Installs a root daemon, so connect and disconnect never prompt for a password. It needs
@@ -72,8 +74,8 @@ one log out and log back in after the first install before that takes effect.
 **Alternative: AppImage**
 
 ```bash
-chmod +x katacomb-vpn-1.1.0.AppImage
-./katacomb-vpn-1.1.0.AppImage
+chmod +x katacomb-vpn-1.2.0.AppImage
+./katacomb-vpn-1.2.0.AppImage
 ```
 
 No install needed. Every privileged operation prompts for a password instead.

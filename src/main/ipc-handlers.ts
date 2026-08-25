@@ -1023,6 +1023,12 @@ function sendStateChange(state: 'connected' | 'idle'): void {
   // is a function of this transition — publish it now instead of leaving the
   // old one up for the rest of the 30s poll window.
   onChainPathChanged()
+  // Same reasoning for the chain-backed lists: every overview served while the
+  // tunnel was up is stale: true, and PlansContext's other refresh triggers are
+  // chain events plus a 300s backstop — so without this push, the Plans tab's
+  // Connect buttons (gated on !stale) stayed dead for up to five minutes after
+  // a disconnect. Reported from a live run.
+  if (state === 'idle') notifySessionsChanged()
   connectionStateListener?.({ state, nodeMoniker: activeNodeInfo?.moniker, nodeCountry: activeNodeInfo?.country })
 }
 

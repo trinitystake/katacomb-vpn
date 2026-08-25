@@ -308,6 +308,8 @@ export interface WalletStoreStatus {
 
 export interface AppSettings {
   rpcEndpoint: string
+  /** Smart RPC: 'auto' lets main pick rpcEndpoint from the public feed; 'manual' means the user chose. */
+  rpcMode: 'auto' | 'manual'
   activeWalletId: string | null
   killSwitch: boolean
   lanSharing: boolean
@@ -488,6 +490,16 @@ export interface RpcCandidateInfo extends RpcCandidate {
   availability: number | null
 }
 
+/** Outcome of one Smart RPC selection run, with the exact rows it graded. */
+export interface RpcAutoSelectReport {
+  candidates: RpcCandidateInfo[]
+  /** The endpoint in use after the run. */
+  endpoint: string
+  switched: boolean
+  /** False when the selection was skipped (manual mode, or the tunnel/kill switch owns the path). */
+  selected: boolean
+}
+
 export interface BinaryStatus {
   wireguard: boolean
   v2ray: boolean
@@ -641,6 +653,8 @@ export interface ElectronAPI {
   /** Live health of the endpoint in use — also pushed via onRpcHealthUpdate. */
   rpcHealthGet: () => Promise<RpcHealth>
   rpcProbeAll: () => Promise<RpcCandidateInfo[]>
+  /** Run the Smart RPC selection now and get back the rows it graded. */
+  rpcAutoSelect: () => Promise<RpcAutoSelectReport>
   onRpcHealthUpdate: (callback: (health: RpcHealth) => void) => () => void
 
   binaryCheck: () => Promise<BinaryStatus>

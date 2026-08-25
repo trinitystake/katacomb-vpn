@@ -50,6 +50,13 @@ export function migrateLegacyUserData(): void {
 
 export interface AppSettings {
   rpcEndpoint: string
+  /**
+   * Smart RPC: 'auto' lets the monitor pick rpcEndpoint from the public feed at
+   * startup and after a confirmed fault; 'manual' means the user chose their
+   * endpoint and the app never touches it (migrateRpcMode preserves pre-feature
+   * custom choices as manual).
+   */
+  rpcMode: 'auto' | 'manual'
   activeWalletId: string | null
   killSwitch: boolean
   /**
@@ -76,6 +83,7 @@ export interface AppSettings {
 
 const DEFAULT_SETTINGS: AppSettings = {
   rpcEndpoint: 'https://rpc.sentinel.co:443',
+  rpcMode: 'auto',
   activeWalletId: null,
   killSwitch: false,
   lanSharing: false,
@@ -268,6 +276,32 @@ export function migrateProviderModeToWallet(): void {
   if (activeId && listWallets().some((w) => w.id === activeId)) {
     setWalletProviderMode(activeId, true)
   }
+}
+
+/**
+ * One-time introduction of `rpcMode` (Smart RPC). A pre-feature settings.json
+ * whose rpcEndpoint differs from the stock default is an explicit choice the
+ * automatic selection must not overwrite, so it becomes 'manual'; everyone else
+ * picks up the 'auto' default through the DEFAULT_SETTINGS merge.
+ *
+ * Must run before anything can call saveSettings, which re-serializes the
+ * defaults-merged object and would bake rpcMode: 'auto' into that user's file.
+ */
+export function migrateRpcMode(): void {
+  const path = settingsPath()
+  if (!existsSync(path)) return
+  let raw: Record<string, unknown>
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf-8'))
+  } catch {
+    return
+  }
+  if ('rpcMode' in raw) return
+  const endpoint = raw['rpcEndpoint']
+  if (typeof endpoint !== 'string' || endpoint === DEFAULT_SETTINGS.rpcEndpoint) return
+
+  raw['rpcMode'] = 'manual'
+  writeFileAtomic(path, JSON.stringify(raw, null, 2))
 }
 
 export function renameWallet(id: string, newName: string): void {

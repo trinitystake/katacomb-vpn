@@ -605,6 +605,38 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   **Every place that changes that path must call `onChainPathChanged()`** — `sendStateChange`,
   `reapplyFirewall`'s live kill-switch toggle, and the startup `healStrandedKillSwitch` —
   or the pill sits a full poll behind reality.
+- **Smart RPC (`rpcMode: 'auto'`, the default) switches endpoints silently, and only
+  through `runAutoRpcSelection` (rpc-monitor.ts).** Candidates are the sentnodes
+  public-rpc feed plus the endpoint in use; `pickAutoRpc` (pure, unit-tested, in
+  `rpc-health.ts`) requires POSITIVE qualification — reachable, chainId `sentinelhub-2`
+  (strict, unlike `classifyRpc` a null chainId disqualifies), aggregator not reporting it
+  failing, height within `AUTO_HEIGHT_TOLERANCE_BLOCKS` of the tallest probed candidate
+  (cross-endpoint consensus: the feed only nominates, it cannot pick the winner) — and is
+  sticky: the current endpoint survives unless it stops qualifying, goes degraded while a
+  healthy candidate exists, or an ok candidate beats it by more than `AUTO_KEEP_MARGIN_MS`.
+  Triggers are startup (+3s in index.ts), a CONFIRMED fault transition published by the
+  monitor (so `needsConfirmation` gates it — never a single sample), the user flipping
+  the mode to auto (SETTINGS_SET; the only trigger that fires for an endpoint already
+  published down), wake from suspend (powerMonitor 'resume' +8s — a resumed laptop is
+  often on a different network where the old endpoint is healthy but far, which no fault
+  trigger notices), and the Settings tab's "Retest and reselect" button (RPC_AUTO_SELECT
+  → `runAutoRpcSelectionReport`). Never periodic, never before a connect, and never while
+  `unprobedState()` says suspended/blocked — re-checked after the probes, since a tunnel
+  can come up during them. A dead feed or no qualifier keeps the current endpoint: doing
+  nothing is always safe. The switch persists via `saveSettings` (so `getRpcEndpoint()`
+  serves it everywhere) followed by `onRpcEndpointChanged()`. **The Settings list and the
+  selection share ONE probe pass** (`probeFeedCandidates`, which RPC_PROBE_ALL also
+  serves, and which always includes the endpoint in use): the report returns the exact
+  rows the selection graded, so the list on screen can never disagree with the decision —
+  don't reintroduce a second, display-only probe run. All triggers funnel through the
+  in-flight guard (`startAutoSelect`), so concurrent triggers share one run; background
+  entries swallow errors, the report entry propagates them to the button's error pane. The RPC choice is only ever
+  latency-measured, never geolocated — the RPC is not in the VPN data path, so "close to
+  the node" is meaningless and an IP-lookup service would be a privacy leak. In auto mode
+  the RpcBanner keeps its warning but drops its "Switch to X" button (a surviving banner
+  means the selection found no replacement); picking an endpoint in Settings flips the
+  mode to manual in the same write, and `migrateRpcMode()` (settings.ts, must run before
+  any `saveSettings`) turned pre-feature custom endpoints into `'manual'` once.
 - **A panel may fail; the window may not. WebGL is the case that proved it.** The only
   `ErrorBoundary` used to sit at the app root (`main.tsx`), so anything it caught replaced
   the entire client with a full-screen "Something went wrong". `mainTab` defaults to

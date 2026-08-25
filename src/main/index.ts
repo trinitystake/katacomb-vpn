@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Tray, Menu, nativeImage, nativeTheme, dialog } from 'electron'
+import { app, BrowserWindow, shell, Tray, Menu, nativeImage, nativeTheme, dialog, powerMonitor } from 'electron'
 import { join } from 'path'
 import { execSync, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
@@ -9,9 +9,9 @@ import {
   performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
-import { onChainPathChanged, startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
+import { onChainPathChanged, runAutoRpcSelection, startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
 import { sweepStaleSessionFiles } from './chain-service'
-import { migrateLegacyUserData, dedupeWalletEntries, migrateProviderModeToWallet } from './settings'
+import { migrateLegacyUserData, dedupeWalletEntries, migrateProviderModeToWallet, migrateRpcMode } from './settings'
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
 import { IPC } from '../shared/ipc-channels'
@@ -386,6 +386,9 @@ app.whenReady().then(() => {
   // Provider mode used to be global, so it leaked onto every seed imported after
   // it was turned on. Runs after the dedupe, which can rewrite activeWalletId.
   migrateProviderModeToWallet()
+  // Smart RPC: a pre-feature custom endpoint becomes an explicit 'manual' choice.
+  // Must precede any saveSettings, which would bake the 'auto' default in.
+  migrateRpcMode()
   checkSystemDeps()
   // The root daemon (deb install) handles privileged ops password-free, so the
   // per-op polkit helper + its install prompt are only needed on the fallback
@@ -424,6 +427,22 @@ app.whenReady().then(() => {
       // silent — best-effort warmup
     })
   }, 500)
+
+  // Smart RPC's startup pass: probe the public feed once and settle on the best
+  // endpoint. Delayed so it doesn't compete with startup, and so the kill-switch
+  // heal above has usually cleared a stranded chain first (the selection skips
+  // itself while the path is blocked or an adopted tunnel is up, in which case
+  // the on-fault trigger covers the rest of the session).
+  setTimeout(() => { void runAutoRpcSelection() }, 3_000)
+
+  // Smart RPC on wake: a resumed laptop is often on a different network, where
+  // the endpoint chosen before suspend is still healthy but now far away, a
+  // state no fault trigger will ever notice. Delayed for the network to
+  // re-associate; a run that finds no network yet keeps the current endpoint,
+  // and the monitor's fault trigger covers whatever settles later.
+  powerMonitor.on('resume', () => {
+    setTimeout(() => { void runAutoRpcSelection() }, 8_000)
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

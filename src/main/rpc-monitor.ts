@@ -3,12 +3,13 @@ import { IPC } from '../shared/ipc-channels'
 import {
   classifyRpc,
   needsConfirmation,
+  pickAutoRpc,
   type RpcCandidate,
   type RpcHealth,
   type RpcProbe,
 } from '../shared/rpc-health'
 import { isKillSwitchArmed } from './kill-switch'
-import { getRpcEndpoint } from './settings'
+import { getRpcEndpoint, loadSettings, saveSettings } from './settings'
 import { isVpnActive } from './vpn-manager'
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -203,7 +204,20 @@ async function refreshRpcHealth(opts: { confirming?: boolean } = {}): Promise<vo
       return
     }
     cancelConfirm()
+    const prevState = health.state
+    const prevEndpoint = health.endpoint
     setHealth({ ...probe, state, endpoint, checkedAt: Date.now() })
+    // Smart RPC's on-fault trigger. Only a PUBLISHED fault reaches here (a new
+    // one arrives via the confirming re-probe; needsConfirmation held it until
+    // then), and only its transition reacts: a fault persisting across polls
+    // does not re-run the selection, deliberately — there is no periodic
+    // re-rank. A fault on a DIFFERENT endpoint than the previously published
+    // one does re-trigger, which is what retries once when the selection
+    // itself lands on a bad endpoint.
+    const isFault = state === 'down' || state === 'degraded'
+    const wasFaultOnSameEndpoint =
+      (prevState === 'down' || prevState === 'degraded') && prevEndpoint === endpoint
+    if (isFault && !wasFaultOnSameEndpoint) void runAutoRpcSelection()
   })()
   try {
     await probeInFlight
@@ -277,4 +291,151 @@ export async function probeAll(endpoints: string[]): Promise<RpcCandidate[]> {
   })
   await Promise.all(workers)
   return results
+}
+
+// --- Smart RPC: the public endpoint feed and the automatic selection ---
+
+const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
+const PUBLIC_RPC_TTL_MS = 60_000
+
+interface PublicRpcEntry {
+  provider: string
+  address: string
+  // The aggregator's own up/down verdict — a boolean in the feed, despite the
+  // number this was originally typed as.
+  status: boolean
+  height: number
+  location: string
+  isLoadbalance: number
+  availability: number
+  errorReason: string | null
+}
+
+// Tiny TTL cache for the public RPC list. Refreshing every minute is more than
+// enough for both consumers (the Settings list and the auto-selection).
+let publicRpcCache: { list: PublicRpcEntry[]; fetchedAt: number } | null = null
+
+async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
+  if (publicRpcCache && Date.now() - publicRpcCache.fetchedAt < PUBLIC_RPC_TTL_MS) {
+    return publicRpcCache.list
+  }
+  const response = await net.fetch(PUBLIC_RPC_API, { signal: AbortSignal.timeout(15000) })
+  if (!response.ok) throw new Error(`Public RPC API returned ${response.status}`)
+  const json = await response.json() as { success: boolean; data?: { publicRPC?: PublicRpcEntry[] } }
+  if (!json.success || !Array.isArray(json.data?.publicRPC)) {
+    throw new Error('Invalid response from public RPC API')
+  }
+  publicRpcCache = { list: json.data!.publicRPC!, fetchedAt: Date.now() }
+  return publicRpcCache.list
+}
+
+/** A feed candidate probed and enriched with the aggregator's metadata — the shape the Settings list renders. */
+export interface ProbedRpcCandidate extends RpcCandidate {
+  provider: string
+  location: string
+  availability: number | null
+}
+
+/**
+ * ONE probe pass over the public feed plus the endpoint in use, enriched with
+ * the aggregator's metadata. Serves both the Settings list (RPC_PROBE_ALL) and
+ * the automatic selection, so the rows the user sees are always the same
+ * reading the selection acted on — two separate passes could disagree on
+ * latency and render a "why didn't it pick the fastest one" mystery.
+ */
+export async function probeFeedCandidates(): Promise<ProbedRpcCandidate[]> {
+  const feed = await fetchPublicRpcs()
+  const byAddress = new Map(feed.map((r) => [r.address, r]))
+  const endpoints = [...new Set([getRpcEndpoint(), ...feed.map((r) => r.address)])]
+  return (await probeAll(endpoints)).map((c) => {
+    const meta = byAddress.get(c.endpoint)
+    return {
+      ...c,
+      // The aggregator's own verdict, so a known-bad endpoint is skipped even
+      // if it happened to answer our single probe. Undefined for an endpoint
+      // the feed doesn't know (a custom rpcEndpoint), which the pickers treat
+      // as "no opinion", not as failing.
+      aggregatorHealthy: meta ? meta.status === true && meta.errorReason === null : undefined,
+      provider: meta?.provider ?? '',
+      location: meta?.location ?? '',
+      availability: meta?.availability ?? null,
+    }
+  })
+}
+
+/** What one auto-selection run saw and did. The Retest and reselect flow renders this. */
+export interface AutoSelectReport {
+  /** Every candidate the run probed — the exact rows the selection graded. */
+  candidates: ProbedRpcCandidate[]
+  /** The endpoint in use after the run. */
+  endpoint: string
+  switched: boolean
+  /** False when the selection was skipped (manual mode, or the tunnel/kill switch owns the path). */
+  selected: boolean
+}
+
+/** Serializes auto-selection; every trigger funnels here and concurrent calls share one run. */
+let autoSelectInFlight: Promise<AutoSelectReport> | null = null
+
+/**
+ * Smart RPC's one selection pass: probe, grade, and silently switch to
+ * pickAutoRpc's choice. No qualifying candidate keeps the current endpoint:
+ * doing nothing is always safe here. The mode/path re-check after the probes
+ * exists because they take seconds, and the user can change the endpoint, flip
+ * to manual, or bring a tunnel up underneath them.
+ */
+async function autoSelectCore(): Promise<AutoSelectReport> {
+  const current = getRpcEndpoint()
+  const canSelect = loadSettings().rpcMode === 'auto' && !unprobedState()
+  const candidates = await probeFeedCandidates()
+  if (!canSelect) return { candidates, endpoint: current, switched: false, selected: false }
+  const target = pickAutoRpc(candidates, current)
+  if (!target) {
+    console.log(`[rpc] auto-select: keeping ${current}`)
+    return { candidates, endpoint: current, switched: false, selected: true }
+  }
+  if (getRpcEndpoint() !== current || loadSettings().rpcMode !== 'auto' || unprobedState()) {
+    return { candidates, endpoint: getRpcEndpoint(), switched: false, selected: false }
+  }
+  console.log(`[rpc] auto-select: switching ${current} -> ${target}`)
+  saveSettings({ rpcEndpoint: target })
+  onRpcEndpointChanged()
+  return { candidates, endpoint: target, switched: true, selected: true }
+}
+
+function startAutoSelect(): Promise<AutoSelectReport> {
+  if (!autoSelectInFlight) {
+    autoSelectInFlight = autoSelectCore().finally(() => { autoSelectInFlight = null })
+  }
+  return autoSelectInFlight
+}
+
+/**
+ * The background triggers' entry: startup (+3s), a confirmed fault transition
+ * on the endpoint in use, the user flipping the mode to auto, and wake from
+ * suspend — never a timer, and never before a connect. Bails before probing
+ * anything while the mode is manual or our own tunnel/kill switch owns the
+ * path, and swallows failures: a background run has nobody to report to, and
+ * keeping the current endpoint is always safe.
+ */
+export function runAutoRpcSelection(): Promise<void> {
+  if (!autoSelectInFlight && (loadSettings().rpcMode !== 'auto' || unprobedState())) {
+    return Promise.resolve()
+  }
+  return startAutoSelect().then(
+    () => undefined,
+    (err) => {
+      console.log(`[rpc] auto-select failed: ${err instanceof Error ? err.message : String(err)}`)
+    },
+  )
+}
+
+/**
+ * The Retest and reselect button's entry: the same shared run as the
+ * background triggers, but the outcome (and any failure) goes back to the
+ * caller, and it probes even when selection cannot run — the Settings list
+ * still wants the rows, and the report says the selection was skipped.
+ */
+export function runAutoRpcSelectionReport(): Promise<AutoSelectReport> {
+  return startAutoSelect()
 }

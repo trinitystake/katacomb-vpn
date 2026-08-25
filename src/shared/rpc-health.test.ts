@@ -6,6 +6,7 @@ import {
   isChainUnreachable,
   isRpcConnectivityError,
   needsConfirmation,
+  pickAutoRpc,
   pickBestRpc,
   rpcHealthLabel,
   rpcHostLabel,
@@ -163,6 +164,161 @@ test('pickBestRpc skips endpoints the aggregator already reports as failing', ()
 test('pickBestRpc returns null when nothing usable is left', () => {
   assert.equal(pickBestRpc([candidate('https://dead', { reachable: false })], 'https://current'), null)
   assert.equal(pickBestRpc([], 'https://current'), null)
+})
+
+// ---- pickAutoRpc (Smart RPC's selection rule) ----
+// The probe() factory's height is 20_000_000, so that is the consensus height
+// unless a test says otherwise.
+
+test('pickAutoRpc keeps a healthy current endpoint within the margin', () => {
+  const target = pickAutoRpc(
+    [candidate('https://current', { latencyMs: 400 }), candidate('https://faster', { latencyMs: 200 })],
+    'https://current',
+  )
+  assert.equal(target, null)
+})
+
+test('pickAutoRpc margin boundary: a win of exactly the margin keeps, one more switches', () => {
+  const keep = pickAutoRpc(
+    [candidate('https://current', { latencyMs: 450 }), candidate('https://faster', { latencyMs: 200 })],
+    'https://current',
+  )
+  assert.equal(keep, null)
+  const switched = pickAutoRpc(
+    [candidate('https://current', { latencyMs: 451 }), candidate('https://faster', { latencyMs: 200 })],
+    'https://current',
+  )
+  assert.equal(switched, 'https://faster')
+})
+
+test('pickAutoRpc switches away from an unreachable current to the fastest healthy candidate', () => {
+  const target = pickAutoRpc(
+    [
+      candidate('https://current', { reachable: false, latencyMs: null, chainId: null, height: null, blockAgeSec: null }),
+      candidate('https://slower', { latencyMs: 700 }),
+      candidate('https://fast', { latencyMs: 150 }),
+    ],
+    'https://current',
+  )
+  assert.equal(target, 'https://fast')
+})
+
+test('pickAutoRpc height consensus outranks speed: a fast current far behind the pack loses', () => {
+  const target = pickAutoRpc(
+    [
+      candidate('https://current', { latencyMs: 50, height: 20_000_000 - 20 }),
+      candidate('https://intime', { latencyMs: 300, height: 20_000_000 }),
+    ],
+    'https://current',
+  )
+  assert.equal(target, 'https://intime')
+})
+
+test('pickAutoRpc height boundary: tolerance blocks behind is selectable, one more is not', () => {
+  const within = pickAutoRpc(
+    [
+      candidate('https://current', { reachable: false, latencyMs: null, height: null }),
+      candidate('https://near', { latencyMs: 50, height: 20_000_000 - 10 }),
+      candidate('https://tall', { latencyMs: 500, height: 20_000_000 }),
+    ],
+    'https://current',
+  )
+  assert.equal(within, 'https://near')
+  const beyond = pickAutoRpc(
+    [
+      candidate('https://current', { reachable: false, latencyMs: null, height: null }),
+      candidate('https://near', { latencyMs: 50, height: 20_000_000 - 11 }),
+      candidate('https://tall', { latencyMs: 500, height: 20_000_000 }),
+    ],
+    'https://current',
+  )
+  assert.equal(beyond, 'https://tall')
+})
+
+test('pickAutoRpc never selects a wrong-chain or unidentified candidate, even the fastest', () => {
+  const target = pickAutoRpc(
+    [
+      candidate('https://current', { reachable: false, latencyMs: null, height: null }),
+      candidate('https://wrongchain', { latencyMs: 10, chainId: 'osmosis-1' }),
+      candidate('https://nochain', { latencyMs: 20, chainId: null }),
+      candidate('https://good', { latencyMs: 900 }),
+    ],
+    'https://current',
+  )
+  assert.equal(target, 'https://good')
+})
+
+test('pickAutoRpc never selects an aggregator-flagged or heightless candidate', () => {
+  const target = pickAutoRpc(
+    [
+      candidate('https://current', { reachable: false, latencyMs: null, height: null }),
+      candidate('https://flagged', { latencyMs: 10 }, false),
+      candidate('https://noheight', { latencyMs: 20, height: null }),
+      candidate('https://good', { latencyMs: 900 }),
+    ],
+    'https://current',
+  )
+  assert.equal(target, 'https://good')
+})
+
+test('pickAutoRpc falls back to a slow qualifying candidate when current is down and nothing is healthy', () => {
+  const target = pickAutoRpc(
+    [
+      candidate('https://current', { reachable: false, latencyMs: null, height: null }),
+      candidate('https://slow', { latencyMs: 3000 }),
+    ],
+    'https://current',
+  )
+  assert.equal(target, 'https://slow')
+})
+
+test('pickAutoRpc: a degraded current does not hop to another degraded candidate', () => {
+  // Covers the chain-halted case too: when every endpoint lags together the
+  // consensus is relative, everything qualifies, and hopping buys nothing.
+  const target = pickAutoRpc(
+    [
+      candidate('https://current', { blockAgeSec: 600 }),
+      candidate('https://alsolagging', { latencyMs: 10, blockAgeSec: 600 }),
+    ],
+    'https://current',
+  )
+  assert.equal(target, null)
+})
+
+test('pickAutoRpc: a degraded current does switch to a healthy candidate', () => {
+  const target = pickAutoRpc(
+    [candidate('https://current', { latencyMs: 2600 }), candidate('https://good', { latencyMs: 300 })],
+    'https://current',
+  )
+  assert.equal(target, 'https://good')
+})
+
+test('pickAutoRpc returns null on an empty list, when nothing else qualifies, and when no height is known', () => {
+  assert.equal(pickAutoRpc([], 'https://current'), null)
+  assert.equal(
+    pickAutoRpc(
+      [candidate('https://current'), candidate('https://dead', { reachable: false, latencyMs: null, height: null })],
+      'https://current',
+    ),
+    null,
+  )
+  // No probed height at all: consensus is impossible, so nothing qualifies.
+  assert.equal(
+    pickAutoRpc(
+      [candidate('https://current', { height: null }), candidate('https://other', { height: null })],
+      'https://current',
+    ),
+    null,
+  )
+})
+
+test('pickAutoRpc switches when the current endpoint is absent from the candidate list', () => {
+  const target = pickAutoRpc([candidate('https://other', { latencyMs: 200 })], 'https://current')
+  assert.equal(target, 'https://other')
+})
+
+test('pickAutoRpc never returns the current endpoint itself', () => {
+  assert.equal(pickAutoRpc([candidate('https://current', { latencyMs: 1 })], 'https://current'), null)
 })
 
 test('isRpcConnectivityError matches the shapes these calls actually produce', () => {

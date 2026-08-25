@@ -57,6 +57,7 @@ export const IPC = {
   // RPC health
   RPC_HEALTH_GET: 'rpc:health-get',
   RPC_PROBE_ALL: 'rpc:probe-all',
+  RPC_AUTO_SELECT: 'rpc:auto-select',
 
   // Binary checks
   BINARY_CHECK: 'binary:check',

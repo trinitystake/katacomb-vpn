@@ -7,7 +7,15 @@ import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
 import { checkFunds, insufficientFundsMessage, udvpnOf } from '../shared/funds'
 import { isRpcConnectivityError, rpcHostLabel } from '../shared/rpc-health'
 import { DERIVE_PREVIEW_MAX_COUNT } from '../shared/hd-path'
-import { getRpcHealth, onRpcEndpointChanged, onChainPathChanged, probeAll, reportRpcFailure } from './rpc-monitor'
+import {
+  getRpcHealth,
+  onRpcEndpointChanged,
+  onChainPathChanged,
+  probeFeedCandidates,
+  reportRpcFailure,
+  runAutoRpcSelection,
+  runAutoRpcSelectionReport,
+} from './rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
   hasStoredWallet,
@@ -111,8 +119,6 @@ const NODES_API = 'https://api.sentnodes.com/v2/nodes'
 // ~1,830 nodes. Bounds the fan-out if the aggregator ever reports a silly
 // lastPage, at 5x room to grow.
 const MAX_NODE_PAGES = 50
-const PUBLIC_RPC_API = 'https://sentnodes.com/public-rpc/json'
-const PUBLIC_RPC_TTL_MS = 60_000
 const RECONNECT_MAX_ATTEMPTS = 5
 // Bound the refund (endSession) so a slow RPC during the failure path can't itself
 // hang the connect flow — see establishSessionOrRefund (finding H1). Generous on
@@ -366,22 +372,6 @@ function saveSessionUsage(): void {
 // refreshed on a 60s timer in main, broadcast to all renderer windows on update.
 let nodesMemoryCache: NodesCacheFile | null = null
 let nodeRefreshTimer: ReturnType<typeof setInterval> | null = null
-
-// Tiny TTL cache for the public RPC list. The user only sees this when the
-// Settings modal is open, so refreshing every minute is more than enough.
-interface PublicRpcEntry {
-  provider: string
-  address: string
-  // The aggregator's own up/down verdict — a boolean in the feed, despite the
-  // number this was originally typed as.
-  status: boolean
-  height: number
-  location: string
-  isLoadbalance: number
-  availability: number
-  errorReason: string | null
-}
-let publicRpcCache: { list: PublicRpcEntry[]; fetchedAt: number } | null = null
 
 // Auto-reconnect state
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -2250,20 +2240,6 @@ export function stopNodeRefreshTimer(): void {
   }
 }
 
-async function fetchPublicRpcs(): Promise<PublicRpcEntry[]> {
-  if (publicRpcCache && Date.now() - publicRpcCache.fetchedAt < PUBLIC_RPC_TTL_MS) {
-    return publicRpcCache.list
-  }
-  const response = await net.fetch(PUBLIC_RPC_API, { signal: AbortSignal.timeout(15000) })
-  if (!response.ok) throw new Error(`Public RPC API returned ${response.status}`)
-  const json = await response.json() as { success: boolean; data?: { publicRPC?: PublicRpcEntry[] } }
-  if (!json.success || !Array.isArray(json.data?.publicRPC)) {
-    throw new Error('Invalid response from public RPC API')
-  }
-  publicRpcCache = { list: json.data!.publicRPC!, fetchedAt: Date.now() }
-  return publicRpcCache.list
-}
-
 /**
  * Sessions this app bought from a wallet that is NOT the active one — i.e. the exit
  * hop of a per-hop-wallet chain. Queried per foreign account and filtered back down
@@ -2640,7 +2616,7 @@ export function registerIpcHandlers(): void {
     if (typeof settings !== 'object' || settings === null) throw new Error('Invalid settings')
     // Only allow known setting keys
     const allowed = new Set([
-      'rpcEndpoint', 'activeWalletId', 'killSwitch', 'lanSharing', 'dnsResolver', 'autoReconnect',
+      'rpcEndpoint', 'rpcMode', 'activeWalletId', 'killSwitch', 'lanSharing', 'dnsResolver', 'autoReconnect',
       'bookmarkedNodes', 'splitTunnelRoutes',
     ])
     const filtered: Record<string, unknown> = {}
@@ -2650,6 +2626,9 @@ export function registerIpcHandlers(): void {
     if (filtered.rpcEndpoint !== undefined) {
       assertString(filtered.rpcEndpoint, 'rpcEndpoint')
       try { new URL(filtered.rpcEndpoint as string) } catch { throw new Error('Invalid RPC endpoint URL') }
+    }
+    if (filtered.rpcMode !== undefined && filtered.rpcMode !== 'auto' && filtered.rpcMode !== 'manual') {
+      throw new Error('Invalid rpcMode')
     }
     if (filtered.activeWalletId !== undefined && filtered.activeWalletId !== null) {
       assertString(filtered.activeWalletId, 'activeWalletId')
@@ -2689,6 +2668,10 @@ export function registerIpcHandlers(): void {
     // re-probe now so the indicator reflects the new endpoint immediately
     // instead of up to 30s later.
     if (filtered.rpcEndpoint !== undefined) onRpcEndpointChanged()
+    // Flipping to auto runs the selection right away. This also covers the case
+    // where the endpoint in use is already published as down: no new fault
+    // transition will ever fire for it, so this flip is its only trigger.
+    if (filtered.rpcMode === 'auto') void runAutoRpcSelection()
     // Apply the firewall change now rather than at the next connect. Fire-and-
     // forget under the lock so the toggle returns immediately instead of queueing
     // behind an in-flight connect; failures surface through killSwitchFailed on
@@ -3407,21 +3390,14 @@ export function registerIpcHandlers(): void {
   // Probe the public endpoint list in parallel — feeds the failover banner and
   // the Settings list, so neither has to test one endpoint per click.
   handle(IPC.RPC_PROBE_ALL, async () => {
-    const list = await fetchPublicRpcs()
-    const probed = await probeAll(list.map((r) => r.address))
-    const byAddress = new Map(list.map((r) => [r.address, r]))
-    return probed.map((c) => {
-      const meta = byAddress.get(c.endpoint)
-      return {
-        ...c,
-        // The aggregator's own verdict, so a known-bad endpoint is skipped even
-        // if it happened to answer our single probe.
-        aggregatorHealthy: meta ? meta.status === true && meta.errorReason === null : undefined,
-        provider: meta?.provider ?? '',
-        location: meta?.location ?? '',
-        availability: meta?.availability ?? null,
-      }
-    })
+    return probeFeedCandidates()
+  })
+
+  // Retest and reselect: one shared probe pass runs the auto-selection and
+  // returns the exact rows it graded, so the list on screen can never disagree
+  // with the decision.
+  handle(IPC.RPC_AUTO_SELECT, async () => {
+    return runAutoRpcSelectionReport()
   })
 
   // Binary check — checks bundled binaries first, then system PATH

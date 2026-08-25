@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('api', {
 
   rpcHealthGet: () => ipcRenderer.invoke(IPC.RPC_HEALTH_GET),
   rpcProbeAll: () => ipcRenderer.invoke(IPC.RPC_PROBE_ALL),
+  rpcAutoSelect: () => ipcRenderer.invoke(IPC.RPC_AUTO_SELECT),
   onRpcHealthUpdate: (callback: (health: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, health: unknown) => {
       callback(health)

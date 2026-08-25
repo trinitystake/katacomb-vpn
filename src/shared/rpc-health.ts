@@ -149,6 +149,65 @@ export function pickBestRpc(candidates: RpcCandidate[], currentEndpoint: string)
   return [...tier].sort(byLatency)[0]
 }
 
+/** A Smart RPC switch target must be within this many blocks of the tallest probed height. */
+export const AUTO_HEIGHT_TOLERANCE_BLOCKS = 10
+/** Smart RPC keeps the current endpoint unless the best candidate beats it by more than this. */
+export const AUTO_KEEP_MARGIN_MS = 250
+
+/**
+ * Positive qualification for an automatic switch, stricter than pickBestRpc's
+ * filter: an endpoint that did not report the right chain id and a height in
+ * consensus with the pack has not earned a silent switch of the endpoint that
+ * broadcasts the user's payments. (`classifyRpc` gives a null chainId the
+ * benefit of the doubt; this does not.)
+ */
+function qualifiesForAuto(c: RpcCandidate, minHeight: number): boolean {
+  return (
+    c.probe.reachable &&
+    c.probe.chainId === EXPECTED_CHAIN_ID &&
+    c.aggregatorHealthy !== false &&
+    c.probe.height !== null &&
+    c.probe.height >= minHeight
+  )
+}
+
+/**
+ * The endpoint auto mode should switch to, or null to keep the current one.
+ *
+ * The height check is a cross-endpoint consensus: the feed only nominates
+ * candidates, and an endpoint lying about the chain or lagging behind the
+ * tallest probed height is excluded no matter how fast it answers. Stickiness
+ * keeps the current endpoint unless it stopped qualifying, went degraded while
+ * a healthy candidate exists, or a healthy candidate beats it by more than
+ * AUTO_KEEP_MARGIN_MS — so launches don't flap between similar endpoints, and
+ * a chain-wide stall (every endpoint lagging together) switches nothing.
+ */
+export function pickAutoRpc(candidates: RpcCandidate[], currentEndpoint: string): string | null {
+  const heights = candidates.map((c) => c.probe.height).filter((h): h is number => h !== null)
+  if (heights.length === 0) return null
+  const minHeight = Math.max(...heights) - AUTO_HEIGHT_TOLERANCE_BLOCKS
+
+  const others = candidates.filter((c) => c.endpoint !== currentEndpoint && qualifiesForAuto(c, minHeight))
+  if (others.length === 0) return null
+  const byLatency = (a: RpcCandidate, b: RpcCandidate) =>
+    (a.probe.latencyMs ?? Number.MAX_SAFE_INTEGER) - (b.probe.latencyMs ?? Number.MAX_SAFE_INTEGER)
+  const healthy = others.filter((c) => classifyRpc(c.probe) === 'ok')
+  const best = [...(healthy.length > 0 ? healthy : others)].sort(byLatency)[0]
+
+  const current = candidates.find((c) => c.endpoint === currentEndpoint)
+  if (current === undefined || !qualifiesForAuto(current, minHeight)) return best.endpoint
+
+  // A qualifying candidate is reachable on the right chain, so classifyRpc can
+  // only say ok or degraded here.
+  if (classifyRpc(current.probe) === 'ok') {
+    if (classifyRpc(best.probe) !== 'ok') return null
+    if (current.probe.latencyMs === null || best.probe.latencyMs === null) return null
+    return best.probe.latencyMs + AUTO_KEEP_MARGIN_MS < current.probe.latencyMs ? best.endpoint : null
+  }
+  // Degraded current: a hop to another degraded endpoint buys nothing.
+  return classifyRpc(best.probe) === 'ok' ? best.endpoint : null
+}
+
 /**
  * Does this error message mean "we couldn't reach the chain" rather than "the
  * chain said no"? Matches the shapes these calls actually produce: withTimeout's

@@ -61,6 +61,8 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   const [knownRpcs, setKnownRpcs] = useState<RpcCandidateInfo[]>([])
   const [rpcsLoading, setRpcsLoading] = useState(true)
   const [rpcsError, setRpcsError] = useState<string | null>(null)
+  /** What the last Retest and reselect run concluded. Null until one runs. */
+  const [reselectNote, setReselectNote] = useState<string | null>(null)
   // Derive-subaccount modal state. `source` is the wallet whose mnemonic we'll
   // reuse; the account index is typed, the address index is picked from the
   // preview list (which shows the real address behind each path).
@@ -127,6 +129,34 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
       .finally(() => setRpcsLoading(false))
   }, [])
 
+  // Retest and reselect (auto mode): one shared probe pass in main runs the
+  // selection and returns the exact rows it graded, so this list can never
+  // disagree with the decision it reports.
+  const reselect = useCallback(async () => {
+    setRpcsLoading(true)
+    setRpcsError(null)
+    setReselectNote(null)
+    try {
+      const report = await window.api.rpcAutoSelect()
+      setKnownRpcs(report.candidates)
+      if (report.switched) {
+        const updated = await window.api.settingsGet()
+        setSettings(updated)
+        setRpcInput(updated.rpcEndpoint)
+        await reloadGlobalSettings()
+        setReselectNote(`Switched to ${rpcHostLabel(report.endpoint)}.`)
+      } else if (report.selected) {
+        setReselectNote(`Kept ${rpcHostLabel(report.endpoint)}, no candidate beat it by enough to switch.`)
+      } else {
+        setReselectNote('Selection skipped: the chain is not reachable right now (VPN tunnel or kill switch).')
+      }
+    } catch (err: unknown) {
+      setRpcsError(err instanceof Error ? err.message : 'Failed to reselect')
+    } finally {
+      setRpcsLoading(false)
+    }
+  }, [reloadGlobalSettings])
+
   useEffect(() => {
     if (tab === 'network') void loadRpcs()
   }, [tab, loadRpcs])
@@ -149,7 +179,13 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
     if (!endpoint) return
     setSaving(true)
     try {
-      const updated = await window.api.settingsSet({ rpcEndpoint: endpoint })
+      // Choosing an endpoint by hand is an explicit manual choice, so it also
+      // turns Smart RPC off, in the same settings write.
+      const patch =
+        settings?.rpcMode === 'auto'
+          ? { rpcEndpoint: endpoint, rpcMode: 'manual' as const }
+          : { rpcEndpoint: endpoint }
+      const updated = await window.api.settingsSet(patch)
       setSettings(updated)
       setRpcInput(updated.rpcEndpoint)
       await reloadGlobalSettings()
@@ -392,6 +428,8 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
 
   if (!settings) return null
 
+  const rpcAuto = settings.rpcMode === 'auto'
+
   // Every stored wallet is a subaccount of one seed, so "derive another" and
   // "show the recovery phrase" are seed-level actions, not per-row ones — they
   // operate on the active wallet, or on the retained seed when no wallets are left.
@@ -629,11 +667,35 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 RPC Endpoint
               </label>
 
+              {/* Smart RPC, the default. Startup and confirmed-fault switches
+                  happen in main (runAutoRpcSelection); this toggle is the only
+                  control, and picking an endpoint below flips it off. */}
+              <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
+                <div>
+                  <span className="text-text-primary text-sm">Automatic Endpoint Selection</span>
+                  <p className="text-text-tertiary text-xs mt-0.5">
+                    Picks the fastest healthy public endpoint at startup and switches away from one that
+                    fails. Choosing an endpoint below turns this off.
+                  </p>
+                </div>
+                <Toggle
+                  checked={rpcAuto}
+                  onChange={async (checked) => {
+                    setReselectNote(null)
+                    const updated = await window.api.settingsSet({ rpcMode: checked ? 'auto' : 'manual' })
+                    setSettings(updated)
+                    setRpcInput(updated.rpcEndpoint)
+                    await reloadGlobalSettings()
+                  }}
+                />
+              </div>
+
               {/* Live health of the endpoint in use — this is where the user
                   lands when something told them the chain was unreachable. */}
               <div className="bg-bg-tertiary border border-border rounded-md px-3 py-2 flex items-center gap-2 text-xs">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATE_DOT[rpcHealth.state]}`} aria-hidden />
                 <span className="text-text-primary font-mono truncate">{rpcHostLabel(rpcHealth.endpoint) || '—'}</span>
+                {rpcAuto && <span className="text-text-tertiary shrink-0">auto</span>}
                 <span className="text-text-secondary">{rpcHealthLabel(rpcHealth)}</span>
                 {rpcHealth.height !== null && (
                   <span className="text-text-tertiary ml-auto shrink-0">
@@ -665,22 +727,24 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 </p>
               )}
 
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={rpcInput}
-                  onChange={(e) => setRpcInput(e.target.value)}
-                  className="flex-1 bg-bg-tertiary border border-border text-text-primary text-sm font-mono px-3 py-2 rounded-sm focus:outline-none focus:border-border-focus"
-                  placeholder="https://rpc.sentinel.co:443"
-                />
-                <button
-                  onClick={() => saveRpc()}
-                  disabled={saving || rpcInput === settings.rpcEndpoint}
-                  className="btn btn-primary text-sm px-4 disabled:opacity-30"
-                >
-                  {saving ? 'Saving...' : 'Save'}
-                </button>
-              </div>
+              {!rpcAuto && (
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={rpcInput}
+                    onChange={(e) => setRpcInput(e.target.value)}
+                    className="flex-1 bg-bg-tertiary border border-border text-text-primary text-sm font-mono px-3 py-2 rounded-sm focus:outline-none focus:border-border-focus"
+                    placeholder="https://rpc.sentinel.co:443"
+                  />
+                  <button
+                    onClick={() => saveRpc()}
+                    disabled={saving || rpcInput === settings.rpcEndpoint}
+                    className="btn btn-primary text-sm px-4 disabled:opacity-30"
+                  >
+                    {saving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -699,13 +763,20 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                       <Spinner /> Testing
                     </span>
                   ) : (
-                    <button onClick={() => void loadRpcs()} className="text-text-secondary hover:text-accent text-xs transition-colors">
-                      Retest
+                    <button
+                      onClick={() => void (rpcAuto ? reselect() : loadRpcs())}
+                      className="text-text-secondary hover:text-accent text-xs transition-colors"
+                      title={rpcAuto ? 'Probe every endpoint again and let the automatic selection act on the result. It keeps your endpoint unless another is meaningfully better.' : undefined}
+                    >
+                      {rpcAuto ? 'Retest and reselect' : 'Retest'}
                     </button>
                   )}
                 </div>
                 {rpcsError && (
                   <p className="text-danger text-xs">Failed to load RPC list: {rpcsError}</p>
+                )}
+                {rpcAuto && reselectNote && !rpcsLoading && (
+                  <p className="text-text-tertiary text-xs">{reselectNote}</p>
                 )}
                 <div className="space-y-1 max-h-[240px] overflow-y-auto">
                   {sortedRpcs.map((ep) => {
@@ -741,6 +812,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                             onClick={() => saveRpc(ep.endpoint)}
                             disabled={saving}
                             className="shrink-0 text-accent hover:underline disabled:opacity-30"
+                            title={rpcAuto ? 'Use this endpoint and turn automatic selection off' : undefined}
                           >
                             Use
                           </button>
@@ -751,7 +823,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 </div>
               </div>
 
-              {rpcInput !== settings.rpcEndpoint && (
+              {!rpcAuto && rpcInput !== settings.rpcEndpoint && (
                 <p className="text-warning text-xs">
                   Unsaved changes. Click Save to apply.
                 </p>

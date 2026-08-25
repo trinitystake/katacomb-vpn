@@ -1,6 +1,7 @@
 import { degradedReason, rpcHealthLabel, rpcHostLabel } from '../../shared/rpc-health'
 import { useRpcHealth } from '../hooks/useRpcHealth'
 import { useNavigation } from '../contexts/NavigationContext'
+import { useSettings } from '../contexts/SettingsContext'
 
 /** Shared with the Settings endpoint list, so one state never renders two colours. */
 export const STATE_DOT: Record<string, string> = {
@@ -23,10 +24,12 @@ export const STATE_DOT: Record<string, string> = {
 export default function RpcStatus() {
   const health = useRpcHealth()
   const { openSettings } = useNavigation()
+  const { settings } = useSettings()
 
   const host = health.endpoint ? rpcHostLabel(health.endpoint) : 'not configured'
   const tooltip = [
     `RPC: ${host}`,
+    settings?.rpcMode === 'auto' ? 'Endpoint selected automatically at startup and on failure.' : null,
     health.state === 'suspended'
       ? 'Paused while the VPN is connected: balances, sessions and plans come from the cache and no query is sent through the tunnel.\nIt resumes on disconnect. Switching endpoints will not clear it.'
       : null,

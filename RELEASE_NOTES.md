@@ -4,27 +4,36 @@ A desktop client for the Sentinel decentralized VPN network. Pick a node, pay fo
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-A feature release. The Plans tab is rebuilt around buying and using subscription
-plans, and can now pick a node and connect for you.
+A feature release. The app now chooses its own blockchain RPC endpoint, and it
+refuses to start a second paid session while one is already running.
 
 ## Highlights
 
-- **The Plans tab is rebuilt, around My plans and Catalog.** Plans, subscriptions and
-  allocations now arrive together in one round trip rather than from several independent
-  polls, so the tab shows one consistent picture. It keeps showing it while a tunnel is
-  up, marking the figures as cached and disabling anything that spends money, instead of
-  blanking when your own connection puts the chain out of reach.
-- **Smart connect picks a node for a plan, and spends the plan price at most once.** It
-  ranks the plan's nodes on evidence it actually holds, then works down the list.
-  A failure that spent nothing moves on freely, a refunded one is retried within a
-  limit, and anything that could buy a second subscription stops the ladder cold.
-- **Plans priced in anything other than `udvpn` now show their real price.** They used to
-  render as free, which also sorted them to the top as the cheapest thing on offer.
-- **Plans you cannot buy are hidden by default**, and each plan's node count is worked out
-  during the rescan rather than left blank.
-- **Resuming a session is now labelled Reconnect**, with a tooltip for how its cost
-  differs from buying a new one. Plan and subscription calls also ride the faster connect
-  path, and plan sessions get the same cache and quota protection node sessions had.
+- **Smart RPC picks the blockchain endpoint for you, and switches away from a bad one
+  without asking.** Candidates come from the public RPC feed, but the feed only
+  nominates: an endpoint has to answer, report the right chain, and sit within ten
+  blocks of the tallest candidate probed before it qualifies. Whatever is in use is
+  kept unless it stops qualifying or is clearly beaten, so the choice does not flap.
+  This is the new default. Picking an endpoint by hand in Settings turns it off, and
+  "Retest and reselect" there shows you the exact measurements the choice was made on.
+- **One connection at a time, enforced where the money is spent.** Buying a session
+  while another was live used to overwrite the first, leaving it open on chain with
+  your deposit against it and nothing watching its quota. Every path that can spend
+  funds now refuses while a tunnel is up, and the connect screens say so instead of
+  offering a pay form that cannot work.
+- **The Plans tab comes back to life as soon as you disconnect.** Its buttons are
+  disabled while a tunnel is up, because your own connection puts the chain out of
+  reach, but nothing used to notice the tunnel going away, so they stayed dead for up
+  to five minutes afterwards. A plan's node list now also tells "this plan has no
+  nodes" apart from "I cannot check right now", rather than reporting the first when
+  it means the second.
+- **The tray icon no longer lingers after you quit**, and on desktops that draw no
+  tray at all, stock GNOME among them, closing the window quits the app instead of
+  leaving it running with no way back to it.
+- **Confirmations are part of the app now.** The eight remaining OS dialogs are themed
+  modals that match the rest of the window and do not freeze it, with destructive
+  actions in red. There is also a proper About box, reachable from the version chip in
+  the status bar or from the tray.
 
 ## Fixes in 1.2.0
 

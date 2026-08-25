@@ -213,6 +213,8 @@ export interface ConnectionStatus {
   /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */
   socksAddr?: string
   sessionId?: string
+  /** The active session's on-chain subscription id, when known. */
+  subscriptionId?: string | null
   /**
    * Present only when a two-hop (multihop) chain is up. `nodeAddress`/`sessionId`
    * above are the ENTRY hop — the node this host dials directly; this is the exit,
@@ -600,7 +602,8 @@ export interface ElectronAPI {
     renewalPolicy?: number
     requireProxyCapable?: boolean
   }) => Promise<SmartConnectResult>
-  planNodes: (planId: string) => Promise<string[]>
+  /** null = unknown (tunnel up or chain read failed, nothing cached). Not the same statement as []. */
+  planNodes: (planId: string) => Promise<string[] | null>
   planListForNode: (nodeAddress: string) => Promise<PlanInfo[]>
   subscriptionCancel: (subscriptionId: string) => Promise<void>
   subscriptionRenew: (subscriptionId: string, planId: string, denom: string) => Promise<void>

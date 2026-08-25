@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PlanInfo, SentNode, SmartConnectResult } from '../../types'
 import { useConnectFlow } from '../../hooks/useConnectFlow'
 import { useConnection } from '../../hooks/useConnection'
@@ -21,6 +21,11 @@ interface Props {
   subscriptionId?: string
   /** Open with the manual node picker already expanded. */
   startManual?: boolean
+  /**
+   * Begin the smart connect the moment the modal opens. Honoured on the reuse
+   * flow only: a fresh subscribe spends the plan price and keeps its confirm.
+   */
+  autoStart?: boolean
   onClose: () => void
 }
 
@@ -126,7 +131,7 @@ function ProgressList({ stages, currentStep, stepDetail, error }: {
  * already-connected guard, the unhealthy-node acknowledgement, and local
  * proxy mode.
  */
-export default function PlanConnectModal({ plan, subscriptionId, startManual = false, onClose }: Props) {
+export default function PlanConnectModal({ plan, subscriptionId, startManual = false, autoStart = false, onClose }: Props) {
   const isReuse = subscriptionId !== undefined
   const { status } = useConnection()
   const tunnelUp = status.state === 'connected' || status.state === 'reconnecting'
@@ -146,6 +151,9 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   // The plan's linked node addresses, for the manual picker. null = loading.
   const [planNodeAddrs, setPlanNodeAddrs] = useState<string[] | null>(null)
+  // Main answered null: it could not read the list (nothing cached), which is
+  // not the same statement as a plan with no nodes.
+  const [planNodesUnknown, setPlanNodesUnknown] = useState(false)
   const [smartResult, setSmartResult] = useState<SmartConnectResult | null>(null)
   // Which flow the current attempt runs, for honest progress labels.
   const [kind, setKind] = useState<'smart-fresh' | 'smart-reuse' | 'manual-fresh' | 'manual-reuse'>(
@@ -166,10 +174,32 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
     if (!manual || planNodeAddrs !== null) return
     let cancelled = false
     window.api.planNodes(plan.id)
-      .then((addrs) => { if (!cancelled) setPlanNodeAddrs(addrs) })
-      .catch(() => { if (!cancelled) setPlanNodeAddrs([]) })
+      .then((addrs) => {
+        if (cancelled) return
+        setPlanNodeAddrs(addrs ?? [])
+        setPlanNodesUnknown(addrs === null)
+      })
+      .catch(() => { if (!cancelled) { setPlanNodeAddrs([]); setPlanNodesUnknown(true) } })
     return () => { cancelled = true }
   }, [manual, planNodeAddrs, plan.id])
+
+  // Auto-start decides once, from first-render values: anything that blocks it
+  // (a tunnel up, gas the wallet can't cover, a fresh subscribe) shows the idle
+  // form instead. The decision must exist DURING the first render, not only in
+  // the effect: effects run after paint, and the other-VPN IPC check runs
+  // before start() flips `connecting`, so gating the form on `connecting`
+  // alone flashed it for that whole window. Cleared when the attempt settles,
+  // which is what brings the form back after Cancel on the other-VPN warning.
+  // The ref keeps StrictMode's dev double-mount to one attempt.
+  const [autoStarting, setAutoStarting] = useState(
+    () => autoStart && isReuse && !tunnelUp && !cantAfford,
+  )
+  const autoStartedRef = useRef(false)
+  useEffect(() => {
+    if (!autoStarting || autoStartedRef.current) return
+    autoStartedRef.current = true
+    void handleSmartConnect().finally(() => setAutoStarting(false))
+  }, [])
 
   const nodeIndex = useMemo(() => new Map(allNodes.map((n) => [n.address, n])), [allNodes])
   const manualRows = useMemo(() => {
@@ -258,15 +288,20 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
       ? `${selectedNode.moniker} (${selectedNode.country})`
       : null
 
+  // Auto-start's pre-check window, before start() flips `connecting`: the
+  // progress list renders from the first frame so the idle form never flashes,
+  // and the modal must not be closable, or a purchase could outlive it.
+  const preStart = autoStarting && !connecting && !error && !tunnelConnected && !vpnWarning
+
   const title = tunnelConnected
     ? 'Connected'
-    : connecting
+    : connecting || preStart
       ? 'Connecting...'
       : isReuse
         ? `Connect via plan #${plan.id}`
         : `Subscribe to plan #${plan.id}`
 
-  const showForm = !connecting && !error && !tunnelConnected && !vpnWarning
+  const showForm = !connecting && !error && !tunnelConnected && !vpnWarning && !autoStarting
 
   // One toggle rendered in both branches, just above the action button: an
   // advanced option that should not push the primary flow down the modal.
@@ -291,9 +326,12 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
   )
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting ? undefined : onClose}>
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={connecting || preStart ? undefined : onClose}>
+      {/* Fixed height on purpose: this modal cycles through states of very
+          different sizes (smart form, node picker, progress list, warnings) and
+          resizing on every transition made it jumpy. Long states scroll inside. */}
       <div
-        className="bg-bg-secondary border border-border w-full max-w-lg mx-4 p-6 space-y-4 max-h-[90vh] overflow-y-auto rounded-lg shadow-overlay"
+        className="bg-bg-secondary border border-border w-full max-w-lg mx-4 p-6 space-y-4 h-[560px] max-h-[90vh] overflow-y-auto rounded-lg shadow-overlay"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
@@ -308,7 +346,7 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
                   : '.'}
             </p>
           </div>
-          {!connecting && (
+          {!connecting && !preStart && (
             <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-lg transition-colors">
               ×
             </button>
@@ -431,7 +469,9 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
                   </div>
                 ) : manualRows.length === 0 ? (
                   <p className="text-text-secondary text-sm">
-                    No nodes are linked to this plan right now.
+                    {planNodesUnknown
+                      ? "Could not read the plan's node list right now."
+                      : 'No nodes are linked to this plan right now.'}
                   </p>
                 ) : (
                   <div className="max-h-56 overflow-y-auto border border-border rounded-md divide-y divide-border">
@@ -495,7 +535,7 @@ export default function PlanConnectModal({ plan, subscriptionId, startManual = f
           </>
         )}
 
-        {connecting && (
+        {(connecting || preStart) && (
           <ProgressList stages={stagesFor(kind)} currentStep={currentStep} stepDetail={stepDetail} error={error} />
         )}
 

@@ -26,16 +26,24 @@ export default function PlanDetailPane({ plan, provider, tokenPrice, activeSubsc
   const { status } = useConnection()
   const tunnelUp = status.state === 'connected' || status.state === 'reconnecting'
   const [nodeAddrs, setNodeAddrs] = useState<string[] | null>(null)
-  const [nodesFailed, setNodesFailed] = useState(false)
+  // Unknown is not empty: main answers null when it cannot know (our own tunnel
+  // freezes the chain, or the read failed with nothing cached). Claiming "no
+  // nodes" then is false, and was shown for the very plan the user was
+  // connected through.
+  const [nodesUnknown, setNodesUnknown] = useState(false)
   const [showConnect, setShowConnect] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setNodeAddrs(null)
-    setNodesFailed(false)
+    setNodesUnknown(false)
     window.api.planNodes(plan.id)
-      .then((addrs) => { if (!cancelled) setNodeAddrs(addrs) })
-      .catch(() => { if (!cancelled) { setNodeAddrs([]); setNodesFailed(true) } })
+      .then((addrs) => {
+        if (cancelled) return
+        setNodeAddrs(addrs ?? [])
+        setNodesUnknown(addrs === null)
+      })
+      .catch(() => { if (!cancelled) { setNodeAddrs([]); setNodesUnknown(true) } })
     return () => { cancelled = true }
   }, [plan.id])
 
@@ -51,6 +59,19 @@ export default function PlanDetailPane({ plan, provider, tokenPrice, activeSubsc
   const price = planPriceDisplay(plan.prices)
   const perGb = pricePerGb(plan)
   const usd = price.udvpn !== null && tokenPrice ? formatUsd(price.udvpn, tokenPrice.usd) : null
+
+  // Last known node count while live data is unavailable: this visit's fetch if
+  // it got one, else the catalog scan's persisted count.
+  const lastKnownCount = nodeSummary !== null && !nodesUnknown ? nodeSummary.total : plan.nodeCount
+
+  // The active session was started from this plan's subscription: a chain fact
+  // (a plan session's row names its subscription; main surfaces it on the
+  // status), not a guess from node membership. The earlier heuristic needed the
+  // plan's node list, which a fresh app run cannot read while connected, so the
+  // label silently fell back exactly when it mattered. When the subscription is
+  // unknown the generic label stays.
+  const connectedViaPlan = tunnelUp && activeSubscriptionId !== null &&
+    status.subscriptionId === activeSubscriptionId
 
   return (
     <div className="flex-1 overflow-y-auto p-5 space-y-4">
@@ -104,12 +125,32 @@ export default function PlanDetailPane({ plan, provider, tokenPrice, activeSubsc
 
       <div className="text-sm">
         <div className="text-text-tertiary text-[10px] font-medium uppercase tracking-wide mb-1.5">Nodes</div>
-        {nodeSummary === null ? (
+        {/* Connected comes FIRST, even when a list was fetched before the tunnel
+            came up: the chain and the node directory are both frozen (caches)
+            while connected, so "50 healthy right now" would be a claim nothing
+            can currently back. */}
+        {tunnelUp ? (
+          <div className="space-y-1">
+            <p className="text-text-secondary">The node list cannot be checked live while connected.</p>
+            {lastKnownCount !== null && (
+              <p className="text-text-primary">
+                {lastKnownCount} node{lastKnownCount === 1 ? '' : 's'} linked at the last check.
+              </p>
+            )}
+          </div>
+        ) : nodeSummary === null ? (
           <div className="flex items-center gap-2 text-text-tertiary">
             <Spinner /> Checking the plan's nodes...
           </div>
-        ) : nodesFailed ? (
-          <p className="text-text-secondary">Could not read the plan's node list right now.</p>
+        ) : nodesUnknown ? (
+          <div className="space-y-1">
+            <p className="text-text-secondary">Could not read the plan's node list right now.</p>
+            {plan.nodeCount !== null && (
+              <p className="text-text-primary">
+                {plan.nodeCount} node{plan.nodeCount === 1 ? '' : 's'} linked at the last catalog scan.
+              </p>
+            )}
+          </div>
         ) : nodeSummary.total === 0 ? (
           <p className="text-warning">No nodes are linked to this plan right now. Subscribing would buy data with nowhere to use it.</p>
         ) : (
@@ -131,11 +172,17 @@ export default function PlanDetailPane({ plan, provider, tokenPrice, activeSubsc
 
       <button
         onClick={() => setShowConnect(true)}
-        disabled={tunnelUp || plan.status !== 1 || (nodeSummary !== null && !nodesFailed && nodeSummary.total === 0)}
-        title={tunnelUp ? 'Disconnect first to start a new session' : undefined}
+        disabled={tunnelUp || plan.status !== 1 || (nodeSummary !== null && !nodesUnknown && nodeSummary.total === 0)}
+        title={
+          connectedViaPlan
+            ? 'This plan is serving your current connection'
+            : tunnelUp ? 'Disconnect first to start a new session' : undefined
+        }
         className="btn btn-primary w-full disabled:opacity-40 disabled:cursor-not-allowed"
       >
-        {activeSubscriptionId ? 'Connect (already subscribed)' : 'Subscribe and connect'}
+        {connectedViaPlan
+          ? 'Connected via this plan'
+          : activeSubscriptionId ? 'Connect (already subscribed)' : 'Subscribe and connect'}
       </button>
       {plan.status !== 1 && (
         <p className="text-warning text-xs text-center">This plan is not active on chain, so it cannot be bought.</p>

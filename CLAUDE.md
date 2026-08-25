@@ -179,6 +179,25 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   tunnel the user tore down). Never add a tunnel bring-up/tear-down that bypasses both.
   Note `ipc-handlers`' `desiredProtocol` (intended) is deliberately distinct from
   `vpn-manager`'s `activeProtocol` (actual, cleared on interface drop) — don't merge them.
+- **One connection at a time, enforced in main.** Every entry point that creates a
+  session or brings up a tunnel calls `assertNotConnected()` (ipc-handlers.ts):
+  `CONNECTION_SUBSCRIBE`, `CONNECTION_SUBSCRIBE_CHAIN`, `CONNECTION_RECONNECT`,
+  `CONNECTION_CONNECT` (inside the lock, so a queued connect sees the one before it),
+  `PLAN_START_SESSION_FROM_SUB`, `PLAN_SMART_CONNECT`. It refuses while
+  `getConnectionStatus().connected` OR `reconnectAttempt > 0` — deliberately broader
+  than `isVpnActive()`, because local-proxy mode has a live paid session with routing
+  untouched, and the reconnect window has a tunnel about to be resurrected. Without
+  it a second purchase clobbered the tracked session (`applySession`) and stacked a
+  second tunnel over the first, leaving the old session active on chain with nothing
+  watching its quota (live 2026-08-25: a plan session orphaned by a Nodes-tab
+  subscribe that presented the normal pay form while connected). The renderer's
+  connect surfaces grey out behind a "You are connected" banner (`ConnectionModal`'s
+  `connectedElsewhere`, `PlanConnectModal`'s `tunnelUp`, `ChainReviewModal`'s
+  `alreadyConnected`, Sessions' Reconnect) — but that is UX; the handlers are the
+  enforcement. Third-party VPNs (`detectOtherVpn`: non-sntl wireguard/tun links)
+  stay a warn-with-override, never a hard block — the detection false-positives on
+  Tailscale, and IPsec/XFRM VPNs are invisible to it (reading xfrm policy needs
+  CAP_NET_ADMIN), so it can inform but must not gate.
 - **Bound every wait.** RPC connects go through `withTimeout`; session-creating broadcasts
   go through `broadcastOrTimeout` and set a `timeoutHeight`. `provider-service.ts` is the
   reference for the timeout pattern. (`node-tester.ts`'s `nodeFetch` timeout does NOT
@@ -1071,8 +1090,13 @@ each carries:
   overview's `stale: true` means "chain half is a memory" (tunnel up, or the read
   failed; main serves `lastPlanOverview`, cleared on WALLET_SWITCH) — the tab shows
   cached data and disables mutations rather than blanking. `PLAN_NODES` likewise
-  answers from its cache while the VPN is active: `[]` there used to render as a false
-  "No nodes are linked to this plan".
+  answers from its cache while the VPN is active, and returns **null, never `[]`, when
+  it cannot know** (cache miss: the cache is in-memory, so the catalog scan's warm
+  entries die with the process). `[]` there rendered as a false "No nodes are linked
+  to this plan" twice: first from the tunnel, then again after every app restart via
+  the `?? []` fallback, shown even for the plan the user was connected through. The
+  renderer words null as "cannot check right now" and falls back to the catalog's
+  persisted `nodeCount`; only a real `[]` may claim the plan has no nodes.
 - **Smart connect (`PLAN_SMART_CONNECT`) spends the plan price AT MOST ONCE.** The
   pure module `plan-connect.ts` (unit-tested) owns the decisions: `rankPlanCandidates`
   admits nodes on positive evidence only (directory row, active, healthy, runnable

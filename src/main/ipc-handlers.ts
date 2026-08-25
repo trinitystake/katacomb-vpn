@@ -1059,6 +1059,26 @@ function sendReconnecting(attempt: number, maxAttempts: number): void {
   notifyTrayConnecting()
 }
 
+/**
+ * Refuse to start a second connection while one is active. Covers every state the
+ * app can be carrying traffic in: a root tunnel interface (WG/AWG/OpenVPN), a
+ * child-proxy tunnel (v2ray/xray/hysteria2 + tun2socks), local-proxy mode (where
+ * isVpnActive() is deliberately false because routing is untouched, but a paid
+ * session is live all the same), and the auto-reconnect window (tunnel briefly
+ * down but about to be resurrected). Without this, a second purchase clobbered the
+ * tracked session (applySession) and brought a second tunnel up over the first,
+ * leaving the old session active on chain with nothing watching its quota.
+ * The renderer greys these actions out; this is the trust-boundary backstop.
+ */
+function assertNotConnected(): void {
+  if (reconnectAttempt > 0 || getConnectionStatus().connected) {
+    const name = activeNodeInfo?.moniker || activeNodeInfo?.address
+    throw new Error(
+      `Already connected${name ? ` to ${name}` : ''}. Disconnect the current session before starting a new connection.`,
+    )
+  }
+}
+
 function applySession(
   sessionId: string,
   nodeAddress: string,
@@ -2729,6 +2749,8 @@ export function registerIpcHandlers(): void {
     if (!wallet || !address || !privKey) {
       throw new Error('Wallet not loaded. Please re-import your mnemonic.')
     }
+    // A live connection means this purchase would orphan it (see assertNotConnected).
+    assertNotConnected()
 
     // Phase A — everything that must hold BEFORE money moves, in parallel: the
     // node's own protocol check (see preflightConnect), a fresh balance read,
@@ -2862,6 +2884,8 @@ export function registerIpcHandlers(): void {
     if (!wallet || !address || !privKey) {
       throw new Error('Wallet not loaded. Please re-import your mnemonic.')
     }
+    // Two purchases would orphan the live connection just the same as one.
+    assertNotConnected()
 
     // Verify the ENTRY and our runtime before spending anything.
     //
@@ -2973,6 +2997,9 @@ export function registerIpcHandlers(): void {
   }) => {
     assertString(params.sessionId, 'sessionId')
     if (!/^\d+$/.test(params.sessionId)) throw new Error('Invalid session ID')
+    // Before any state is mutated: reconnecting one session while another is
+    // carrying traffic would clobber the live session's tracking below.
+    assertNotConnected()
     const saved = loadSessionConfig(params.sessionId)
     if (!saved) {
       throw new Error(
@@ -3185,6 +3212,9 @@ export function registerIpcHandlers(): void {
     // Serialize tunnel bring-up against disconnect/reconnect so overlapping ops
     // can't orphan a child process (finding M1).
     return withConnectionLock(async () => {
+      // Inside the lock, so a connect queued behind an in-flight one sees the
+      // first one's tunnel and is refused instead of stacking a second on top.
+      assertNotConnected()
       // A new connect supersedes whatever the last session ended as.
       lastExpiry = null
       if (params.protocol === 'wireguard') {
@@ -3333,6 +3363,15 @@ export function registerIpcHandlers(): void {
       killSwitchFailed: killSwitchFailed || undefined,
       killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
       sessionId: activeSessionId,
+      // The active session's on-chain subscription, read off the session cache
+      // (primed by every connect flow). Lets the Plans tab say "connected via
+      // this plan" from chain fact instead of guessing by node membership,
+      // which needed a node list the tunnel makes unreadable. Null when the
+      // cache has no row (e.g. restart-then-adopt), and the label just stays
+      // generic then.
+      subscriptionId: activeSessionId
+        ? ((lastKnownSessions as SessionInfo[]).find((s) => s?.id === activeSessionId)?.subscriptionId ?? null)
+        : null,
       // MULTIHOP: present only for a two-hop chain. `nodeAddress`/`sessionId` above
       // stay the ENTRY hop; this is the exit, whose location is what the user's
       // traffic actually appears to come from.
@@ -3771,10 +3810,10 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
-    // Fail fast while our own tunnel makes the chain unreachable (see PLAN_SUBSCRIBE).
-    if (isVpnActive()) {
-      throw new Error('Disconnect the VPN before starting a new session. The chain is unreachable through the tunnel.')
-    }
+    // Broader than the isVpnActive() check the plan mutations use: a new session
+    // must also be refused in local-proxy mode and mid-reconnect, where routing is
+    // untouched but a session is live all the same (see assertNotConnected).
+    assertNotConnected()
 
     // Phase A — same shape as the paid flows even though this one only spends
     // gas: preflight, gas-reserve check and endpoint resolve in parallel over
@@ -3881,9 +3920,9 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
-    if (isVpnActive()) {
-      throw new Error('Disconnect the VPN before starting a new session. The chain is unreachable through the tunnel.')
-    }
+    // Same breadth as PLAN_START_SESSION_FROM_SUB: proxy mode and the reconnect
+    // window count as connected here, not just an active tunnel interface.
+    assertNotConnected()
 
     const flow = await openChainFlow(wallet)
     try {
@@ -4118,13 +4157,18 @@ export function registerIpcHandlers(): void {
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     // While our own tunnel makes the chain unreachable, a stale node list beats
     // an empty one: [] here used to render as "No nodes are linked to this
-    // plan", a false statement caused by the tunnel, not the plan.
-    if (isVpnActive()) return getCachedPlanNodes(params.planId) ?? []
+    // plan", a false statement caused by the tunnel, not the plan. And when the
+    // cache has nothing either (it is in-memory, so the catalog scan's warm
+    // entries die with the process), the answer is UNKNOWN (null), never [] —
+    // the `?? []` fallback here recreated the exact false statement above after
+    // every app restart. The renderer words null differently and falls back to
+    // the catalog's persisted nodeCount.
+    if (isVpnActive()) return getCachedPlanNodes(params.planId)
     try {
       return await listNodesForPlan(params.planId)
     } catch {
       reportRpcFailure()
-      return getCachedPlanNodes(params.planId) ?? []
+      return getCachedPlanNodes(params.planId)
     }
   })
 

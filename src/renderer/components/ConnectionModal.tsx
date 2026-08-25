@@ -44,6 +44,12 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const onThisNode =
     status.nodeAddress === node.address &&
     (status.state === 'connected' || status.state === 'reconnecting')
+  // Connected, but not to THIS node: another node, a plan session, a chain or a
+  // local proxy. The subscribe form is replaced by a disconnect-first notice,
+  // because a second session would orphan the live one (main refuses it too, via
+  // assertNotConnected; this is the half that explains instead of erroring).
+  const connectedElsewhere =
+    (status.state === 'connected' || status.state === 'reconnecting') && !onThisNode
   // Plans compatible with THIS node. null = still loading.
   const [compatiblePlans, setCompatiblePlans] = useState<PlanInfo[] | null>(null)
   // The wallet's plan allocations, for the reuse-vs-fresh-subscribe decision.
@@ -62,6 +68,19 @@ export default function ConnectionModal({ node, onClose }: Props) {
   const [vpnWarning, setVpnWarning] = useState<{ type: string; name: string; iface?: string }[] | null>(null)
   const [probeResult, setProbeResult] = useState<NodeProbeResult | null>(null)
   const [probing, setProbing] = useState(false)
+  // Third-party VPNs (Mullvad, a manual wg link, ...) detected when the modal
+  // OPENS, so the user is told before choosing anything, not only after the pay
+  // button. Interface-based detection can false-positive (Tailscale is a tun
+  // link too), so this only informs; the click-time confirm stays the gate.
+  const [otherVpns, setOtherVpns] = useState<{ type: string; name: string; iface?: string }[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.connectionCheckVpn()
+      .then((found) => { if (!cancelled) setOtherVpns(found) })
+      .catch(() => { /* informational only */ })
+    return () => { cancelled = true }
+  }, [])
 
   // v2ray(2)/xray(4)/hysteria2(6) run a local SOCKS5 listener, so they can be used
   // as a plain proxy. WireGuard/AmneziaWG are the routing change — no proxy mode.
@@ -305,6 +324,14 @@ export default function ConnectionModal({ node, onClose }: Props) {
           </div>
         </div>
 
+        {/* Already connected somewhere else: same banner shape and wording as the
+            Plans tab's connect modal. */}
+        {connectedElsewhere && !tunnelConnected && !connecting && (
+          <div className="bg-warning-subtle border border-warning p-3 rounded-md text-sm text-warning">
+            You are connected{status.nodeMoniker ? ` to ${status.nodeMoniker}` : ''}. Disconnect first to start a new session.
+          </div>
+        )}
+
         {/* VPN conflict warning */}
         {vpnWarning && !connecting && (
           <div className="space-y-3">
@@ -384,8 +411,18 @@ export default function ConnectionModal({ node, onClose }: Props) {
         )}
 
         {/* Subscription form */}
-        {!onThisNode && !tunnelConnected && !connecting && !error && !vpnWarning && (
+        {!onThisNode && !connectedElsewhere && !tunnelConnected && !connecting && !error && !vpnWarning && (
           <>
+            {/* Detected at open: informational, above the form it concerns. The
+                pay button keeps its explicit confirm, which repeats this list. */}
+            {otherVpns.length > 0 && (
+              <div className="bg-warning-subtle border border-warning p-3 rounded-md text-sm">
+                <span className="text-warning font-medium">Another VPN is active: </span>
+                <span className="text-text-secondary">
+                  {otherVpns.map((v) => v.name).join(', ')}. Connecting here may cause routing conflicts.
+                </span>
+              </div>
+            )}
             {matchingAllocation ? (
               <div className="bg-success/10 border border-success/40 rounded-md px-4 py-3 text-sm space-y-1">
                 <div className="text-success font-medium">

@@ -162,6 +162,7 @@ export default function MyPlansPanel({ onBrowse }: { onBrowse: () => void }) {
           }
           subscriptionId={connectTarget.row.subscription.id}
           startManual={connectTarget.manual}
+          autoStart={!connectTarget.manual}
           onClose={() => setConnectTarget(null)}
         />
       )}

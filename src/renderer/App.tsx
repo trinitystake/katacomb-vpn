@@ -292,7 +292,7 @@ function AppInner() {
             </h1>
           </div>
           <ConnectedBar />
-          <IpDisplay connected={isConnected} />
+          <IpDisplay connected={isConnected} sessionId={connStatus.sessionId} />
           <DisconnectButton />
         </div>
         <div className="flex items-center gap-3">

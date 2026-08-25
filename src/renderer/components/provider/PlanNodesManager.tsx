@@ -36,7 +36,9 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
     setLinked(null)
     window.api
       .planNodes(plan.id)
-      .then(setLinked)
+      // null = main could not read the list; same fallback this catch already
+      // chose for failures (the console's mutations fail on their own anyway).
+      .then((addrs) => setLinked(addrs ?? []))
       .catch(() => setLinked([]))
   }, [plan.id])
 

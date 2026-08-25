@@ -459,7 +459,10 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
                         {!isConnectedSession && (
                           <button
                             onClick={() => handleReconnect(session)}
-                            disabled={isBusy || busy !== null || vpnConnected || quotaUsedUp}
+                            // 'reconnecting' too: the tunnel is briefly down but
+                            // auto-reconnect is restoring it, and main refuses a
+                            // competing reconnect in that window (assertNotConnected).
+                            disabled={isBusy || busy !== null || vpnConnected || status.state === 'reconnecting' || quotaUsedUp}
                             className="btn btn-primary text-xs px-3 py-1 disabled:opacity-30 disabled:cursor-not-allowed"
                             title={
                               quotaUsedUp

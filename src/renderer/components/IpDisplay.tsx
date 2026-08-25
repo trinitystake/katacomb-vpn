@@ -6,13 +6,21 @@ const POLL_IP_MS = 60_000
 
 interface Props {
   connected: boolean
+  /** Active session id, so a session-to-session change refreshes too. */
+  sessionId?: string | null
 }
 
-export default function IpDisplay({ connected }: Props) {
+export default function IpDisplay({ connected, sessionId }: Props) {
   const [ipInfo, setIpInfo] = useState<IpInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [revealed, setRevealed] = useState(false)
-  const prevConnected = useRef(connected)
+  // The connection's identity, not just its existence: switching sessions without
+  // this component seeing `connected` go false (the status poll can miss a fast
+  // disconnect-connect) must still refetch, or the previous tunnel's exit IP stays
+  // on screen in the green connected style. Ignore the id while disconnected, so
+  // idle session-list churn doesn't refetch anything.
+  const connKey = connected ? `up:${sessionId ?? ''}` : 'idle'
+  const prevKey = useRef(connKey)
   const [ipStale, setIpStale] = useState(false)
 
   // Two stages so the IP is on screen as fast as the network allows. Stage 1 is
@@ -72,8 +80,8 @@ export default function IpDisplay({ connected }: Props) {
   }, [fetchIp])
 
   useEffect(() => {
-    if (connected !== prevConnected.current) {
-      prevConnected.current = connected
+    if (connKey !== prevKey.current) {
+      prevKey.current = connKey
       setRevealed(false)
       setIpStale(true)
       setLoading(true)
@@ -83,7 +91,7 @@ export default function IpDisplay({ connected }: Props) {
       // transition still has in flight — a fixed pause only added latency.
       fetchIp(2, true, true)
     }
-  }, [connected, fetchIp])
+  }, [connKey, fetchIp])
 
   // Polled refresh — only when the window is visible and the VPN isn't
   // connected (connection-change effect above already refreshes on transitions).

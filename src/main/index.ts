@@ -1,6 +1,6 @@
 import { app, BrowserWindow, shell, Tray, Menu, nativeImage, nativeTheme, dialog, powerMonitor } from 'electron'
 import { join } from 'path'
-import { execSync, execFileSync } from 'child_process'
+import { execSync, execFile, execFileSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { is } from '@electron-toolkit/utils'
@@ -22,6 +22,29 @@ const POLICY_PATH = '/usr/share/polkit-1/actions/com.katacomb.vpn.policy'
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let forceQuit = false
+
+// Whether any panel actually DISPLAYS StatusNotifierItems. Stock GNOME (default
+// desktop on Debian and Ubuntu) ships no tray at all: new Tray() succeeds, the
+// item registers, and nothing is drawn anywhere. Hiding the window "to the tray"
+// there makes the app unreachable, so the close handler falls back to quitting.
+// Defaults to true so a failed probe preserves the hide-to-tray behavior.
+let trayHostAvailable = true
+
+/** Ask the session's StatusNotifierWatcher (over gdbus, which glib ships on every
+ *  Debian-based distro) whether a host is registered. Any failure — no watcher on
+ *  the bus, no gdbus, timeout — means no visible tray. Async and best-effort: the
+ *  answer only matters by the time the user closes the window. */
+function probeTrayHost(): void {
+  execFile('gdbus', [
+    'call', '--session',
+    '--dest', 'org.kde.StatusNotifierWatcher',
+    '--object-path', '/StatusNotifierWatcher',
+    '--method', 'org.freedesktop.DBus.Properties.Get',
+    'org.kde.StatusNotifierWatcher', 'IsStatusNotifierHostRegistered',
+  ], { timeout: 3000 }, (err, stdout) => {
+    trayHostAvailable = !err && stdout.includes('true')
+  })
+}
 
 function getIconPath(filename: string): string {
   return is.dev
@@ -192,8 +215,12 @@ function createWindow(): void {
 
   mainWindow.on('close', (e) => {
     if (forceQuit) return // Allow quit (from tray menu or app.quit())
-    // Closing the window always minimizes to the tray; the app keeps running so
-    // the tray Connect/Disconnect menu stays available. Real quit = tray "Quit"
+    // No desktop shows our tray icon (stock GNOME on Debian/Ubuntu): hiding here
+    // would leave the app running with no visible way back in or out. Let the
+    // window close; window-all-closed then quits through the normal teardown.
+    if (!trayHostAvailable) return
+    // Closing the window minimizes to the tray; the app keeps running so the
+    // tray Connect/Disconnect menu stays available. Real quit = tray "Quit"
     // (sets forceQuit), whose before-quit handler tears down any active tunnel.
     e.preventDefault()
     mainWindow?.hide()
@@ -414,6 +441,9 @@ app.whenReady().then(() => {
   // Watch the RPC endpoint every chain call depends on, so an unhealthy one is
   // visible in the status bar instead of showing up as silently stale data.
   startRpcMonitor()
+  // Answer "does this desktop draw tray icons at all?" before the user can close
+  // the window; the close handler falls back to quitting when it doesn't.
+  probeTrayHost()
   createWindow()
   createTrayIcon()
   // Keep the tray tooltip + menu in sync with connect/disconnect (incl. from the
@@ -453,7 +483,21 @@ app.whenReady().then(() => {
 
 let quitHandled = false
 app.on('before-quit', (e) => {
-  if (quitHandled) return
+  // Destroy the tray the moment quitting starts, on every path: menu Quit,
+  // SIGTERM and Ctrl+C all arrive here (Chromium routes signals into the quit
+  // flow — verified live). destroy() unregisters the StatusNotifierItem over
+  // D-Bus; the app.exit(0) below just drops the bus connection and leaves
+  // removal to the panel noticing the name vanish, which is the step that
+  // occasionally fails and strands a dead "ghost" icon in the panel.
+  tray?.destroy()
+  tray = null
+  if (quitHandled) {
+    // A repeat quit (second menu Quit, double Ctrl+C) must not fall through to
+    // the default quit path: that exits at once, cutting the in-flight teardown
+    // below mid-way. The already-scheduled app.exit(0) finishes the job.
+    e.preventDefault()
+    return
+  }
   // Teardown is now async (it may round-trip to the root daemon), so defer the
   // quit until it finishes — capped so an unresponsive daemon can't hang the
   // exit. The kernel-resident kill switch/routes survive regardless.
@@ -474,8 +518,15 @@ app.on('before-quit', (e) => {
 })
 
 app.on('window-all-closed', () => {
-  // No-op: the app lives in the tray (closing the window only hides it). Quitting
-  // is done explicitly via the tray "Quit" item, which sets forceQuit + app.quit().
+  // With no tray host on this desktop (stock GNOME), the closed window was the
+  // only control surface left — quit rather than linger headless.
+  if (!trayHostAvailable) {
+    app.quit()
+    return
+  }
+  // Otherwise: the app lives in the tray (closing the window only hides it).
+  // Quitting is done explicitly via the tray "Quit" item, which sets
+  // forceQuit + app.quit().
 })
 
 export { mainWindow }

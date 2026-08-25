@@ -23,15 +23,19 @@
 # cosmetic — every one of these was learned by getting it wrong on 1.0.0.
 #
 #   0. notes      Rewrite the PROSE of RELEASE_NOTES.md, and of README.md if the
-#                 release changed what the app does. Every version STRING in both
-#                 (notes title, "Fixes in", README status line, and the install
-#                 commands in both) is rewritten for you in step 1 and committed as
-#                 "Update docs for <version>" - do not hand-edit those. The BODY
-#                 is yours, and preflight refuses the cut if it still matches the
-#                 previous release's word for word: 1.0.3 and 1.1.0 both shipped
-#                 1.0.2's Highlights because nothing used to check. That tripwire
-#                 only catches prose left completely untouched, so it is a floor,
-#                 not a proofread. Re-read Known limitations too: its items are
+#                 release changed what the app does. The prose is the TITLE line, the
+#                 summary under it, and ## Highlights. The title is yours on purpose:
+#                 it is the one durable marker that these notes were written for THIS
+#                 version, and preflight refuses the cut until it names the version
+#                 being cut. Every OTHER version STRING in both files ("Fixes in", the
+#                 README status line, and the install commands in both) is rewritten
+#                 for you in step 1 and committed as "Update docs for <version>" - do
+#                 not hand-edit those. Preflight also refuses a cut whose prose still
+#                 matches the previous release's word for word: 1.0.3 and 1.1.0 both
+#                 shipped 1.0.2's Highlights because nothing used to check. Both
+#                 tripwires are floors, not a proofread - retitling without touching
+#                 the Highlights satisfies one, and 1.2.0 walked past the other.
+#                 Re-read Known limitations too: its items are
 #                 MEANT to carry forward until actually fixed (identical is that
 #                 section's healthy state), so no diff can police it - only you
 #                 can notice a fixed limitation still listed, or a new one missing.
@@ -159,6 +163,11 @@ EOF
   fi
 
   cp "$src_notes" "$out_file"
+  # Normalising, not authoring. On the real path the title already says $version,
+  # because assert_notes_titled_for_version refused the cut otherwise. This line
+  # earns its keep on the OTHER side of assert_notes_prose_rewritten, where the
+  # input is the PREVIOUS tag's file and its title has to be levelled before the
+  # two can be compared on prose alone.
   sed -i "1s/^.*/# Katacomb VPN $version/" "$out_file"
 
   # Replace the WHOLE fixes section (heading + old bullets), not just the
@@ -204,6 +213,45 @@ generate_readme() {
     die "$src_readme: no '**Status:** release (x.y.z)' line to bump. Reword generate_readme() in scripts/release.sh to match the new wording."
 }
 
+# WHY the title is hand-written when every other version string is generated.
+#
+# assert_notes_prose_rewritten below asks git "did the prose change since the
+# last release?". That is not the same question as "is this prose about the
+# version being cut", and 1.2.0 is the release that proved it: b88678d rewrote
+# RELEASE_NOTES.md AFTER v1.1.0 was tagged, to correct 1.1.0's own published
+# Highlights. So at the 1.2.0 cut the working copy really did differ from
+# v1.1.0:RELEASE_NOTES.md, the check read that as "step 0 was done", and 1.2.0
+# shipped 1.1.0's Highlights - the third release running to ship someone else's,
+# and the first to do it with a guard watching. The guard and the commit that
+# defeated it were in the same release.
+#
+# No git-derived oracle can close that hole. The notes are ONE rolling file, so
+# "the previous release's prose" and "not rewritten yet" are the same bytes, and
+# nothing in the repository separates an edit made for this release from an edit
+# made for the last one. The evidence has to be produced BY the rewrite, which
+# means a marker set by hand.
+#
+# The title is that marker. It already names a version, it sits on line 1 of the
+# file being edited anyway, and correcting an older release's notes cannot forge
+# it (that edit keeps the older version). It used to be rewritten here with the
+# mechanical strings, which is precisely what left the check below nothing to
+# read.
+assert_notes_titled_for_version() {
+  local version=$1 notes=$2
+
+  [ -f "$notes" ] || return 0
+
+  local title
+  title="$(head -1 "$notes")"
+  [ "$title" = "# Katacomb VPN $version" ] || die "$notes is titled '$title', not '# Katacomb VPN $version'.
+        The title is what says these notes were written for the version being
+        cut, so it is yours to set (step 0) and not the generator's. Rewrite the
+        summary line and '## Highlights' for $version, retitle the file, and
+        re-run. Note that retitling ALONE satisfies this check: nothing else
+        will catch Highlights left describing the previous release."
+  ok "$notes titled for $version"
+}
+
 # The prose the generator does NOT touch — the summary line under the title and
 # ## Highlights — is step 0's job, and until now nothing noticed when step 0 was
 # skipped. 1.0.3 and 1.1.0 both shipped 1.0.2's Highlights verbatim: once the
@@ -228,9 +276,12 @@ generate_readme() {
 #
 # What it cannot see: ANY edit to the prose since the last tag reads as "step 0
 # was done", including one made for some other reason - a typo fix, or a
-# correction to the notes of the release before this one. It catches the case
-# that actually happened, prose left entirely alone, and is a floor rather than
-# a proofread.
+# correction to the notes of the release before this one. That last one is not
+# hypothetical, it is how 1.2.0 shipped 1.1.0's Highlights straight past this
+# check one release after it was added; assert_notes_titled_for_version above is
+# the answer to it. This half is kept because it is the only one that looks at
+# the prose at all, so it still catches a file left entirely alone whose title
+# was bumped to satisfy the other. Two floors, neither a proofread.
 assert_notes_prose_rewritten() {
   local version=$1 prev_tag=$2 notes=$3 from_worktree=$4
 
@@ -390,6 +441,7 @@ sync_doc() {
 
 NOTES_TMP="$(mktemp)"
 README_TMP="$(mktemp)"
+assert_notes_titled_for_version "$VERSION" "$NOTES"
 generate_release_notes "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
 assert_notes_prose_rewritten "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
 generate_readme "$VERSION" "$READMEDOC" "$README_TMP"

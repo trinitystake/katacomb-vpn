@@ -35,6 +35,10 @@ const DEPS_TO_BUNDLE = [
   'cosmjs-types',
 ]
 
+// electron-vite defaults build.minify to FALSE (unlike plain Vite, which minifies
+// production builds), so every section below has to ask for it explicitly. Without
+// these the packaged app ships readable source: 4.2 MB for the globe chunk alone,
+// and ~4.8 MB across main + renderer.
 export default defineConfig({
   main: {
     plugins: [
@@ -46,6 +50,7 @@ export default defineConfig({
       // Never ship source maps in the packaged app (would expose full main
       // source incl. wallet flow inside the AppImage/deb).
       sourcemap: false,
+      minify: 'esbuild',
       rollupOptions: {
         // ws optional native deps — must stay as runtime require() so they
         // gracefully no-op when not installed
@@ -55,7 +60,7 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
-    build: { sourcemap: false },
+    build: { sourcemap: false, minify: 'esbuild' },
   },
   renderer: {
     resolve: {
@@ -72,6 +77,6 @@ export default defineConfig({
     css: {
       postcss: resolve(__dirname, 'postcss.config.js'),
     },
-    build: { sourcemap: false },
+    build: { sourcemap: false, minify: 'esbuild' },
   },
 })

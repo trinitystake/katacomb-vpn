@@ -1331,7 +1331,17 @@ actually execute the binary (`--no-sandbox --version`), which must reach Chromiu
 startup rather than `symbol lookup error` or `error while loading shared libraries`.
 Reaching a dbus or `Missing X server or $DISPLAY` complaint is the expected pass in a
 headless container. Do that on any dependency change before reaching for the full
-interactive script below.
+interactive script below. All four re-run green on 2026-08-25 after the d3-geo globe;
+note the deb's `Depends` are NOT affected by renderer dependencies, since `libgbm.so.1`
+and `libasound.so.2` are `DT_NEEDED` on the Electron binary itself (`objdump -p`).
+
+**Do not test "no GL" by purging mesa: `Xvfb` links `libGL.so.1` itself** and dies with
+`error while loading shared libraries` the moment you remove it, which looks exactly like
+the app failing to open a window. Measured, after wasting a run on it. There is no such
+thing as a GUI machine with no `libGL.so.1` at all, so the state worth testing is "no
+acceleration", not "no library": keep mesa installed so the X server runs, and take GL
+away from Chromium instead with `--disable-gpu --disable-software-rasterizer`. Both
+bookworm and ubuntu:24.04 map and paint a window under those flags (2026-08-25).
 
 **The AppImage bundles `libasound.so.2`, and deliberately does NOT bundle `libgbm.so.1`.**
 An AppImage has no package metadata, so it cannot declare either of the two libraries

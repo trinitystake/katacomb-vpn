@@ -681,6 +681,19 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   (confirmed on the rewrite, pixel-identical to a GPU launch).
   **Never give `ErrorBoundary` a new caller without a `fallback`** unless the whole
   window really is the right blast radius; it is back to its single root caller.
+- **`CountryGlobe` owns ALL its geometry imperatively, and that is not a style choice.**
+  `draw()` mutates one long-lived `projection` in place and runs from an effect or a
+  rAF, i.e. always AFTER React commits. So any path whose `d` is computed in the render
+  body reads the PREVIOUS frame's scale and translate. The limb-shade overlay was the one
+  element left doing that, and it left a stale dark disc offset from the globe for a
+  second or two after every resize, self-healing only when an unrelated render (hover, the
+  60 s node refresh) happened to run. Measured, not guessed: instrumented, a resize logged
+  `[RENDER] scale=297.6` against `[DRAW] scale=251.6` for the same size. Size lives in
+  `sizeRef` + a one-shot `measured` flag rather than in state for the same reason resize
+  used to feel sluggish: routing the ResizeObserver through `setState` re-ran
+  `features.map()` over 177 `<path>` elements every frame of a window drag to change
+  nothing but the svg's width and height. After the fix, four resizes cost **0 React
+  renders and 4 draws**. Don't move any `d`, or the svg's width/height, back into JSX.
 - **The globe's gesture handling: capture on movement, never on pointerdown.**
   `setPointerCapture` retargets the whole gesture to the `<svg>`, so the `pointerup`
   lands there rather than on the country `<path>` and the browser never synthesises the

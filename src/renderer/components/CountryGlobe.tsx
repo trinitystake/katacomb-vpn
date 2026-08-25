@@ -92,18 +92,26 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const sphereRef = useRef<SVGPathElement>(null)
   const graticuleRef = useRef<SVGPathElement>(null)
+  const limbRef = useRef<SVGPathElement>(null)
   const countryRefs = useRef<(SVGPathElement | null)[]>([])
   const tooltipRef = useRef<HTMLDivElement>(null)
 
   const [features, setFeatures] = useState<Feature[]>([])
-  const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
   const [hover, setHover] = useState<{ name: string; count: number } | null>(null)
+  // Only "have we been measured yet", not the measurement itself. The size lives
+  // in a ref so a resize redraws without re-rendering 177 <path> elements that
+  // are not changing: see the ResizeObserver below.
+  const [measured, setMeasured] = useState(false)
 
   // Camera state lives in refs, not state: a drag moves it every pointermove and
   // the paths are rewritten imperatively below, so re-rendering 177 React
   // elements per frame would be pure waste. Nothing else reads these.
   const rotationRef = useRef<[number, number]>(rotationFor(HOME.lat, HOME.lng))
   const zoomRef = useRef(1)
+  const sizeRef = useRef({ w: 0, h: 0 })
+  // The ResizeObserver below is mounted once, so it reaches `draw` through this
+  // ref rather than capturing the identity it had at mount.
+  const drawRef = useRef<() => void>(() => {})
 
   // Load GeoJSON once (cached at module level across remounts)
   useEffect(() => {
@@ -126,21 +134,30 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     }
   }, [])
 
-  // Track container size so the projection can be refitted.
+  // Track container size. This deliberately does NOT go through state: a window
+  // drag fires the observer every frame, and routing that through React re-ran
+  // features.map() over 177 <path> elements per frame to change nothing but the
+  // svg's width and height. Same shape as the drag handler below: write a ref,
+  // coalesce on a frame, redraw imperatively.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
+    let frame = 0
     const update = () => {
       const rect = el.getBoundingClientRect()
-      setSize({ w: Math.floor(rect.width), h: Math.floor(rect.height) })
+      sizeRef.current = { w: Math.floor(rect.width), h: Math.floor(rect.height) }
+      // One render, the first time, so the paths exist to be drawn into.
+      setMeasured((m) => m || sizeRef.current.w > 0)
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawRef.current() })
     }
     update()
     const ro = new ResizeObserver(update)
     ro.observe(el)
-    return () => ro.disconnect()
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      ro.disconnect()
+    }
   }, [])
-
-  const fitScale = size.w > 0 && size.h > 0 ? (Math.min(size.w, size.h) / 2) * 0.92 : 0
 
   // One projection instance for the life of the component; the draw below mutates
   // its rotation/scale in place rather than rebuilding the path generator.
@@ -148,16 +165,32 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
   const pathGen = useMemo(() => geoPath(projection), [projection])
   const graticule = useMemo(() => geoGraticule10(), [])
 
-  // Write every `d` attribute straight to the DOM. Called on drag, zoom, resize
-  // and after the feature list arrives.
+  // Write the svg's dimensions and every `d` attribute straight to the DOM.
+  // Called on drag, zoom, resize and after the feature list arrives.
+  //
+  // EVERY piece of geometry is set here, the limb shade included. It must not be
+  // computed in the render body instead: this function mutates `projection` in
+  // place and runs from an effect or a rAF, both of which are AFTER React has
+  // committed, so anything rendering a path from `projection` reads the previous
+  // frame's scale and translate. That is exactly what left a stale dark disc
+  // offset from the globe for a second or two after every resize.
   const draw = useCallback(() => {
-    if (!fitScale) return
+    const { w, h } = sizeRef.current
+    if (!w || !h) return
     projection
       .rotate(rotationRef.current)
-      .scale(fitScale * zoomRef.current)
-      .translate([size.w / 2, size.h / 2])
+      .scale((Math.min(w, h) / 2) * 0.92 * zoomRef.current)
+      .translate([w / 2, h / 2])
 
-    sphereRef.current?.setAttribute('d', pathGen({ type: 'Sphere' }) ?? '')
+    const svg = svgRef.current
+    if (svg) {
+      svg.setAttribute('width', String(w))
+      svg.setAttribute('height', String(h))
+    }
+
+    const sphere = pathGen({ type: 'Sphere' }) ?? ''
+    sphereRef.current?.setAttribute('d', sphere)
+    limbRef.current?.setAttribute('d', sphere)
     graticuleRef.current?.setAttribute('d', pathGen(graticule) ?? '')
     for (let i = 0; i < features.length; i++) {
       const el = countryRefs.current[i]
@@ -166,7 +199,9 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
       // empty `d` hides them, which is the clipping we want for free.
       el.setAttribute('d', pathGen(features[i] as Parameters<typeof pathGen>[0]) ?? '')
     }
-  }, [fitScale, features, graticule, pathGen, projection, size.w, size.h])
+  }, [features, graticule, pathGen, projection])
+
+  drawRef.current = draw
 
   // Redraw whenever geometry inputs change. Colours are React's job, not this one.
   useEffect(() => {
@@ -286,7 +321,7 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
   )
   const fmtNum = (n: number) => n.toLocaleString('en')
 
-  const ready = features.length > 0 && fitScale > 0
+  const ready = features.length > 0 && measured
 
   return (
     <div ref={containerRef} className="absolute inset-0">
@@ -302,8 +337,6 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
       {ready && (
         <svg
           ref={svgRef}
-          width={size.w}
-          height={size.h}
           className="absolute inset-0 touch-none select-none cursor-grab active:cursor-grabbing"
         >
           <defs>
@@ -344,7 +377,8 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
             )
           })}
 
-          <path d={pathGen({ type: 'Sphere' }) ?? ''} fill="url(#globe-limb)" pointerEvents="none" />
+          {/* `d` is written by draw(), never here: see the note on draw(). */}
+          <path ref={limbRef} fill="url(#globe-limb)" pointerEvents="none" />
         </svg>
       )}
 

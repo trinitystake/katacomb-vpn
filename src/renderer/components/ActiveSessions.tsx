@@ -7,6 +7,7 @@ import { useReconnect } from '../hooks/useReconnect'
 import Spinner from './Spinner'
 import { displayConnectError } from '../utils/connect-errors'
 import ChainUnreachable from './ChainUnreachable'
+import { useConfirm } from './ConfirmModal'
 import type { SessionInfo } from '../types'
 
 interface Props {
@@ -78,6 +79,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
   const { status, refresh: refreshConnection } = useConnection()
   const { overview: { allocations } } = usePlansContext()
   const reconnect = useReconnect()
+  const { requestConfirm, confirmDialog } = useConfirm()
   const vpnConnected = status.state === 'connected'
   // Refresh asks the chain, and WALLET_SESSIONS returns lastKnownSessions verbatim
   // while isVpnActive() — so while our own tunnel carries the traffic the button is a
@@ -223,13 +225,19 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
     const reconnectTarget = vpnConnected && !isThisSessionConnected
       ? sessions.find((s) => s.id === status.sessionId) ?? null
       : null
-    const vpnWarning = reconnectTarget
-      ? '\n\nNote: Your current VPN connection will be temporarily interrupted to reach the blockchain, then reconnected.'
-      : ''
-    const chainWarning = peer
-      ? `\n\nThis is the ${session.chainRole ?? 'first'} hop of a two-hop chain, so #${peer.id} will be ended too. One hop alone carries no traffic.`
-      : ''
-    if (!confirm(`End session #${session.id}? This will close the session on-chain. Remaining data/time will be forfeited.${chainWarning}${vpnWarning}`)) {
+    const warnings = ['This will close the session on-chain. Remaining data/time will be forfeited.']
+    if (peer) {
+      warnings.push(`This is the ${session.chainRole ?? 'first'} hop of a two-hop chain, so #${peer.id} will be ended too. One hop alone carries no traffic.`)
+    }
+    if (reconnectTarget) {
+      warnings.push('Note: Your current VPN connection will be temporarily interrupted to reach the blockchain, then reconnected.')
+    }
+    if (!(await requestConfirm({
+      title: `End session #${session.id}?`,
+      body: warnings,
+      confirmLabel: 'End session',
+      danger: true,
+    }))) {
       return
     }
 
@@ -641,6 +649,7 @@ export default function ActiveSessions({ sessions, loading, refreshing, refresh 
           })}
         </div>
       )}
+      {confirmDialog}
     </div>
   )
 }

@@ -4,6 +4,7 @@ import type { LeaseSummary, MyPlan, ProviderEconomics, SentNode, TokenPrice } fr
 import { displayConnectError } from '../../utils/connect-errors'
 import { protocolMeta } from '../../utils/protocols'
 import CountryFlag from '../CountryFlag'
+import { useConfirm } from '../ConfirmModal'
 import Spinner from '../Spinner'
 import { formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
 
@@ -29,6 +30,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
   const [busyAddress, setBusyAddress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [leasingNode, setLeasingNode] = useState<SentNode | null>(null)
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   const nodeIndex = useMemo(() => new Map(allNodes.map((n) => [n.address, n])), [allNodes])
 
@@ -66,7 +68,12 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
   }, [refreshAll])
 
   async function handleUnlink(address: string) {
-    if (!confirm(`Unlink this node from plan #${plan.id}?\n\nSubscribers stop being served by it. Your lease is unaffected. This is an on-chain transaction.`)) return
+    if (!(await requestConfirm({
+      title: `Unlink this node from plan #${plan.id}?`,
+      body: ['Subscribers stop being served by it. Your lease is unaffected. This is an on-chain transaction.'],
+      confirmLabel: 'Unlink',
+      danger: true,
+    }))) return
     await run(address, () => window.api.providerPlanUnlink(plan.id, address))
   }
 
@@ -75,10 +82,12 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
   }
 
   async function handleEndLease(lease: LeaseSummary) {
-    if (!confirm(
-      `End lease #${lease.id}?\n\nThe unused hours are refunded and the node is unlinked from your plans. ` +
-      `This is an on-chain transaction.`
-    )) return
+    if (!(await requestConfirm({
+      title: `End lease #${lease.id}?`,
+      body: ['The unused hours are refunded and the node is unlinked from your plans. This is an on-chain transaction.'],
+      confirmLabel: 'End lease',
+      danger: true,
+    }))) return
     await run(lease.nodeAddress, () => window.api.leaseEnd(lease.id))
   }
 
@@ -157,6 +166,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
           }}
         />
       )}
+      {confirmDialog}
     </div>
   )
 }
@@ -320,6 +330,7 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'idle' | 'leasing' | 'linking'>('idle')
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   const hourCount = Number(hours)
   const hoursValid = Number.isInteger(hourCount) && hourCount > 0
@@ -355,12 +366,15 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
 
   async function handleConfirm() {
     if (!quote || !withinBounds) return
-    if (!confirm(
-      `Lease ${node.moniker || node.address} for ${hourCount} hours?\n\n` +
-      `Cost: ${formatUdvpn(quote.totalUdvpn)}, held on chain and paid to the node operator hourly. ` +
-      `Ending the lease early refunds the unused hours.\n\n` +
-      `Two on-chain transactions: the lease, then the link to plan #${planId}.`
-    )) return
+    if (!(await requestConfirm({
+      title: `Lease ${node.moniker || node.address} for ${hourCount} hours?`,
+      body: [
+        `Cost: ${formatUdvpn(quote.totalUdvpn)}, held on chain and paid to the node operator hourly. ` +
+        `Ending the lease early refunds the unused hours.`,
+        `Two on-chain transactions: the lease, then the link to plan #${planId}.`,
+      ],
+      confirmLabel: 'Lease and link',
+    }))) return
 
     setBusy(true)
     setError(null)
@@ -481,6 +495,7 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
             {busy ? '…' : quote ? `Lease for ${formatUdvpn(quote.totalUdvpn)}` : 'Pricing…'}
           </button>
         </div>
+        {confirmDialog}
       </div>
     </div>
   )

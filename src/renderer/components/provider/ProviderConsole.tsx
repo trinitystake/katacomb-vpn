@@ -7,6 +7,7 @@ import { isChainUnreachable } from '../../../shared/rpc-health'
 import { displayConnectError } from '../../utils/connect-errors'
 import type { ProviderDetailsInput } from '../../types'
 import ChainUnreachable from '../ChainUnreachable'
+import { useConfirm } from '../ConfirmModal'
 import Spinner from '../Spinner'
 import ProviderPlans from './ProviderPlans'
 
@@ -224,6 +225,7 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
   const [deposit, setDeposit] = useState<{ denom: string; amount: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   useEffect(() => {
     window.api.providerDeposit().then(setDeposit).catch(() => setDeposit(null))
@@ -236,12 +238,14 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
       setError('Give your provider a name: it is what subscribers see next to your plans.')
       return
     }
-    if (!confirm(
-      `Register "${details.name.trim()}" as a provider?\n\n` +
-      `Deposit: ${depositLabel} (plus network fee).\n` +
-      `The deposit goes to the community pool and is NOT refundable.\n\n` +
-      `This is an on-chain transaction.`
-    )) return
+    if (!(await requestConfirm({
+      title: `Register "${details.name.trim()}" as a provider?`,
+      body: [
+        `Deposit: ${depositLabel} (plus network fee). The deposit goes to the community pool and is NOT refundable.`,
+        'This is an on-chain transaction.',
+      ],
+      confirmLabel: 'Register',
+    }))) return
 
     setBusy(true)
     setError(null)
@@ -303,6 +307,7 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
           go live while the provider is active.
         </p>
       </div>
+      {confirmDialog}
     </div>
   )
 }
@@ -312,13 +317,23 @@ function ProviderHeader({ provider, onChanged }: { provider: { address: string; 
   const active = provider.status === STATUS_ACTIVE
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   const setStatus = useCallback(async (next: boolean) => {
-    if (!confirm(
+    if (!(await requestConfirm(
       next
-        ? 'Activate this provider?\n\nYour active plans become visible to subscribers. This is an on-chain transaction.'
-        : 'Deactivate this provider?\n\nYour plans stop being offered. This is an on-chain transaction.'
-    )) return
+        ? {
+            title: 'Activate this provider?',
+            body: ['Your active plans become visible to subscribers. This is an on-chain transaction.'],
+            confirmLabel: 'Activate',
+          }
+        : {
+            title: 'Deactivate this provider?',
+            body: ['Your plans stop being offered. This is an on-chain transaction.'],
+            confirmLabel: 'Deactivate',
+            danger: true,
+          },
+    ))) return
     setBusy(true)
     setError(null)
     try {
@@ -329,7 +344,7 @@ function ProviderHeader({ provider, onChanged }: { provider: { address: string; 
     } finally {
       setBusy(false)
     }
-  }, [onChanged])
+  }, [onChanged, requestConfirm])
 
   return (
     <div className="border-b border-border bg-bg-secondary px-5 py-3 shrink-0">
@@ -361,6 +376,7 @@ function ProviderHeader({ provider, onChanged }: { provider: { address: string; 
         </p>
       )}
       {error && <p className="text-danger text-xs mt-2">{displayConnectError(error)}</p>}
+      {confirmDialog}
     </div>
   )
 }

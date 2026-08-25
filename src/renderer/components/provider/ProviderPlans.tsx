@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { LeaseSummary, MyPlan, PlanStats, ProviderEconomics, TokenPrice } from '../../types'
 import { computeBreakEven, netOfStakingShare, parseDecShare } from '../../../shared/provider-economics'
 import { displayConnectError } from '../../utils/connect-errors'
+import { useConfirm } from '../ConfirmModal'
 import PlanNodesManager from './PlanNodesManager'
 import { STATUS_ACTIVE, formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
 
@@ -168,6 +169,7 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
   const active = plan.status === STATUS_ACTIVE
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   async function toggleStatus(e: React.MouseEvent) {
     e.stopPropagation()
@@ -175,11 +177,20 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
       setError('Activate your provider first. The chain rejects an active plan under an inactive provider.')
       return
     }
-    if (!confirm(
+    if (!(await requestConfirm(
       active
-        ? `Deactivate plan #${plan.id}?\n\nIt stops being offered to new subscribers. This is an on-chain transaction.`
-        : `Activate plan #${plan.id}?\n\nIt becomes visible to subscribers. This is an on-chain transaction.`
-    )) return
+        ? {
+            title: `Deactivate plan #${plan.id}?`,
+            body: ['It stops being offered to new subscribers. This is an on-chain transaction.'],
+            confirmLabel: 'Deactivate',
+            danger: true,
+          }
+        : {
+            title: `Activate plan #${plan.id}?`,
+            body: ['It becomes visible to subscribers. This is an on-chain transaction.'],
+            confirmLabel: 'Activate',
+          },
+    ))) return
     setBusy(true)
     setError(null)
     try {
@@ -248,6 +259,7 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
         )}
       </div>
       {error && <p className="text-danger text-xs mt-1.5">{displayConnectError(error)}</p>}
+      {confirmDialog}
     </div>
   )
 }
@@ -267,6 +279,7 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
   const [isPrivate, setIsPrivate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   const gb = Number(gigabytes)
   const dayCount = Number(days)
@@ -295,10 +308,11 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
 
   async function handleCreate() {
     if (!valid || priceUdvpn === null) return
-    if (!confirm(
-      `Create a plan for ${gb} GB over ${dayCount} days at ${formatUdvpn(priceUdvpn)}?\n\n` +
-      `It is created inactive, and you activate it afterwards. This is an on-chain transaction.`
-    )) return
+    if (!(await requestConfirm({
+      title: `Create a plan for ${gb} GB over ${dayCount} days at ${formatUdvpn(priceUdvpn)}?`,
+      body: ['It is created inactive, and you activate it afterwards. This is an on-chain transaction.'],
+      confirmLabel: 'Create plan',
+    }))) return
     setBusy(true)
     setError(null)
     try {
@@ -338,6 +352,7 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
       >
         {busy ? 'Creating…' : 'Create plan'}
       </button>
+      {confirmDialog}
     </div>
   )
 }

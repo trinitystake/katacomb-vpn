@@ -86,16 +86,12 @@ function triggerTrayConnect(): void {
   mainWindow?.webContents.send(IPC.CONNECTION_TRAY_CONNECT)
 }
 
+/** Tray "About": show the window and open the renderer's About modal, the same
+ *  one the status bar's version chip opens, so there is exactly one About
+ *  surface (with the clickable GitHub link a native message box can't render). */
 function showAbout(): void {
-  const aboutIcon = nativeImage.createFromPath(getIconPath('256x256.png'))
-  dialog.showMessageBox({
-    type: 'info',
-    title: 'About Katacomb VPN',
-    message: 'Katacomb VPN',
-    detail: `Version ${app.getVersion()}\n\nDecentralized VPN client.`,
-    icon: aboutIcon.isEmpty() ? undefined : aboutIcon,
-    buttons: ['OK'],
-  })
+  showWindow()
+  mainWindow?.webContents.send(IPC.ABOUT_SHOW)
 }
 
 /** Which of the badged tray icons (build/tray/, see scripts/build-icons.mjs) a

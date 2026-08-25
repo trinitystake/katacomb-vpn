@@ -9,7 +9,7 @@ import { SOCKS_DISPLAY_ADDR } from '../../shared/socks'
  * Always present: the RPC pill on the left matters most while *disconnected*,
  * which is exactly when there is no tunnel telemetry to show on the right.
  */
-export default function StatusBar() {
+export default function StatusBar({ onShowAbout }: { onShowAbout: () => void }) {
   const { status } = useConnection()
   const { speedResult, speedTesting, testSpeed } = useNodeTest()
   const connected = status.state === 'connected'
@@ -64,6 +64,14 @@ export default function StatusBar() {
             </button>
           </>
         )}
+
+        <button
+          onClick={onShowAbout}
+          title="About Katacomb VPN"
+          className="text-text-tertiary hover:text-accent transition-colors"
+        >
+          v{__APP_VERSION__}
+        </button>
       </div>
     </footer>
   )

@@ -1,6 +1,7 @@
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import { version } from './package.json'
 
 // Bundle everything except native modules and electron builtins.
 // The CosmJS / dVPN SDK ecosystem has ESM-only transitive deps
@@ -61,6 +62,11 @@ export default defineConfig({
       alias: {
         '@': resolve('src/renderer'),
       },
+    },
+    // The renderer has no other route to the app version (no Node access), and
+    // an IPC round-trip for a constant would be overkill.
+    define: {
+      __APP_VERSION__: JSON.stringify(version),
     },
     plugins: [react()],
     css: {

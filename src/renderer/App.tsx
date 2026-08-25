@@ -21,6 +21,7 @@ import ProviderConsole from './components/provider/ProviderConsole'
 import { useProvider } from './hooks/useProvider'
 import Settings from './components/Settings'
 import BinarySetup from './components/BinarySetup'
+import AboutModal from './components/AboutModal'
 import { SettingsProvider } from './contexts/SettingsContext'
 import { NodesProvider } from './contexts/NodesContext'
 import { PlansProvider } from './contexts/PlansContext'
@@ -173,6 +174,7 @@ function AppInner() {
   const chainFrozen = isConnected && !connStatus.proxyMode
   const { mainTab, setMainTab, settingsTab, openSettings, closeSettings } = useNavigation()
   const [showBinarySetup, setShowBinarySetup] = useState(true)
+  const [showAbout, setShowAbout] = useState(false)
   // "Add another wallet" from the picker: show the import screen even though
   // wallets are already stored.
   const [addingWallet, setAddingWallet] = useState(false)
@@ -207,6 +209,12 @@ function AppInner() {
   useEffect(() => {
     if (mainTab === 'provider' && !providerVisible) setMainTab('map')
   }, [mainTab, providerVisible, setMainTab])
+
+  // Tray "About": main shows the window, we show the modal. Registered above the
+  // early returns so it works on the wallet setup screens too.
+  useEffect(() => {
+    return window.api.onShowAbout(() => setShowAbout(true))
+  }, [])
 
   // Tray "Connect": reconnect to the most recent session (main already showed the
   // window). If there's none or it fails, the window is open for a manual connect.
@@ -245,25 +253,31 @@ function AppInner() {
     const hasRetainedSeed = Boolean(wallet.store?.retainedSeedId)
     if ((stored.length > 0 || hasRetainedSeed) && !addingWallet) {
       return (
-        <WalletPicker
-          status={wallet.store!}
-          onChanged={wallet.refreshIdentity}
-          onAddAnother={() => setAddingWallet(true)}
-        />
+        <>
+          <WalletPicker
+            status={wallet.store!}
+            onChanged={wallet.refreshIdentity}
+            onAddAnother={() => setAddingWallet(true)}
+          />
+          {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+        </>
       )
     }
     return (
-      <MnemonicInput
-        onImport={async (mnemonic, name) => {
-          await wallet.importWallet(mnemonic, name)
-        }}
-        onBackToWallets={stored.length > 0 ? () => setAddingWallet(false) : undefined}
-        onUseExisting={async (walletId) => {
-          await window.api.walletSwitch(walletId)
-          setAddingWallet(false)
-          await wallet.refreshIdentity()
-        }}
-      />
+      <>
+        <MnemonicInput
+          onImport={async (mnemonic, name) => {
+            await wallet.importWallet(mnemonic, name)
+          }}
+          onBackToWallets={stored.length > 0 ? () => setAddingWallet(false) : undefined}
+          onUseExisting={async (walletId) => {
+            await window.api.walletSwitch(walletId)
+            setAddingWallet(false)
+            await wallet.refreshIdentity()
+          }}
+        />
+        {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+      </>
     )
   }
 
@@ -350,7 +364,9 @@ function AppInner() {
         {mainTab === 'provider' && <ProviderConsole {...providerState} />}
       </main>
 
-      <StatusBar />
+      <StatusBar onShowAbout={() => setShowAbout(true)} />
+
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
 
       {showBinarySetup && (
         <BinarySetup onDismiss={() => setShowBinarySetup(false)} />

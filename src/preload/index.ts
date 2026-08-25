@@ -134,6 +134,15 @@ contextBridge.exposeInMainWorld('api', {
     }
   },
 
+  // Tray "About" → open the same About modal the status bar's version chip opens.
+  onShowAbout: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC.ABOUT_SHOW, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.ABOUT_SHOW, handler)
+    }
+  },
+
   planDiscover: (maxId: number) => ipcRenderer.invoke(IPC.PLAN_DISCOVER, maxId),
   planOverview: () => ipcRenderer.invoke(IPC.PLAN_OVERVIEW),
   planSubscribe: (params: unknown) => ipcRenderer.invoke(IPC.PLAN_SUBSCRIBE, params),

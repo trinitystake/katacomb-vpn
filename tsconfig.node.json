@@ -19,7 +19,8 @@
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*",
-    "electron.vite.config.ts"
+    "electron.vite.config.ts",
+    "package.json"
   ],
   "exclude": ["src/**/*.test.ts"]
 }

@@ -111,6 +111,8 @@ export const IPC = {
   CONNECTION_RECONNECTING: 'connection:reconnecting',
   // Tray "Connect" → ask the renderer to reconnect to the most recent session.
   CONNECTION_TRAY_CONNECT: 'connection:tray-connect',
+  // Tray "About" → show the renderer's About modal (main shows the window first).
+  ABOUT_SHOW: 'app:show-about',
   NODE_TEST_PROGRESS: 'node-test:progress',
   NODES_UPDATE: 'nodes:update',
   // Main changed a session's state on chain (cancelled one, refunded a failed chain).

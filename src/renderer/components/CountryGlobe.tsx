@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { geoOrthographic, geoPath, geoGraticule10 } from 'd3-geo'
 import geoUrl from '../assets/world-countries-110m.geojson?url'
 import { polyKey, type PolyFeature } from '../utils/country-normalization'
+import { shortestAngleDelta } from '../utils/angles'
 import Spinner from './Spinner'
 
 interface Props {
@@ -87,6 +88,15 @@ function rotationFor(lat: number, lng: number): [number, number] {
   return [-lng, -lat]
 }
 
+// Spin-down after the pointer is released. FRICTION is the fraction of speed kept
+// per 60 Hz frame (normalised by real elapsed time, so a 144 Hz display decays at
+// the same rate per second); below MIN_SPIN the glide is over.
+const SPIN_FRICTION = 0.94
+const MIN_SPIN_DEG_PER_MS = 0.0015
+// How much of the throw comes from the newest pointer sample. Smoothing the rest
+// stops one jittery final frame from defining the whole gesture.
+const VELOCITY_SMOOTHING = 0.8
+
 export default function CountryGlobe({ counts, onSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
@@ -112,6 +122,10 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
   // The ResizeObserver below is mounted once, so it reaches `draw` through this
   // ref rather than capturing the identity it had at mount.
   const drawRef = useRef<() => void>(() => {})
+  // ONE slot for whatever is currently animating the camera: the spin-down glide
+  // or the recenter tween. They must never run together, or they fight over
+  // rotationRef and the globe jitters. Grabbing the globe cancels both.
+  const animRef = useRef(0)
 
   // Load GeoJSON once (cached at module level across remounts)
   useEffect(() => {
@@ -203,6 +217,14 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
 
   drawRef.current = draw
 
+  const cancelAnim = useCallback(() => {
+    if (animRef.current) cancelAnimationFrame(animRef.current)
+    animRef.current = 0
+  }, [])
+
+  // Nothing should still be animating a component that has gone away.
+  useEffect(() => cancelAnim, [cancelAnim])
+
   // Redraw whenever geometry inputs change. Colours are React's job, not this one.
   useEffect(() => {
     draw()
@@ -225,13 +247,22 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
     let downY = 0
     let lastX = 0
     let lastY = 0
+    let lastT = 0
     let frame = 0
+    // Degrees per millisecond, carried out of the gesture to seed the glide.
+    let vLambda = 0
+    let vPhi = 0
 
     const onDown = (e: PointerEvent) => {
+      // A new grab takes over from a glide or a recenter already in flight.
+      cancelAnim()
       pressed = true
       dragging = false
+      vLambda = 0
+      vPhi = 0
       downX = lastX = e.clientX
       downY = lastY = e.clientY
+      lastT = e.timeStamp
     }
     const onMove = (e: PointerEvent) => {
       if (tooltipRef.current) {
@@ -248,24 +279,60 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
       // Degrees per pixel at the current scale, so the surface tracks the cursor
       // instead of the globe spinning faster the further the user zooms in.
       const k = 360 / (projection.scale() * 2 * Math.PI)
+      const dLambda = (e.clientX - lastX) * k
+      const dPhi = -(e.clientY - lastY) * k
       const [lambda, phi] = rotationRef.current
       // Latitude is clamped so the pole never rolls past vertical, which would
       // flip the globe and read as a glitch rather than a rotation.
-      rotationRef.current = [
-        lambda + (e.clientX - lastX) * k,
-        Math.max(-90, Math.min(90, phi - (e.clientY - lastY) * k)),
-      ]
+      rotationRef.current = [lambda + dLambda, Math.max(-90, Math.min(90, phi + dPhi))]
+
+      const dt = Math.max(1, e.timeStamp - lastT)
+      vLambda = VELOCITY_SMOOTHING * (dLambda / dt) + (1 - VELOCITY_SMOOTHING) * vLambda
+      vPhi = VELOCITY_SMOOTHING * (dPhi / dt) + (1 - VELOCITY_SMOOTHING) * vPhi
+
       lastX = e.clientX
       lastY = e.clientY
+      lastT = e.timeStamp
       if (!frame) frame = requestAnimationFrame(() => { frame = 0; draw() })
     }
+
+    // Let go mid-throw and the globe keeps going, shedding speed, the way the
+    // three.js OrbitControls damping used to behave.
+    const glide = () => {
+      let vl = vLambda
+      let vp = vPhi
+      let prev = performance.now()
+      const step = (now: number) => {
+        // Clamped so a backgrounded tab does not resume with one enormous step.
+        const dt = Math.min(50, now - prev)
+        prev = now
+        const decay = Math.pow(SPIN_FRICTION, dt / (1000 / 60))
+        vl *= decay
+        vp *= decay
+        const [l, p] = rotationRef.current
+        const nextPhi = Math.max(-90, Math.min(90, p + vp * dt))
+        // Once latitude is against the clamp, keep the residual speed from
+        // pressing into it for the rest of the glide.
+        if (nextPhi === 90 || nextPhi === -90) vp = 0
+        rotationRef.current = [l + vl * dt, nextPhi]
+        drawRef.current()
+        animRef.current = Math.hypot(vl, vp) > MIN_SPIN_DEG_PER_MS
+          ? requestAnimationFrame(step)
+          : 0
+      }
+      animRef.current = requestAnimationFrame(step)
+    }
+
     const onUp = (e: PointerEvent) => {
+      const threw = dragging
       pressed = false
       dragging = false
       if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+      if (threw && Math.hypot(vLambda, vPhi) > MIN_SPIN_DEG_PER_MS) glide()
     }
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
+      cancelAnim()
       const next = zoomRef.current * (e.deltaY < 0 ? 1.1 : 1 / 1.1)
       zoomRef.current = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next))
       if (!frame) frame = requestAnimationFrame(() => { frame = 0; draw() })
@@ -284,24 +351,39 @@ export default function CountryGlobe({ counts, onSelect }: Props) {
       el.removeEventListener('pointercancel', onUp)
       el.removeEventListener('wheel', onWheel)
     }
-  }, [draw, projection])
+  }, [cancelAnim, draw, projection])
 
   const recenter = useCallback(() => {
-    const from: [number, number] = [...rotationRef.current]
-    const to = rotationFor(HOME.lat, HOME.lng)
+    cancelAnim()
+    const [fromLambda, fromPhi] = rotationRef.current
+    const [toLambda, toPhi] = rotationFor(HOME.lat, HOME.lng)
+    // Longitude goes the short way round; latitude is already clamped to
+    // [-90, 90] so it cannot wrap and a plain difference is correct.
+    const dLambda = shortestAngleDelta(fromLambda, toLambda)
+    const dPhi = toPhi - fromPhi
     const fromZoom = zoomRef.current
     const start = performance.now()
     const step = (now: number) => {
       const t = Math.min(1, (now - start) / RECENTER_MS)
       // easeOutCubic, so it settles rather than stopping dead
       const e = 1 - Math.pow(1 - t, 3)
-      rotationRef.current = [from[0] + (to[0] - from[0]) * e, from[1] + (to[1] - from[1]) * e]
+      rotationRef.current = [fromLambda + dLambda * e, fromPhi + dPhi * e]
       zoomRef.current = fromZoom + (1 - fromZoom) * e
-      draw()
-      if (t < 1) requestAnimationFrame(step)
+      drawRef.current()
+      if (t < 1) {
+        animRef.current = requestAnimationFrame(step)
+        return
+      }
+      // Land on the exact home rotation rather than wherever the easing got to.
+      // This is also what keeps longitude from growing without bound across a
+      // long session, since every recenter renormalises it.
+      rotationRef.current = [toLambda, toPhi]
+      zoomRef.current = 1
+      animRef.current = 0
+      drawRef.current()
     }
-    requestAnimationFrame(step)
-  }, [draw])
+    animRef.current = requestAnimationFrame(step)
+  }, [cancelAnim])
 
   const { capColor, strokeColor } = useMemo(() => makeColorFns(counts), [counts])
 

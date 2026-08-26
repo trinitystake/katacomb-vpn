@@ -22,20 +22,37 @@
 # THE WHOLE RELEASE, of which this script is only step 1. The order is not
 # cosmetic — every one of these was learned by getting it wrong on 1.0.0.
 #
-#   0. notes      Rewrite the PROSE of RELEASE_NOTES.md, and of README.md if the
-#                 release changed what the app does. The prose is the TITLE line, the
-#                 summary under it, and ## Highlights. The title is yours on purpose:
-#                 it is the one durable marker that these notes were written for THIS
-#                 version, and preflight refuses the cut until it names the version
-#                 being cut. Every OTHER version STRING in both files ("Fixes in", the
+#   0. notes      ./scripts/draft-release-notes.sh <version>
+#                 then edit RELEASE_NOTES.md, then commit it.
+#
+#                 The scaffold does the mechanical half: it retitles the file, clears
+#                 the prose that belonged to the last release, and collects the commit
+#                 range as raw material bucketed by what each commit touched. It
+#                 deliberately stops there. Writing the PROSE - the summary under the
+#                 title and ## Highlights - is yours, and is the one part no script
+#                 can do: a generator would emit commit-log prose that looks finished
+#                 and so never gets read, which is the same failure in better
+#                 formatting. Update README.md too if the release changed what the app
+#                 does. COMMIT the result: preflight refuses a dirty tree, so an
+#                 uncommitted step 0 stops the cut before any of the checks below run.
+#
+#                 Every OTHER version STRING in both files ("Fixes in", the
 #                 README status line, and the install commands in both) is rewritten
 #                 for you in step 1 and committed as "Update docs for <version>" - do
-#                 not hand-edit those. Preflight also refuses a cut whose prose still
-#                 matches the previous release's word for word: 1.0.3 and 1.1.0 both
-#                 shipped 1.0.2's Highlights because nothing used to check. Both
-#                 tripwires are floors, not a proofread - retitling without touching
-#                 the Highlights satisfies one, and 1.2.0 walked past the other.
-#                 Re-read Known limitations too: its items are
+#                 not hand-edit those. Leave the "## Fixes in" HEADING in place: step 1
+#                 regenerates that section by matching on it, and with the heading gone
+#                 it inserts nothing, silently, and the release ships no fixes list.
+#
+#                 THREE tripwires guard this step, because it has gone wrong four
+#                 times (1.0.2, 1.0.3, 1.1.0 and 1.2.0 each shipped an earlier
+#                 release's Highlights). The title must name the version being cut;
+#                 the prose must differ from the previous tag's; and no "TODO:" marker
+#                 may remain. The first two are floors, not a proofread - retitling
+#                 without touching the Highlights satisfies one, and 1.2.0 walked past
+#                 the other. The third is the load-bearing one now that the scaffold
+#                 writes the title: a TODO: marker is the one thing last release's
+#                 prose cannot contain, so it cannot be satisfied by carrying the old
+#                 notes forward. Re-read Known limitations too: its items are
 #                 MEANT to carry forward until actually fixed (identical is that
 #                 section's healthy state), so no diff can police it - only you
 #                 can notice a fixed limitation still listed, or a new one missing.
@@ -247,9 +264,44 @@ assert_notes_titled_for_version() {
         The title is what says these notes were written for the version being
         cut, so it is yours to set (step 0) and not the generator's. Rewrite the
         summary line and '## Highlights' for $version, retitle the file, and
-        re-run. Note that retitling ALONE satisfies this check: nothing else
-        will catch Highlights left describing the previous release."
+        re-run. scripts/draft-release-notes.sh $version does the retitling, and
+        everything else mechanical, for you. Note that retitling ALONE satisfies
+        this check: what catches Highlights left describing the previous release
+        is assert_notes_no_todo_markers below."
   ok "$notes titled for $version"
+}
+
+# The marker that a human actually wrote step 0.
+#
+# It used to be the title (c8d4d0e): generated titles were how 1.0.3, 1.1.0 and
+# 1.2.0 each shipped an earlier release's Highlights, so the title was made
+# hand-set and asserted. draft-release-notes.sh now writes the title, which spends
+# that marker - it passes on a file nobody has read.
+#
+# TODO: markers replace it, and are a better marker than the title ever was. The
+# title was evidence only by convention, and retitling satisfied it in one edit.
+# A TODO: marker is evidence by construction: it is the one thing last release's
+# prose cannot contain, so carrying 1.2.0's notes forward can never produce a file
+# that passes this. The scaffold puts one on every part needing judgement - the
+# summary, the Highlights, and the raw commit material - so a half-finished draft
+# is refused as loudly as an untouched one.
+#
+# Runs on the RAW working copy, like the title check and unlike the prose check:
+# generate_release_notes would carry the markers through unchanged, but reading
+# the file the maintainer actually edited is what makes the failure legible.
+assert_notes_no_todo_markers() {
+  local version=$1 notes=$2
+
+  [ -f "$notes" ] || return 0
+
+  local lines
+  lines="$(grep -n 'TODO:' "$notes" | cut -d: -f1 | paste -sd, - || true)"
+  [ -z "$lines" ] || die "$notes still has unfinished TODO: markers on line(s) $lines.
+        The scaffold leaves one on every part that needs judgement: the summary,
+        the Highlights, and the raw commit material it collected. Write the prose
+        for $version, delete the raw material block, and re-run.
+        Read them with: grep -n 'TODO:' $notes"
+  ok "$notes has no unfinished TODO: markers"
 }
 
 # The prose the generator does NOT touch — the summary line under the title and
@@ -442,6 +494,7 @@ sync_doc() {
 NOTES_TMP="$(mktemp)"
 README_TMP="$(mktemp)"
 assert_notes_titled_for_version "$VERSION" "$NOTES"
+assert_notes_no_todo_markers "$VERSION" "$NOTES"
 generate_release_notes "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
 assert_notes_prose_rewritten "$VERSION" "$PREV_TAG" "$NOTES" "$NOTES_TMP"
 generate_readme "$VERSION" "$READMEDOC" "$README_TMP"

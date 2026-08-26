@@ -131,9 +131,18 @@ export default function MyPlansPanel({ onBrowse }: { onBrowse: () => void }) {
                   </button>
                 </>
               )}
+              {/*
+                Nothing in the manage modal applies once the subscription
+                leaves status 1: the chain refuses a renew or a cancel on an
+                inactive_pending row, and answers with a raw "invalid status"
+                error. Grey it out rather than let it be reopened.
+              */}
               <button
                 onClick={() => setManageTarget(row)}
-                disabled={overview.stale}
+                disabled={overview.stale || sub.status !== 1}
+                title={sub.status !== 1
+                  ? 'This subscription is no longer active, so there is nothing left to manage'
+                  : 'Renewal policy, renew now, or cancel'}
                 className="btn btn-secondary text-xs px-3 py-1 ml-auto disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Manage

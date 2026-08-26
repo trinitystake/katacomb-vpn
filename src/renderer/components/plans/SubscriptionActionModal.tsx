@@ -36,12 +36,23 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
   const isPlanSub = subscription.planId !== '0'
   const price = plan ? planPriceDisplay(plan.prices) : null
 
-  async function run(label: string, action: () => Promise<void>, doneMessage: string) {
+  /**
+   * A null doneMessage closes the modal on success instead of reporting
+   * inline. That is the cancel path: the subscription is no longer active, so
+   * nothing here can act on it any more, and the snapshot this modal was
+   * opened with still says status 1. Leaving it open invited a second cancel,
+   * which the chain rejects with a raw "invalid status inactive_pending".
+   */
+  async function run(label: string, action: () => Promise<void>, doneMessage: string | null) {
     setBusy(label)
     setError(null)
     try {
       await action()
       await refreshOverview()
+      if (doneMessage === null) {
+        onClose()
+        return
+      }
       setDone(doneMessage)
       setConfirming(null)
     } catch (err) {
@@ -173,7 +184,7 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
                 onClick={() => run(
                   'cancel',
                   () => window.api.subscriptionCancel(subscription.id),
-                  'Cancelled. The subscription will settle on chain shortly.',
+                  null,
                 )}
                 disabled={busy !== null}
                 className="btn btn-danger flex-1 disabled:opacity-40"

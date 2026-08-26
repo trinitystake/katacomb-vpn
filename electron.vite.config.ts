@@ -35,6 +35,35 @@ const DEPS_TO_BUNDLE = [
   'cosmjs-types',
 ]
 
+// electron-vite defaults build.minify to FALSE (unlike plain Vite, which minifies
+// production builds), so every section below has to ask for it explicitly. Without
+// these the packaged app ships readable source: 4.2 MB for the globe chunk alone,
+// and ~4.8 MB across main + renderer.
+// Vite emits an asset the moment it resolves a url() in CSS, which happens in a
+// postcss plugin that runs BEFORE the one in postcss.config.js that drops the
+// unused 1x1 flag rules. The rules go, the ~1.8 MB of SVG they pointed at stays.
+// This sweeps anything the finished bundle no longer mentions. It is deliberately
+// generic rather than flag-specific: an asset nothing references is dead weight
+// whatever it is.
+function dropUnreferencedAssets() {
+  return {
+    name: 'drop-unreferenced-assets',
+    generateBundle(_options: unknown, bundle: Record<string, { type: string; code?: string; source?: string | Uint8Array }>) {
+      const haystack = Object.values(bundle)
+        .map((c) => (c.type === 'chunk' ? c.code : typeof c.source === 'string' ? c.source : ''))
+        .join('\n')
+      for (const name of Object.keys(bundle)) {
+        const entry = bundle[name]
+        if (entry.type !== 'asset') continue
+        const base = name.split('/').pop() as string
+        // Never sweep the entry CSS/JS themselves; only referenced-by-name assets.
+        if (base.endsWith('.css') || base.endsWith('.js')) continue
+        if (!haystack.includes(base)) delete bundle[name]
+      }
+    },
+  }
+}
+
 export default defineConfig({
   main: {
     plugins: [
@@ -46,6 +75,7 @@ export default defineConfig({
       // Never ship source maps in the packaged app (would expose full main
       // source incl. wallet flow inside the AppImage/deb).
       sourcemap: false,
+      minify: 'esbuild',
       rollupOptions: {
         // ws optional native deps — must stay as runtime require() so they
         // gracefully no-op when not installed
@@ -55,7 +85,7 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
-    build: { sourcemap: false },
+    build: { sourcemap: false, minify: 'esbuild' },
   },
   renderer: {
     resolve: {
@@ -68,10 +98,10 @@ export default defineConfig({
     define: {
       __APP_VERSION__: JSON.stringify(version),
     },
-    plugins: [react()],
+    plugins: [react(), dropUnreferencedAssets()],
     css: {
       postcss: resolve(__dirname, 'postcss.config.js'),
     },
-    build: { sourcemap: false },
+    build: { sourcemap: false, minify: 'esbuild' },
   },
 })

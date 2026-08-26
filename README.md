@@ -20,7 +20,7 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 
 **Finding a node**
 
-- **Map**: 3D globe with per-country node counts, plus a country sidebar.
+- **Map**: rotatable globe with per-country node counts, plus a country sidebar.
 - **Nodes**: virtualized table over the whole network (thousands of nodes). Filter by
   country, city, protocol, residential/whitelisted, bookmarks; hide duplicates; sort on
   any column. Latency probes (single or batch) and a download speed test.

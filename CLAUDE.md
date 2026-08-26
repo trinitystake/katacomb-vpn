@@ -656,32 +656,50 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   means the selection found no replacement); picking an endpoint in Settings flips the
   mode to manual in the same write, and `migrateRpcMode()` (settings.ts, must run before
   any `saveSettings`) turned pre-feature custom endpoints into `'manual'` once.
-- **A panel may fail; the window may not. WebGL is the case that proved it.** The only
-  `ErrorBoundary` used to sit at the app root (`main.tsx`), so anything it caught replaced
-  the entire client with a full-screen "Something went wrong". `mainTab` defaults to
-  `'map'`, and `CountryGlobe` builds a three.js `WebGLRenderer`, which throws
-  `Error creating WebGL context.` when the browser refuses a context. Net effect: a user
+- **The Map tab uses NO WebGL, and that is load-bearing history.** `CountryGlobe` draws
+  an orthographic `d3-geo` projection as SVG `<path>` elements. It used to be
+  `react-globe.gl`, and the three.js `WebGLRenderer` it built threw
+  `Error creating WebGL context.` whenever the browser refused a context. `mainTab`
+  defaults to `'map'` and the only `ErrorBoundary` sat at the app root (`main.tsx`), so
+  the throw replaced the entire client with a full-screen "Something went wrong": a user
   with no usable GPU could set up a wallet and never see the app again. Reported on 0.1.1
-  (GitHub), reproduced on 1.0.0, both shipping the same Electron.
-  **Chromium 146 (Electron 41) no longer falls back to software WebGL by itself** —
+  (GitHub), reproduced on 1.0.0.
+  **Chromium 146 (Electron 41) does not fall back to software WebGL by itself** —
   measured, not inferred: with no GPU, `getContext('webgl2')` *and* `('webgl')` both
   return null, silently, with no console warning, and `getGPUFeatureStatus().webgl` reads
   `disabled_off`. Older Chromium auto-fell back to SwiftShader, which is why this appeared
-  without anyone touching the map code. Two defences, both required:
-  `main/index.ts` appends **`enable-unsafe-swiftshader`** (it only *permits* the fallback,
-  a machine with a GPU still gets hardware ANGLE, verified; it must be unconditional
-  because switches are set before `whenReady` while `getGPUFeatureStatus()` is only
-  readable after); and `MapView` **probes for a context before mounting the globe** and
-  wraps it in a scoped `ErrorBoundary fallback=...`, because a context can still be
-  refused after the probe passes when Chromium drops the oldest of too many contexts
-  (the case `CountryGlobe`'s `forceContextLoss` cleanup already guards against).
-  The "unsafe" in the flag name is about shaders from *untrusted web content*; this
-  renderer only ever loads our own bundle (`setWindowOpenHandler` denies every window,
-  `will-navigate` is pinned to our own index.html, no webview). Verify with the real app,
-  not a unit test: `--disable-gpu` must render a globe via SwiftShader and
-  `--disable-gpu --disable-software-rasterizer` must degrade to the country list with the
-  window intact. **Never give `ErrorBoundary` a new caller without a `fallback`** unless
-  the whole window really is the right blast radius.
+  without anyone touching the map code. That fact is why the rewrite, not a patch, was the
+  fix: the whole defence it forced (an `enable-unsafe-swiftshader` switch in
+  `main/index.ts`, a `hasWebgl()` probe, a `GlobeUnavailable` panel, a scoped
+  `ErrorBoundary`, `forceContextLoss` cleanup for the context globe.gl never released, and
+  a 60 Hz rAF loop idled by hand because it ran on a static choropleth) is now deleted,
+  along with ~4.4 MB of three.js. **Do not reintroduce a WebGL dependency here** without
+  re-reading this paragraph: SVG is retained-mode, so the globe costs zero CPU when
+  nobody is dragging it, and there is no context to lose.
+  Verify with the real app, not a unit test:
+  `--disable-gpu --disable-software-rasterizer` must render the globe normally
+  (confirmed on the rewrite, pixel-identical to a GPU launch).
+  **Never give `ErrorBoundary` a new caller without a `fallback`** unless the whole
+  window really is the right blast radius; it is back to its single root caller.
+- **`CountryGlobe` owns ALL its geometry imperatively, and that is not a style choice.**
+  `draw()` mutates one long-lived `projection` in place and runs from an effect or a
+  rAF, i.e. always AFTER React commits. So any path whose `d` is computed in the render
+  body reads the PREVIOUS frame's scale and translate. The limb-shade overlay was the one
+  element left doing that, and it left a stale dark disc offset from the globe for a
+  second or two after every resize, self-healing only when an unrelated render (hover, the
+  60 s node refresh) happened to run. Measured, not guessed: instrumented, a resize logged
+  `[RENDER] scale=297.6` against `[DRAW] scale=251.6` for the same size. Size lives in
+  `sizeRef` + a one-shot `measured` flag rather than in state for the same reason resize
+  used to feel sluggish: routing the ResizeObserver through `setState` re-ran
+  `features.map()` over 177 `<path>` elements every frame of a window drag to change
+  nothing but the svg's width and height. After the fix, four resizes cost **0 React
+  renders and 4 draws**. Don't move any `d`, or the svg's width/height, back into JSX.
+- **The globe's gesture handling: capture on movement, never on pointerdown.**
+  `setPointerCapture` retargets the whole gesture to the `<svg>`, so the `pointerup`
+  lands there rather than on the country `<path>` and the browser never synthesises the
+  click that selects a country. Cost a live regression: hover labels worked, drag worked,
+  clicking a country did nothing. The fix is `DRAG_THRESHOLD_PX` — a press only becomes a
+  drag (and only then captures) once the pointer has travelled 4 px.
 - **No em dashes in user-visible strings** (modal copy, buttons, tooltips, error text
   that reaches a pane) — the maintainer reads them as AI-written. Use commas, colons or
   full stops. Code comments and commit messages are unaffected. Note this includes
@@ -1288,8 +1306,8 @@ dependencies: plain install → `libasound.so.2` missing, app dead at exec;
 `apt-get --no-install-recommends` → `libgbm.so.1` missing as well, since the GL stack
 (libGL, libEGL, the mesa DRI drivers) arrives through **Recommends** somewhere in this
 dependency set and never through anyone's Depends. That second case is also a machine
-with no system GL whatsoever, which is precisely the no-WebGL state the Map tab has to
-survive.
+with no system GL whatsoever, which the Map tab now survives by construction (it draws
+SVG, not WebGL) rather than by falling back.
 
 **`libasound2t64 | libasound2` must stay an alternation with the t64 name FIRST, and
 Ubuntu is the only place that shows why.** On Ubuntu 24.04 `libasound2` is a *virtual*
@@ -1305,15 +1323,26 @@ older releases have no `libasound2t64` and fall through to the second alternativ
 `libasound2` is a real package and therefore beats any provider.
 
 **A container is enough to catch this class of bug and costs minutes, but `ldd` alone is
-not a sufficient check and Debian alone is not sufficient coverage.** Run all four
-(`debian:bookworm`, `debian:trixie`, `ubuntu:22.04`, `ubuntu:24.04`):
+not a sufficient check and Debian alone is not sufficient coverage.** Run all five
+(`debian:bookworm`, `debian:trixie`, `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04`):
 `apt-get install -y --no-install-recommends /tmp/app.deb`, then
 `ldd "/opt/Katacomb VPN/katacomb-vpn" | grep "not found"` (must print nothing) **and**
 actually execute the binary (`--no-sandbox --version`), which must reach Chromium's own
 startup rather than `symbol lookup error` or `error while loading shared libraries`.
 Reaching a dbus or `Missing X server or $DISPLAY` complaint is the expected pass in a
 headless container. Do that on any dependency change before reaching for the full
-interactive script below.
+interactive script below. All five re-run green on 2026-08-26 after the d3-geo globe (26.04 resolves
+`libasound2t64` like 24.04 does, so the alternation still decides it correctly);
+note the deb's `Depends` are NOT affected by renderer dependencies, since `libgbm.so.1`
+and `libasound.so.2` are `DT_NEEDED` on the Electron binary itself (`objdump -p`).
+
+**Do not test "no GL" by purging mesa: `Xvfb` links `libGL.so.1` itself** and dies with
+`error while loading shared libraries` the moment you remove it, which looks exactly like
+the app failing to open a window. Measured, after wasting a run on it. There is no such
+thing as a GUI machine with no `libGL.so.1` at all, so the state worth testing is "no
+acceleration", not "no library": keep mesa installed so the X server runs, and take GL
+away from Chromium instead with `--disable-gpu --disable-software-rasterizer`. Both
+bookworm and ubuntu:24.04 map and paint a window under those flags (2026-08-25).
 
 **The AppImage bundles `libasound.so.2`, and deliberately does NOT bundle `libgbm.so.1`.**
 An AppImage has no package metadata, so it cannot declare either of the two libraries

@@ -80,6 +80,47 @@ DEB_NAME="katacomb-vpn_${VERSION}_amd64.deb"
 
 cd "$REPO_ROOT"
 
+# Where dpkg records what it installed. A variable so the check below can be
+# exercised against a fixture instead of the live system.
+DPKG_INFO_DIR="${DPKG_INFO_DIR:-/var/lib/dpkg/info}"
+
+# Is the .deb in dist/ the build that is currently installed?
+#
+# Version alone cannot answer this, and the gap is reachable: release.sh --abort
+# deletes a tag, so the same version can be cut twice with different bytes in
+# between (cut, install, test fails, abort, fix, re-cut). dpkg would still report
+# 1.4.0 installed, this phase would skip, and the build that got tested would not
+# be the build that got published. `apt install` would not save it either: same
+# version, so apt does nothing without --reinstall.
+#
+# dpkg records an md5 per installed file, and the same file is extractable from the
+# .deb, so the question is answerable from the system rather than remembered.
+#
+#   0  this exact build is installed
+#   1  something else is installed
+#   2  cannot tell
+installed_build_matches_deb() {
+  local deb=$1 sums="$DPKG_INFO_DIR/$DEB_PACKAGE.md5sums"
+  [ -r "$sums" ] || return 2
+
+  # Lines are "<md5><two spaces><path>", and the path contains a space
+  # ("opt/Katacomb VPN/katacomb-vpn"), so split on the double space. Splitting on
+  # whitespace truncates it to "opt/Katacomb", the extraction below then silently
+  # finds nothing, and md5sum happily hashes the empty stream - which is why the
+  # empty-input hash is rejected explicitly rather than trusted as a mismatch.
+  local line recorded file from_deb
+  line="$(grep -m1 "/$DEB_PACKAGE\$" "$sums" 2>/dev/null || true)"
+  [ -n "$line" ] || return 2
+  recorded="${line%% *}"
+  file="${line#*  }"
+
+  from_deb="$(dpkg-deb --fsys-tarfile "$deb" 2>/dev/null | tar -xO "./$file" 2>/dev/null | md5sum | cut -d' ' -f1 || true)"
+  [ -n "$from_deb" ] || return 2
+  [ "$from_deb" != d41d8cd98f00b204e9800998ecf8427e ] || return 2   # md5 of nothing: extraction failed
+  [ "$recorded" != "$from_deb" ] || return 0
+  return 1
+}
+
 # Every phase shells out to the script that owns it. Failure carries the phase
 # name, because "run it again" is only useful advice if you know what to fix first.
 run_phase() {
@@ -174,14 +215,38 @@ fi
 # --- 4. install -------------------------------------------------------------
 phase 4/6 "install this build"
 INSTALLED="$(dpkg-query -W -f='${Version}' "$DEB_PACKAGE" 2>/dev/null || true)"
+NEED_INSTALL=1
+REINSTALL=0
+INSTALL_REASON="installed: ${INSTALLED:-none}, want: $VERSION"
 if [ "$INSTALLED" = "$VERSION" ]; then
-  skip "$DEB_PACKAGE $VERSION already installed"
+  # Right version. Right BUILD is a separate question, and the one that matters.
+  if [ -f "dist/$DEB_NAME" ]; then
+    set +e
+    installed_build_matches_deb "dist/$DEB_NAME"
+    MATCH=$?
+    set -e
+  else
+    MATCH=2
+  fi
+  case "$MATCH" in
+    0) NEED_INSTALL=0 ;;
+    1) REINSTALL=1
+       INSTALL_REASON="$VERSION is installed, but not this build of it: dist/$DEB_NAME
+        differs from what is on the system, so it will be reinstalled" ;;
+    *) REINSTALL=1
+       INSTALL_REASON="$VERSION is installed but the build could not be identified,
+        so it will be reinstalled rather than assumed" ;;
+  esac
+fi
+
+if [ "$NEED_INSTALL" = 0 ]; then
+  skip "$DEB_PACKAGE $VERSION already installed, and it is this build"
   INSTALL_DONE=1
 else
   INSTALL_DONE=0
   [ -f "dist/$DEB_NAME" ] || die "dist/$DEB_NAME is missing, so there is nothing to install.
         Re-cut: ./scripts/release.sh $VERSION"
-  info "installed: ${INSTALLED:-none}, want: $VERSION"
+  info "$INSTALL_REASON"
 
   # The mode question, asked once and only where it changes anything: right before
   # the install that invalidates a pre-existing login.
@@ -217,8 +282,12 @@ EOF
     fi
   fi
 
-  info "running: sudo apt install ./dist/$DEB_NAME"
-  run_phase "installing the deb" sudo apt install -y "./dist/$DEB_NAME"
+  # --reinstall only when the version is unchanged: apt does nothing at all for an
+  # equal version otherwise, which is exactly how the wrong build gets tested.
+  APT_ARGS=(install -y)
+  [ "$REINSTALL" = 1 ] && APT_ARGS+=(--reinstall)
+  info "running: sudo apt ${APT_ARGS[*]} ./dist/$DEB_NAME"
+  run_phase "installing the deb" sudo apt "${APT_ARGS[@]}" "./dist/$DEB_NAME"
   [ "$DRY_RUN" = 1 ] || ok "installed $VERSION"
 fi
 

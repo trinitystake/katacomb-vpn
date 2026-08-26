@@ -4,9 +4,10 @@
 #
 #     ./scripts/release.sh 1.0.0 --dry-run   # print the plan, change nothing
 #     ./scripts/release.sh 1.0.0             # do it
+#     ./scripts/release.sh 1.0.0 --abort     # unwind a cut that was never published
 #
 # It stops before anything leaves this machine: it never pushes and never creates
-# a GitHub release. The last thing it prints is the exact commands for those.
+# a GitHub release. Publishing is ./scripts/publish-release.sh <version>.
 #
 # Produces in dist/, which it WIPES first (along with out/) so that what is left
 # afterwards is exactly this build:
@@ -98,23 +99,22 @@
 #                 leave it open, which is the only comfortable way to watch that
 #                 window.
 #
-#   7. publish    git push origin main && git push origin v<version>
-#                 gh release create v<version> --notes-file RELEASE_NOTES.md \
-#                     dist/katacomb-vpn_<version>_amd64.deb \
-#                     dist/katacomb-vpn-<version>.AppImage \
-#                     dist/SHA256SUMS dist/SHA256SUMS.asc
-#                 The tag has to land before the release, or GitHub cannot attach
-#                 the assets to it.
+#   7. publish    ./scripts/publish-release.sh <version>
+#                 Pushes the branch, pushes the tag, creates the GitHub release with
+#                 the four artifacts. Verifies first that dist/ really is this tag's
+#                 build (sha256sum -c AND gpg --verify), because gh uploads whatever
+#                 it is handed and nothing else ties dist/ to the tag. Idempotent, so
+#                 a publish that got halfway is resumed by re-running it.
 #
 # Nothing is public until step 7, so anything that fails before it unwinds with:
-#     git tag -d v<version> && git reset --hard HEAD~1   # release commit is HEAD
-#     git rebase --onto <before-release> <release-commit>  # if work sits on top
+#     ./scripts/release.sh <version> --abort
 #
-# Note there are TWO commits to unwind past once a run reaches step 8: the docs
-# commit from step 1 and the release commit itself. A run that dies in between
-# leaves only the docs commit, and it is deliberately NOT rolled back - the notes
-# and README are correct for the version you are cutting either way, and a re-run
-# finds them already up to date and makes no second commit.
+# That deletes the tag and resets the "Release v<version>" commit, and refuses if the
+# tag has already been pushed. It deliberately does NOT touch the docs commit from
+# step 1 - the notes and README are correct for the version being cut either way, and
+# a re-run finds them already up to date and makes no second one. If work sits on top
+# of the release commit it refuses and prints the `git rebase --onto` form rather than
+# guessing which commits were meant to survive.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -362,16 +362,20 @@ assert_notes_prose_rewritten() {
   ok "$notes prose rewritten since $prev_tag"
 }
 
+# Prints the header's title and usage block. The range is a line count, so it
+# silently truncates when that block grows: check `--help` OUTPUT, not the file.
 usage() {
-  sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # --- arguments --------------------------------------------------------------
 VERSION=""
 DRY_RUN=0
+ABORT=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run)  DRY_RUN=1 ;;
+    --abort)    ABORT=1 ;;
     -h|--help)  usage; exit 0 ;;
     -*)         die "unknown option: $arg" ;;
     *)          [ -z "$VERSION" ] || die "version given twice: $VERSION and $arg"
@@ -388,6 +392,72 @@ DEB_NAME="katacomb-vpn_${VERSION}_amd64.deb"
 APPIMAGE_NAME="katacomb-vpn-${VERSION}.AppImage"
 
 cd "$REPO_ROOT"
+
+# --- --abort: unwind a cut that was never published -------------------------
+# The unwind used to live only in the header comment, i.e. it was read under
+# pressure, after a failed run, by someone who had just been surprised. Encoded
+# here so the ordering and the exceptions are not remembered but executed.
+#
+# It undoes exactly two things, and deliberately not a third:
+#   - the tag, which is step 9
+#   - the "Release <tag>" commit, which is step 8
+#   - NOT the docs commit from step 1. That is the same call the header records:
+#     the notes and README are correct for the version being cut either way, and
+#     a re-run finds them already up to date and makes no second commit.
+if [ "$ABORT" = 1 ]; then
+  printf '%bKatacomb VPN abort %s%b\n\n' '\033[1m' "$TAG" '\033[0m'
+
+  BRANCH="$(git branch --show-current)"
+  [ "$BRANCH" = "$RELEASE_BRANCH" ] || die "on branch '$BRANCH', releases are cut from '$RELEASE_BRANCH'"
+  [ -z "$(git status --porcelain --untracked-files=no)" ] ||
+    die "working tree has uncommitted changes. Commit or stash them first: this resets a
+        commit, and anything uncommitted would be lost with it."
+
+  # The one hard refusal. Once the tag is on the remote it is someone else's
+  # history too, and a convenience flag is not where that gets rewritten.
+  if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG" 2>/dev/null)" ]; then
+    die "$TAG is already pushed to origin, so it is published history and this will not
+        touch it. If it really must go, delete it deliberately and by hand:
+            git push origin :refs/tags/$TAG && git tag -d $TAG"
+  fi
+
+  # Decide everything BEFORE touching anything. Acting as it went meant a refusal
+  # could arrive with the tag already deleted, leaving a half-undone cut - which is
+  # the state this flag exists to avoid, not to create.
+  HAS_TAG=0
+  git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && HAS_TAG=1
+
+  RESET=0
+  if [ "$(git log -1 --format='%s')" = "Release $TAG" ]; then
+    RESET=1
+  else
+    # Present but not at HEAD: work landed on top. Refuse rather than guess which
+    # commits were meant to survive, and hand over the form that moves them.
+    RELEASE_COMMIT="$(git rev-list -1 --fixed-strings --grep="Release $TAG" HEAD 2>/dev/null || true)"
+    if [ -n "$RELEASE_COMMIT" ] && [ "$(git log -1 --format='%s' "$RELEASE_COMMIT")" = "Release $TAG" ]; then
+      SHORT="$(git rev-parse --short "$RELEASE_COMMIT")"
+      die "the 'Release $TAG' commit is $SHORT but work sits on top of it, so resetting
+        would take that work with it. Nothing has been changed. Move it yourself:
+            git rebase --onto $SHORT~1 $SHORT"
+    fi
+  fi
+
+  if [ "$HAS_TAG" = 0 ] && [ "$RESET" = 0 ]; then
+    info "no local tag $TAG and no 'Release $TAG' commit: nothing to undo"
+  fi
+
+  if [ "$HAS_TAG" = 1 ]; then
+    run git tag -d "$TAG"
+    [ "$DRY_RUN" = 1 ] || ok "deleted local tag $TAG"
+  fi
+  if [ "$RESET" = 1 ]; then
+    run git reset --hard HEAD~1
+    [ "$DRY_RUN" = 1 ] || ok "reset the release commit, HEAD is now $(git log --oneline -1)"
+  fi
+  printf '\n%bThe docs commit, if any, is left in place on purpose.%b\n' '\033[1m' '\033[0m'
+  printf 'It is correct for %s either way, and a re-run makes no second one.\n' "$VERSION"
+  exit 0
+fi
 
 # nvm's shell hook is broken in non-interactive shells (`_load_nvm: command not
 # found`), so the `node`/`npm` on PATH are stubs that cannot run. Find a real one.

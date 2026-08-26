@@ -6,7 +6,9 @@ import { protocolMeta } from '../../utils/protocols'
 import CountryFlag from '../CountryFlag'
 import { useConfirm } from '../ConfirmModal'
 import Spinner from '../Spinner'
-import { formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
+import { formatUdvpn, formatUdvpnAmount, formatUsd } from '../../utils/provider-format'
+import { RENEWAL_POLICY_OPTIONS, renewalPolicyLabel } from '../../../shared/renewal-policy'
+import LeaseManageModal from './LeaseManageModal'
 
 /**
  * Nodes serving one plan.
@@ -18,15 +20,19 @@ import { formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
  * that is leased but not linked gets its own group with a Link button, which is
  * also what the user comes back to if the app is closed between the two.
  */
-export default function PlanNodesManager({ plan, leases, price, economics, onChanged }: {
+export default function PlanNodesManager({ plan, leases, price, economics, providerActive, onChanged }: {
   plan: MyPlan
   leases: LeaseSummary[]
   price: TokenPrice | null
   economics: ProviderEconomics | null
-  onChanged: () => void
+  /** The chain refuses MsgStartLease under an inactive provider, so the picker is gated on it. */
+  providerActive: boolean
+  /** Resolves once the chain has been re-read, so a caller can hold its busy state until then. */
+  onChanged: () => Promise<void>
 }) {
   const { allNodes } = useNodesContext()
   const [linked, setLinked] = useState<string[] | null>(null)
+  const [managingLease, setManagingLease] = useState<LeaseSummary | null>(null)
   const [busyAddress, setBusyAddress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [leasingNode, setLeasingNode] = useState<SentNode | null>(null)
@@ -34,24 +40,29 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
 
   const nodeIndex = useMemo(() => new Map(allNodes.map((n) => [n.address, n])), [allNodes])
 
-  const loadLinked = useCallback(() => {
+  const loadLinked = useCallback(async () => {
     setLinked(null)
-    window.api
-      .planNodes(plan.id)
+    try {
+      const addrs = await window.api.planNodes(plan.id)
       // null = main could not read the list; same fallback this catch already
       // chose for failures (the console's mutations fail on their own anyway).
-      .then((addrs) => setLinked(addrs ?? []))
-      .catch(() => setLinked([]))
+      setLinked(addrs ?? [])
+    } catch {
+      setLinked([])
+    }
   }, [plan.id])
 
-  useEffect(loadLinked, [loadLinked])
+  // Not `useEffect(loadLinked, ...)`: an async callback returns a Promise, and an
+  // effect may only return a cleanup function.
+  useEffect(() => { void loadLinked() }, [loadLinked])
 
   const linkedSet = useMemo(() => new Set(linked ?? []), [linked])
   const leasedNotLinked = leases.filter((l) => !linkedSet.has(l.nodeAddress))
 
-  const refreshAll = useCallback(() => {
-    loadLinked()
-    onChanged()
+  // Resolves once BOTH re-reads have landed, so an action's busy state can span
+  // the transaction and the refresh instead of ending between them.
+  const refreshAll = useCallback(async () => {
+    await Promise.all([loadLinked(), onChanged()])
   }, [loadLinked, onChanged])
 
   const run = useCallback(async (address: string, action: () => Promise<void>) => {
@@ -59,7 +70,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
     setError(null)
     try {
       await action()
-      refreshAll()
+      await refreshAll()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Action failed')
     } finally {
@@ -81,15 +92,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
     await run(address, () => window.api.providerPlanLink(plan.id, address))
   }
 
-  async function handleEndLease(lease: LeaseSummary) {
-    if (!(await requestConfirm({
-      title: `End lease #${lease.id}?`,
-      body: ['The unused hours are refunded and the node is unlinked from your plans. This is an on-chain transaction.'],
-      confirmLabel: 'End lease',
-      danger: true,
-    }))) return
-    await run(lease.nodeAddress, () => window.api.leaseEnd(lease.id))
-  }
+  const leaseByNode = useMemo(() => new Map(leases.map((l) => [l.nodeAddress, l])), [leases])
 
   const leasedAddresses = useMemo(() => new Set(leases.map((l) => l.nodeAddress)), [leases])
 
@@ -113,15 +116,20 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
               No nodes yet. Add one below. Subscribers to this plan have nothing to connect to until you do.
             </p>
           )}
-          {[...linkedSet].map((address) => (
-            <NodeRow
-              key={address}
-              address={address}
-              node={nodeIndex.get(address)}
-              busy={busyAddress === address}
-              action={{ label: 'Unlink', kind: 'danger', onClick: () => handleUnlink(address) }}
-            />
-          ))}
+          {[...linkedSet].map((address) => {
+            const lease = leaseByNode.get(address)
+            return (
+              <NodeRow
+                key={address}
+                address={address}
+                node={nodeIndex.get(address)}
+                busy={busyAddress === address}
+                note={lease ? leaseNote(lease) : undefined}
+                action={{ label: 'Unlink', busyLabel: 'Unlinking…', kind: 'danger', onClick: () => handleUnlink(address) }}
+                secondaryAction={lease ? { label: 'Lease', onClick: () => setManagingLease(lease) } : undefined}
+              />
+            )
+          })}
         </Section>
 
         {leasedNotLinked.length > 0 && (
@@ -135,19 +143,26 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
                 address={lease.nodeAddress}
                 node={nodeIndex.get(lease.nodeAddress)}
                 busy={busyAddress === lease.nodeAddress}
-                note={`lease #${lease.id} · ${lease.hours}/${lease.maxHours}h used · ${formatUdvpn(lease.hourlyPrice)}/h`}
-                action={{ label: 'Link', kind: 'primary', onClick: () => handleLink(lease.nodeAddress) }}
-                secondaryAction={{ label: 'End lease', onClick: () => handleEndLease(lease) }}
+                note={leaseNote(lease)}
+                action={{ label: 'Link', busyLabel: 'Linking…', kind: 'primary', onClick: () => handleLink(lease.nodeAddress) }}
+                secondaryAction={{ label: 'Lease', onClick: () => setManagingLease(lease) }}
               />
             ))}
           </Section>
         )}
 
         <Section title="Add a node">
+          {!providerActive && (
+            <p className="text-warning text-xs">
+              Activate your provider first. Leasing a node is a chain transaction that is rejected while
+              the provider is inactive.
+            </p>
+          )}
           <NodePicker
             nodes={allNodes}
             excluded={leasedAddresses}
             price={price}
+            disabled={!providerActive}
             onPick={setLeasingNode}
           />
         </Section>
@@ -162,13 +177,31 @@ export default function PlanNodesManager({ plan, leases, price, economics, onCha
           onClose={() => setLeasingNode(null)}
           onDone={() => {
             setLeasingNode(null)
-            refreshAll()
+            // The modal is gone, so there is no busy state left to hold: dropping
+            // the promise here is deliberate, unlike the in-place buttons.
+            void refreshAll()
+          }}
+        />
+      )}
+      {managingLease && (
+        <LeaseManageModal
+          lease={managingLease}
+          node={nodeIndex.get(managingLease.nodeAddress)}
+          onClose={() => setManagingLease(null)}
+          onDone={() => {
+            setManagingLease(null)
+            void refreshAll()
           }}
         />
       )}
       {confirmDialog}
     </div>
   )
+}
+
+/** One line of lease facts, including the renewal policy the row never used to show. */
+function leaseNote(lease: LeaseSummary): string {
+  return `lease #${lease.id} · ${lease.hours}/${lease.maxHours}h used · ${formatUdvpn(lease.hourlyPrice)}/h · ${renewalPolicyLabel(lease.renewalPricePolicy).toLowerCase()}`
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -185,7 +218,8 @@ function NodeRow({ address, node, busy, note, action, secondaryAction }: {
   node: SentNode | undefined
   busy: boolean
   note?: string
-  action: { label: string; kind: 'primary' | 'danger'; onClick: () => void }
+  /** `busyLabel` is spelled out rather than derived: "End lease" + "ing" is not a word. */
+  action: { label: string; busyLabel: string; kind: 'primary' | 'danger'; onClick: () => void }
   secondaryAction?: { label: string; onClick: () => void }
 }) {
   return (
@@ -217,11 +251,12 @@ function NodeRow({ address, node, busy, note, action, secondaryAction }: {
         type="button"
         onClick={action.onClick}
         disabled={busy}
-        className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 ${
+        className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 inline-flex items-center justify-center gap-1.5 min-w-[104px] ${
           action.kind === 'danger' ? 'btn-danger' : 'btn-primary'
         }`}
       >
-        {busy ? '…' : action.label}
+        {busy && <Spinner size="sm" />}
+        {busy ? action.busyLabel : action.label}
       </button>
     </div>
   )
@@ -230,10 +265,11 @@ function NodeRow({ address, node, busy, note, action, secondaryAction }: {
 const PICKER_LIMIT = 25
 
 /** Only nodes that publish an hourly price can be leased, so the rest are never offered. */
-function NodePicker({ nodes, excluded, price, onPick }: {
+function NodePicker({ nodes, excluded, price, disabled, onPick }: {
   nodes: SentNode[]
   excluded: Set<string>
   price: TokenPrice | null
+  disabled?: boolean
   onPick: (node: SentNode) => void
 }) {
   const [search, setSearch] = useState('')
@@ -293,7 +329,8 @@ function NodePicker({ nodes, excluded, price, onPick }: {
             <button
               type="button"
               onClick={() => onPick(node)}
-              className="btn btn-primary text-xs py-1 px-2.5 shrink-0"
+              disabled={disabled}
+              className="btn btn-primary text-xs py-1 px-2.5 shrink-0 disabled:opacity-40"
             >
               Lease &amp; link
             </button>
@@ -303,12 +340,6 @@ function NodePicker({ nodes, excluded, price, onPick }: {
     </div>
   )
 }
-
-const RENEWAL_OPTIONS = [
-  { value: 7, label: 'Renew automatically' },
-  { value: 2, label: 'Renew if price ≤ current' },
-  { value: 0, label: "Don't renew" },
-]
 
 /**
  * Buy the lease, then link. Both are priced and confirmed here because the lease
@@ -423,10 +454,13 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
               onChange={(e) => setPolicy(parseInt(e.target.value, 10))}
               className="mt-0.5 w-full bg-bg-tertiary border border-border text-text-primary text-xs px-2 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
             >
-              {RENEWAL_OPTIONS.map((o) => (
+              {RENEWAL_POLICY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
+            <span className="text-text-tertiary text-[10px] block mt-0.5">
+              {RENEWAL_POLICY_OPTIONS.find((o) => o.value === policy)?.hint}
+            </span>
           </label>
         </div>
 

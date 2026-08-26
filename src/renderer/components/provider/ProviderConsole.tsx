@@ -4,48 +4,16 @@ import { useProviderEconomics, type ProviderEconomicsState } from '../../hooks/u
 import { useConnection } from '../../hooks/useConnection'
 import { useRpcHealth } from '../../hooks/useRpcHealth'
 import { isChainUnreachable } from '../../../shared/rpc-health'
+import { providerDetailsProblem } from '../../../shared/provider-details'
 import { displayConnectError } from '../../utils/connect-errors'
+import { STATUS_ACTIVE, formatUdvpn, formatUdvpnAmount } from '../../utils/provider-format'
 import type { ProviderDetailsInput } from '../../types'
 import ChainUnreachable from '../ChainUnreachable'
 import { useConfirm } from '../ConfirmModal'
 import Spinner from '../Spinner'
+import ProviderDetailsFields from './ProviderDetailsFields'
+import ProviderIdentityCard from './ProviderIdentityCard'
 import ProviderPlans from './ProviderPlans'
-
-/** sentinel.types.v1.Status */
-export const STATUS_ACTIVE = 1
-
-export function formatUdvpn(udvpn: string | number): string {
-  const n = typeof udvpn === 'number' ? udvpn : Number(udvpn)
-  if (!isFinite(n)) return '—'
-  if (n === 0) return 'free'
-  return `${(n / 1e6).toLocaleString('en-US', { maximumFractionDigits: 6 })} P2P`
-}
-
-/**
- * formatUdvpn for balances rather than prices.
- *
- * The "free" that formatUdvpn returns for zero is right for a plan price and wrong
- * for an amount: "Revenue: free" and "burn: free → 360 P2P" both read as nonsense.
- */
-export function formatUdvpnAmount(udvpn: string | number): string {
-  const n = typeof udvpn === 'number' ? udvpn : Number(udvpn)
-  if (!isFinite(n)) return '—'
-  return `${(n / 1e6).toLocaleString('en-US', { maximumFractionDigits: 6 })} P2P`
-}
-
-/**
- * The dollar value of a udvpn amount, for display only — every figure that ends
- * up in a transaction stays in udvpn, priced from chain data. Sub-cent amounts
- * keep two significant digits instead of rounding to $0.00.
- */
-export function formatUsd(udvpn: string | number, usdPerP2p: number): string {
-  const p2p = (typeof udvpn === 'number' ? udvpn : Number(udvpn)) / 1e6
-  if (!isFinite(p2p)) return ''
-  const usd = p2p * usdPerP2p
-  if (usd === 0) return '$0.00'
-  if (usd < 0.01) return `$${usd.toPrecision(2)}`
-  return `$${usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
 
 /**
  * The Provider tab.
@@ -107,12 +75,13 @@ export default function ProviderConsole({ provider, plans, leases, loading, erro
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      <ProviderHeader provider={provider} onChanged={refreshAll} />
+      <ProviderIdentityCard provider={provider} plans={plans} leases={leases} onChanged={refreshAll} />
       <EconomicsStrip state={economics} />
       <ProviderPlans
         plans={plans}
         leases={leases}
         providerActive={provider.status === STATUS_ACTIVE}
+        providerName={provider.name}
         economics={economics.economics}
         onChanged={refreshAll}
       />
@@ -232,16 +201,20 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
   }, [])
 
   const depositLabel = deposit ? formatUdvpn(deposit.amount) : '…'
+  // Same rule the chain applies, so a name that is 64 characters but 80 bytes
+  // fails here instead of after the deposit is spent.
+  const problem = providerDetailsProblem(details, { requireName: true })
 
   async function handleRegister() {
-    if (!details.name.trim()) {
-      setError('Give your provider a name: it is what subscribers see next to your plans.')
+    if (problem) {
+      setError(problem)
       return
     }
     if (!(await requestConfirm({
       title: `Register "${details.name.trim()}" as a provider?`,
       body: [
         `Deposit: ${depositLabel} (plus network fee). The deposit goes to the community pool and is NOT refundable.`,
+        'You will land inactive: a second transaction activates you, and until then the chain refuses to create plans or start leases.',
         'This is an on-chain transaction.',
       ],
       confirmLabel: 'Register',
@@ -282,23 +255,21 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
         <p className="text-text-tertiary text-xs">
           The provider address is your wallet address in provider form, and the same key signs for both.
           The deposit is set by chain governance and is paid into the community pool, so it cannot be
-          reclaimed by deactivating later.
+          reclaimed by deactivating later. There is no way to remove a provider from the chain once it
+          exists, so registering is a one-way step.
         </p>
 
-        <div className="space-y-3">
-          <Field label="Name" value={details.name} placeholder="Shown next to your plans"
-            onChange={(v) => setDetails({ ...details, name: v })} />
-          <Field label="Website" value={details.website} placeholder="https://…"
-            onChange={(v) => setDetails({ ...details, website: v })} />
-          <Field label="Identity" value={details.identity} placeholder="Keybase identity (optional)"
-            onChange={(v) => setDetails({ ...details, identity: v })} />
-          <Field label="Description" value={details.description} placeholder="Optional"
-            onChange={(v) => setDetails({ ...details, description: v })} />
-        </div>
+        <ProviderDetailsFields details={details} onChange={setDetails} disabled={busy} />
 
         {error && <p className="text-danger text-sm">{displayConnectError(error)}</p>}
 
-        <button type="button" onClick={handleRegister} disabled={busy} className="btn btn-primary w-full disabled:opacity-40">
+        <button
+          type="button"
+          onClick={handleRegister}
+          disabled={busy || Boolean(problem)}
+          className="btn btn-primary w-full disabled:opacity-40"
+          title={problem ?? undefined}
+        >
           {busy ? 'Registering…' : `Register provider (${depositLabel})`}
         </button>
 
@@ -312,100 +283,11 @@ function ProviderOnboarding({ address, onRegistered }: { address: string; onRegi
   )
 }
 
-/** Registered-provider header: identity, status, and the activate/deactivate action. */
-function ProviderHeader({ provider, onChanged }: { provider: { address: string; name: string; website: string; status: number }; onChanged: () => void }) {
-  const active = provider.status === STATUS_ACTIVE
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const { requestConfirm, confirmDialog } = useConfirm()
-
-  const setStatus = useCallback(async (next: boolean) => {
-    if (!(await requestConfirm(
-      next
-        ? {
-            title: 'Activate this provider?',
-            body: ['Your active plans become visible to subscribers. This is an on-chain transaction.'],
-            confirmLabel: 'Activate',
-          }
-        : {
-            title: 'Deactivate this provider?',
-            body: ['Your plans stop being offered. This is an on-chain transaction.'],
-            confirmLabel: 'Deactivate',
-            danger: true,
-          },
-    ))) return
-    setBusy(true)
-    setError(null)
-    try {
-      await window.api.providerSetStatus(next)
-      onChanged()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Status change failed')
-    } finally {
-      setBusy(false)
-    }
-  }, [onChanged, requestConfirm])
-
-  return (
-    <div className="border-b border-border bg-bg-secondary px-5 py-3 shrink-0">
-      <div className="flex items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2.5">
-            <span className="text-text-primary text-sm font-medium truncate">{provider.name || 'Unnamed provider'}</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none ${
-              active ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
-            }`}>
-              {active ? 'Active' : 'Inactive'}
-            </span>
-          </div>
-          <div className="text-text-tertiary font-mono text-[11px] mt-0.5 truncate">{provider.address}</div>
-        </div>
-        <button
-          type="button"
-          onClick={() => setStatus(!active)}
-          disabled={busy}
-          className={`btn text-xs py-1.5 px-3 shrink-0 disabled:opacity-40 ${active ? 'btn-secondary' : 'btn-primary'}`}
-          title={active ? 'Stop offering your plans' : 'Required before any plan can go live'}
-        >
-          {busy ? '…' : active ? 'Deactivate' : 'Activate'}
-        </button>
-      </div>
-      {!active && (
-        <p className="text-warning text-xs mt-2">
-          Your provider is inactive: plans cannot be activated until you activate it.
-        </p>
-      )}
-      {error && <p className="text-danger text-xs mt-2">{displayConnectError(error)}</p>}
-      {confirmDialog}
-    </div>
-  )
-}
-
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-4 px-4 py-3">
       <dt className="text-text-secondary shrink-0">{label}</dt>
       <dd className="text-right min-w-0">{children}</dd>
     </div>
-  )
-}
-
-function Field({ label, value, placeholder, onChange }: {
-  label: string
-  value: string
-  placeholder?: string
-  onChange: (v: string) => void
-}) {
-  return (
-    <label className="block">
-      <span className="text-text-secondary text-xs font-medium uppercase tracking-wide">{label}</span>
-      <input
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full bg-bg-tertiary border border-border text-text-primary text-sm px-3 py-2 rounded-sm focus:outline-none focus:border-border-focus"
-      />
-    </label>
   )
 }

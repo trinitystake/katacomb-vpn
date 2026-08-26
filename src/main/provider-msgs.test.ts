@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import Long from 'long'
-import { planCreate } from '@sentinel-official/sentinel-js-sdk'
+import { planCreate, SentinelRegistry } from '@sentinel-official/sentinel-js-sdk'
 import {
   PROVIDER_REGISTRY,
   MsgStartLeaseTypeUrl,
+  MsgUpdatePlanDetailsTypeUrl,
   assertValidLeaseHours,
   assertValidPlanInput,
   buildCreatePlanMsg,
@@ -14,7 +15,10 @@ import {
   buildPrices,
   buildProviderStatusMsg,
   buildRegisterProviderMsg,
+  buildRenewLeaseMsg,
   buildStartLeaseMsg,
+  buildUpdateLeaseMsg,
+  buildUpdatePlanDetailsMsg,
   daysToDuration,
   gigabytesToBytes,
   leaseDepositNumber,
@@ -195,4 +199,50 @@ test('link/unlink carry the plan id as uint64 and the node address verbatim', ()
   assert.equal(back.id.toString(), '42')
   assert.equal(back.nodeAddress, NODE)
   assert.equal(back.from, PROV)
+})
+
+// --- plan privacy (MsgUpdatePlanDetails) ---
+
+test('the SDK still omits MsgUpdatePlanDetails from its registry, which is why we add it', () => {
+  // plan/consts.js declares no MsgUpdatePlanDetailsTypeUrl and modules/plan/registry.js
+  // never registers one, so the flag is create-only through the SDK. If this ever
+  // fails, upstream has fixed it and our hand-registered entry can go.
+  const urls = SentinelRegistry.map(([url]) => url)
+  assert.ok(!urls.includes(MsgUpdatePlanDetailsTypeUrl))
+})
+
+test('buildUpdatePlanDetailsMsg round-trips through the extended registry', () => {
+  const msg = buildUpdatePlanDetailsMsg(PROV, '36', true)
+  assert.equal(msg.typeUrl, MsgUpdatePlanDetailsTypeUrl)
+
+  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  assert.equal(back.from, PROV)
+  assert.equal(back.id.toString(), '36')
+  assert.equal(back.private, true)
+})
+
+test('buildUpdatePlanDetailsMsg carries private=false rather than dropping the field', () => {
+  const msg = buildUpdatePlanDetailsMsg(PROV, '36', false)
+  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  assert.equal(back.private, false)
+})
+
+// --- lease policy + renewal (MsgUpdateLease / MsgRenewLease) ---
+
+test('buildUpdateLeaseMsg round-trips through the extended registry', () => {
+  const msg = buildUpdateLeaseMsg(PROV, '7', 7)
+  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  assert.equal(back.from, PROV)
+  assert.equal(back.id.toString(), '7')
+  assert.equal(back.renewalPricePolicy, 7)
+})
+
+test('buildRenewLeaseMsg carries hours as signed int64 and the price as MaxPrice', () => {
+  const msg = buildRenewLeaseMsg({ provAddress: PROV, leaseId: '7', hours: 720, hourlyQuoteValue: '1000' })
+  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  assert.equal(back.from, PROV)
+  assert.equal(back.id.toString(), '7')
+  assert.equal(back.hours.toString(), '720')
+  assert.equal(back.maxPrice.denom, 'udvpn')
+  assert.equal(back.maxPrice.quoteValue, '1000')
 })

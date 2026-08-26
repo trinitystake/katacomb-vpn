@@ -52,6 +52,9 @@ import {
   toProviderAddress,
   type PlanInput,
   type ProviderDetails,
+  buildUpdatePlanDetailsMsg,
+  buildUpdateLeaseMsg,
+  buildRenewLeaseMsg,
 } from './provider-msgs'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
@@ -74,6 +77,8 @@ export interface MyProviderInfo {
   description: string
   /** sentinel.types.v1.Status: 1 active, 3 inactive. 0 when not registered. */
   status: number
+  /** When the status last changed, ISO string. null when not registered or not reported. */
+  statusAt: string | null
 }
 
 export interface MyPlanInfo {
@@ -113,7 +118,7 @@ async function withReadClient<T>(fn: (c: SentinelClient) => Promise<T>): Promise
 }
 
 function unregistered(address: string): MyProviderInfo {
-  return { address, registered: false, name: '', identity: '', website: '', description: '', status: 0 }
+  return { address, registered: false, name: '', identity: '', website: '', description: '', status: 0, statusAt: null }
 }
 
 /**
@@ -145,7 +150,9 @@ export async function getMyProvider(accountAddress: string): Promise<MyProviderI
     }
     // The SDK types this as the v1 Provider (no status), but the querier it calls
     // is v2 and does return one — read it through a cast rather than losing it.
-    const p = found as unknown as MyProviderInfo & { status?: number }
+    // `statusAt` rides the same cast: it is a Date on the wire and has to be
+    // flattened to a string to cross IPC at all.
+    const p = found as unknown as Omit<MyProviderInfo, 'status' | 'statusAt'> & { status?: number; statusAt?: Date }
     return {
       address,
       registered: true,
@@ -154,6 +161,7 @@ export async function getMyProvider(accountAddress: string): Promise<MyProviderI
       website: p.website ?? '',
       description: p.description ?? '',
       status: p.status ?? 0,
+      statusAt: p.statusAt instanceof Date ? p.statusAt.toISOString() : null,
     }
   })
 }
@@ -534,6 +542,74 @@ export async function setPlanStatus(params: {
     accountAddress: params.accountAddress,
     msg: buildPlanStatusMsg(toProviderAddress(params.accountAddress), params.planId, params.active),
     memo: `katacomb-vpn: ${params.active ? 'activate' : 'deactivate'} plan`,
+  })
+}
+
+/**
+ * Flip a plan between public and private.
+ *
+ * Gas only, and the hub imposes no status precondition — a live plan can be
+ * hidden without deactivating it first.
+ */
+export async function updatePlanDetails(params: {
+  wallet: DirectSecp256k1HdWallet
+  accountAddress: string
+  planId: string
+  private: boolean
+}): Promise<void> {
+  await broadcast({
+    wallet: params.wallet,
+    accountAddress: params.accountAddress,
+    msg: buildUpdatePlanDetailsMsg(toProviderAddress(params.accountAddress), params.planId, params.private),
+    memo: `katacomb-vpn: make plan ${params.private ? 'private' : 'public'}`,
+  })
+}
+
+/**
+ * Change a live lease's renewal price policy. Gas only, ownership is the only
+ * check the hub makes — and it is the sole way out of a lease bought under
+ * policy 0, which can otherwise never renew by any route.
+ */
+export async function updateLease(params: {
+  wallet: DirectSecp256k1HdWallet
+  accountAddress: string
+  leaseId: string
+  renewalPricePolicy: number
+}): Promise<void> {
+  await broadcast({
+    wallet: params.wallet,
+    accountAddress: params.accountAddress,
+    msg: buildUpdateLeaseMsg(toProviderAddress(params.accountAddress), params.leaseId, params.renewalPricePolicy),
+    memo: 'katacomb-vpn: update lease renewal policy',
+  })
+}
+
+/**
+ * Renew a lease early. Bounded, because it moves funds: the hub refunds the old
+ * escrow and charges a fresh `hourlyPrice x hours` for the whole new term rather
+ * than topping the existing one up.
+ *
+ * `hourlyQuoteValue` must come from the chain (getNodeHourlyPrice), not the
+ * renderer: it is sent as MaxPrice, so it is also the overpay guard.
+ */
+export async function renewLease(params: {
+  wallet: DirectSecp256k1HdWallet
+  accountAddress: string
+  leaseId: string
+  hours: number
+  hourlyQuoteValue: string
+}): Promise<void> {
+  await broadcast({
+    wallet: params.wallet,
+    accountAddress: params.accountAddress,
+    msg: buildRenewLeaseMsg({
+      provAddress: toProviderAddress(params.accountAddress),
+      leaseId: params.leaseId,
+      hours: params.hours,
+      hourlyQuoteValue: params.hourlyQuoteValue,
+    }),
+    memo: 'katacomb-vpn: renew lease',
+    bounded: true,
   })
 }
 

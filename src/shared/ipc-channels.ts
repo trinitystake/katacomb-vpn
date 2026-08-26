@@ -90,6 +90,7 @@ export const IPC = {
   PROVIDER_PLANS: 'provider:plans',
   PROVIDER_PLAN_CREATE: 'provider:plan-create',
   PROVIDER_PLAN_SET_STATUS: 'provider:plan-set-status',
+  PROVIDER_PLAN_SET_PRIVATE: 'provider:plan-set-private',
   PROVIDER_PLAN_LINK: 'provider:plan-link',
   PROVIDER_PLAN_UNLINK: 'provider:plan-unlink',
   PROVIDER_PLAN_STATS: 'provider:plan-stats',
@@ -103,6 +104,8 @@ export const IPC = {
   LEASE_PARAMS: 'lease:params',
   LEASE_QUOTE: 'lease:quote',
   LEASE_START: 'lease:start',
+  LEASE_RENEW: 'lease:renew',
+  LEASE_UPDATE_POLICY: 'lease:update-policy',
   LEASE_END: 'lease:end',
 
   // Events (main → renderer)

@@ -26,11 +26,20 @@ export interface ProviderState {
  * re-read whenever the wallet changes (a different seed is a different provider)
  * and when the tunnel drops.
  *
- * `visible` drives whether the Provider tab exists at all: on once this wallet has
- * a provider registered on chain, so someone who already registered never has to
- * find the setting again. `providerMode` is the pre-registration opt-in, and comes
- * from the wallet entry rather than app settings — as a global setting it followed
- * the user onto every seed imported after they first switched it on.
+ * `visible` drives whether the Provider tab exists at all, and `providerMode` is
+ * deliberately TRI-STATE for it. Undefined means the user has never touched the
+ * setting, and then a provider registered on chain reveals the tab by itself, so
+ * someone who registered elsewhere or restored a seed never has to go looking for
+ * the switch. An explicit true or false is the user's decision and wins outright.
+ *
+ * It used to be `providerMode || registered`, which made the Settings toggle a
+ * silent no-op the moment you registered: it saved, and the tab stayed anyway.
+ * Discovering a provider is a good default; refusing to let it be hidden again is
+ * not, so the fallback only applies while no choice has been recorded.
+ *
+ * The value comes from the wallet entry rather than app settings — as a global
+ * setting it followed the user onto every seed imported after they first switched
+ * it on.
  *
  * Everything is tagged with the address it was read for, so a wallet switch shows
  * nothing rather than the previous wallet's provider, and a slow response that
@@ -40,7 +49,12 @@ export interface ProviderState {
  * and the main-process reads answer `null`/`[]` by design. Skipping the read (and
  * keeping the last answer) is what stops the tab from vanishing mid-session.
  */
-export function useProvider(address: string | null, enabled: boolean, providerMode: boolean): ProviderState {
+export function useProvider(
+  address: string | null,
+  enabled: boolean,
+  /** undefined = never set, so the chain decides. true/false = the user decided. */
+  providerMode: boolean | undefined,
+): ProviderState {
   const [data, setData] = useState<ProviderData | null>(null)
   const [failure, setFailure] = useState<{ address: string; message: string } | null>(null)
   const [loading, setLoading] = useState(true)
@@ -91,6 +105,6 @@ export function useProvider(address: string | null, enabled: boolean, providerMo
     loading: loading || pending,
     error,
     refresh,
-    visible: providerMode || Boolean(provider?.registered),
+    visible: providerMode ?? Boolean(provider?.registered),
   }
 }

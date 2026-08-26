@@ -36,6 +36,7 @@ import {
   MsgUnlinkNodeTypeUrl,
   MsgUpdatePlanStatusTypeUrl,
 } from '@sentinel-official/sentinel-js-sdk/dist/modules/plan/consts.js'
+import { MsgUpdatePlanDetailsRequest } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/plan/v3/msg.js'
 import {
   MsgRegisterProviderTypeUrl,
   MsgUpdateProviderDetailsTypeUrl,
@@ -44,6 +45,8 @@ import {
 import {
   MsgStartLeaseRequest,
   MsgEndLeaseRequest,
+  MsgRenewLeaseRequest,
+  MsgUpdateLeaseRequest,
 } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/lease/v1/msg.js'
 
 /** The only denom this console prices in. Multi-denom/IBC plan pricing is out of scope. */
@@ -57,11 +60,23 @@ const SECONDS_PER_DAY = 86_400
 // stable protobuf identifiers (sentinel.lease.v1), not SDK API.
 export const MsgStartLeaseTypeUrl = '/sentinel.lease.v1.MsgStartLeaseRequest'
 const MsgEndLeaseTypeUrl = '/sentinel.lease.v1.MsgEndLeaseRequest'
+const MsgUpdateLeaseTypeUrl = '/sentinel.lease.v1.MsgUpdateLeaseRequest'
+const MsgRenewLeaseTypeUrl = '/sentinel.lease.v1.MsgRenewLeaseRequest'
 
 /**
- * The SDK registry plus the missing lease types.
+ * Plan privacy is the one plan field the SDK can only ever WRITE ONCE: it ships
+ * the MsgUpdatePlanDetailsRequest codec but declares no type URL for it in
+ * modules/plan/consts.js and never puts it in the registry, so the `private`
+ * flag was settable at creation and never again. The chain (v12.0.2) accepts the
+ * message at any plan status and checks nothing but ownership, so the whole fix
+ * is to name the URL ourselves — exactly what the lease types above do.
+ */
+export const MsgUpdatePlanDetailsTypeUrl = '/sentinel.plan.v3.MsgUpdatePlanDetailsRequest'
+
+/**
+ * The SDK registry plus the missing lease and plan-details types.
  *
- * MUST be passed to `connectWithSigner` for any lease tx: the SDK does
+ * MUST be passed to `connectWithSigner` for any of those txs: the SDK does
  * `Object.assign({ registry: default }, options)`, so a caller-supplied registry
  * REPLACES the default rather than merging with it — hence spreading
  * `SentinelRegistry` back in here.
@@ -70,6 +85,9 @@ export const PROVIDER_REGISTRY = new Registry([
   ...SentinelRegistry,
   [MsgStartLeaseTypeUrl, MsgStartLeaseRequest as unknown as GeneratedType],
   [MsgEndLeaseTypeUrl, MsgEndLeaseRequest as unknown as GeneratedType],
+  [MsgUpdateLeaseTypeUrl, MsgUpdateLeaseRequest as unknown as GeneratedType],
+  [MsgRenewLeaseTypeUrl, MsgRenewLeaseRequest as unknown as GeneratedType],
+  [MsgUpdatePlanDetailsTypeUrl, MsgUpdatePlanDetailsRequest as unknown as GeneratedType],
 ])
 
 // --- addresses ---
@@ -187,6 +205,19 @@ export function buildPlanStatusMsg(provAddress: string, planId: string, active: 
   }
 }
 
+/**
+ * Flip a plan between public and private after creation.
+ *
+ * The hub checks ownership and nothing else: there is no status precondition, so
+ * a live plan can be hidden without deactivating it first.
+ */
+export function buildUpdatePlanDetailsMsg(provAddress: string, planId: string, isPrivate: boolean): EncodeObject {
+  return {
+    typeUrl: MsgUpdatePlanDetailsTypeUrl,
+    value: { from: provAddress, id: Long.fromString(planId, true), private: isPrivate },
+  }
+}
+
 export function buildLinkNodeMsg(provAddress: string, planId: string, nodeAddress: string): EncodeObject {
   return {
     typeUrl: MsgLinkNodeTypeUrl,
@@ -247,6 +278,51 @@ export function buildStartLeaseMsg(params: {
       hours: Long.fromNumber(params.hours, false),
       maxPrice: { denom: PLAN_DENOM, baseValue: '0', quoteValue: params.hourlyQuoteValue },
       renewalPricePolicy: params.renewalPricePolicy as RenewalPricePolicy,
+    },
+  }
+}
+
+/**
+ * Change a live lease's renewal price policy.
+ *
+ * The only field MsgUpdateLease can touch, and the only escape from a lease bought
+ * under RENEWAL_PRICE_POLICY_UNSPECIFIED: see `renewalPolicyAllows` in
+ * shared/renewal-policy.ts for why that one is a dead end otherwise.
+ */
+export function buildUpdateLeaseMsg(provAddress: string, leaseId: string, renewalPricePolicy: number): EncodeObject {
+  return {
+    typeUrl: MsgUpdateLeaseTypeUrl,
+    value: {
+      from: provAddress,
+      id: Long.fromString(leaseId, true),
+      renewalPricePolicy: renewalPricePolicy as RenewalPricePolicy,
+    },
+  }
+}
+
+/**
+ * Extend a lease early.
+ *
+ * The hub does NOT add to the remaining term: it resets `Hours` to 0, sets
+ * `MaxHours` to the requested duration, refunds the old escrow and charges a
+ * fresh deposit for the whole new period. So this is a replacement, not a top-up,
+ * and the caller must price it as `hourlyPrice x hours` in full.
+ */
+export function buildRenewLeaseMsg(params: {
+  provAddress: string
+  leaseId: string
+  hours: number
+  /** The node's own current hourly price, sent as MaxPrice so a moved price fails the tx rather than overpaying. */
+  hourlyQuoteValue: string
+}): EncodeObject {
+  return {
+    typeUrl: MsgRenewLeaseTypeUrl,
+    value: {
+      from: params.provAddress,
+      id: Long.fromString(params.leaseId, true),
+      // int64 in the proto, and the encoder calls .equals() on it — must be a real Long.
+      hours: Long.fromNumber(params.hours, false),
+      maxPrice: { denom: PLAN_DENOM, baseValue: '0', quoteValue: params.hourlyQuoteValue },
     },
   }
 }

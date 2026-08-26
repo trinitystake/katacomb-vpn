@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { LeaseSummary, MyPlan, PlanStats, ProviderEconomics, TokenPrice } from '../../types'
 import { computeBreakEven, netOfStakingShare, parseDecShare } from '../../../shared/provider-economics'
+import { isTestPlan } from '../../../shared/test-plan'
 import { displayConnectError } from '../../utils/connect-errors'
 import { useConfirm } from '../ConfirmModal'
+import Spinner from '../Spinner'
 import PlanNodesManager from './PlanNodesManager'
-import { STATUS_ACTIVE, formatUdvpn, formatUdvpnAmount, formatUsd } from './ProviderConsole'
+import { STATUS_ACTIVE, formatUdvpn, formatUdvpnAmount, formatUsd } from '../../utils/provider-format'
 
 function formatSize(bytes: string): string {
   const gb = Number(bytes) / 1e9
@@ -46,12 +48,15 @@ interface Props {
   plans: MyPlan[]
   leases: LeaseSummary[]
   providerActive: boolean
+  /** The provider's own name. Feeds the test-plan heuristic, which reads the NAME, not the plan. */
+  providerName: string
   /** Null while unread — the pricing hints simply don't render rather than guess. */
   economics: ProviderEconomics | null
-  onChanged: () => void
+  /** Resolves once the chain has been re-read, so a caller can hold its busy state until then. */
+  onChanged: () => Promise<void>
 }
 
-export default function ProviderPlans({ plans, leases, providerActive, economics, onChanged }: Props) {
+export default function ProviderPlans({ plans, leases, providerActive, providerName, economics, onChanged }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const selected = plans.find((p) => p.id === selectedId) ?? null
@@ -66,15 +71,21 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
   const [price, setPrice] = useState<TokenPrice | null>(null)
   const planIds = plans.map((p) => p.id).join(',')
 
-  const loadStats = useCallback(() => {
+  const loadStats = useCallback(async () => {
     if (!planIds) {
       setStats({})
       return
     }
-    window.api.providerPlanStats(planIds.split(',')).then(setStats).catch(() => setStats({}))
+    try {
+      setStats(await window.api.providerPlanStats(planIds.split(',')))
+    } catch {
+      setStats({})
+    }
   }, [planIds])
 
-  useEffect(loadStats, [loadStats])
+  // Not `useEffect(loadStats, ...)`: an async callback returns a Promise, and an
+  // effect may only return a cleanup function.
+  useEffect(() => { void loadStats() }, [loadStats])
 
   useEffect(() => {
     window.api.priceToken().then(setPrice).catch(() => setPrice(null))
@@ -82,9 +93,13 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
 
   // Linking a node or selling a subscription changes the counters without
   // changing the plan list, so every action re-reads both.
-  const handleChanged = useCallback(() => {
-    onChanged()
-    loadStats()
+  //
+  // Awaited, and that is the whole point: a button that clears its busy state
+  // when the TX returns renders the pre-tx state for as long as the re-read takes,
+  // so "Activate" reappears for a second before flipping to "Deactivate". Callers
+  // await this, so the label goes straight from working to settled.
+  const handleChanged = useCallback(async () => {
+    await Promise.all([onChanged(), loadStats()])
   }, [onChanged, loadStats])
 
   return (
@@ -97,7 +112,9 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
           <button
             type="button"
             onClick={() => setCreating((v) => !v)}
-            className="btn btn-secondary text-xs py-1 px-2.5"
+            disabled={!providerActive && !creating}
+            className="btn btn-secondary text-xs py-1 px-2.5 disabled:opacity-40"
+            title={providerActive ? undefined : 'The chain refuses MsgCreatePlan while your provider is inactive'}
           >
             {creating ? 'Cancel' : 'New plan'}
           </button>
@@ -117,7 +134,9 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
         <div className="flex-1 overflow-y-auto">
           {plans.length === 0 && !creating && (
             <p className="text-text-tertiary text-xs px-5 py-4">
-              No plans yet. Create one, then activate it and link leased nodes to it.
+              {providerActive
+                ? 'No plans yet. Create one, select it to lease and link a node, then activate it.'
+                : 'No plans yet. Activate your provider first: the chain will not accept a new plan until you do.'}
             </p>
           )}
           {plans.map((plan) => (
@@ -128,6 +147,7 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
               price={price}
               selected={plan.id === selectedId}
               providerActive={providerActive}
+              providerName={providerName}
               onSelect={() => setSelectedId(plan.id === selectedId ? null : plan.id)}
               onChanged={handleChanged}
             />
@@ -142,6 +162,7 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
             leases={leases}
             price={price}
             economics={economics}
+            providerActive={providerActive}
             onChanged={handleChanged}
           />
         ) : (
@@ -156,20 +177,69 @@ export default function ProviderPlans({ plans, leases, providerActive, economics
   )
 }
 
-function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onChanged }: {
+function PlanRow({ plan, stats, price, selected, providerActive, providerName, onSelect, onChanged }: {
   plan: MyPlan
   /** undefined while the counters are still being read, null if they couldn't be. */
   stats: PlanStats | null | undefined
   price: TokenPrice | null
   selected: boolean
   providerActive: boolean
+  providerName: string
   onSelect: () => void
-  onChanged: () => void
+  onChanged: () => Promise<void>
 }) {
   const active = plan.status === STATUS_ACTIVE
-  const [busy, setBusy] = useState(false)
+  // Which action is running AND what it is moving to, not merely that one is.
+  //
+  // Two reasons it carries both. The row has two buttons, and a shared boolean
+  // put the spinner on whichever one you did not click. And `plan` is live chain
+  // data that changes UNDER these buttons: `onChanged()` calls setData while it
+  // runs and the busy flag only clears a microtask later, so there is a render
+  // showing the NEW value with the spinner still going. Reading a label off
+  // `plan` there made a freshly activated plan say "Deactivating…" mid-spin.
+  // While an action is in flight both buttons describe the ACTION and hold their
+  // pre-action appearance, so each settles in one visible step.
+  const [busy, setBusy] = useState<{ kind: 'status' | 'private'; target: boolean } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const { requestConfirm, confirmDialog } = useConfirm()
+  const anyBusy = busy !== null
+  // Pre-action values are the opposite of what each action is moving to.
+  const showActive = busy?.kind === 'status' ? !busy.target : active
+  const showPrivate = busy?.kind === 'private' ? !busy.target : plan.private
+
+  /**
+   * Flip the plan between public and private.
+   *
+   * Only possible because provider-msgs registers MsgUpdatePlanDetails itself:
+   * the SDK omits it, which made `private` a create-once decision. The chain
+   * imposes no status precondition, so this works on a live plan.
+   */
+  async function togglePrivate(e: React.MouseEvent) {
+    e.stopPropagation()
+    const next = !plan.private
+    if (!(await requestConfirm({
+      title: next ? `Make plan #${plan.id} private?` : `Make plan #${plan.id} public?`,
+      body: [
+        next
+          ? 'It stays active and existing subscriptions are unaffected, but it drops out of the catalog for anyone who has not chosen to show private plans.'
+          : 'It appears in the catalog for every subscriber browsing plans.',
+        'This is an on-chain transaction.',
+      ],
+      confirmLabel: next ? 'Make private' : 'Make public',
+    }))) return
+    setBusy({ kind: 'private', target: next })
+    setError(null)
+    try {
+      await window.api.providerPlanSetPrivate(plan.id, next)
+      // Awaited so the badge stays busy through the re-read and never flashes
+      // the old value back on the way to the new one.
+      await onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the plan visibility')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   async function toggleStatus(e: React.MouseEvent) {
     e.stopPropagation()
@@ -187,19 +257,19 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
           }
         : {
             title: `Activate plan #${plan.id}?`,
-            body: ['It becomes visible to subscribers. This is an on-chain transaction.'],
+            body: activateBody(plan, stats, providerName),
             confirmLabel: 'Activate',
           },
     ))) return
-    setBusy(true)
+    setBusy({ kind: 'status', target: !active })
     setError(null)
     try {
       await window.api.providerPlanSetStatus(plan.id, !active)
-      onChanged()
+      await onChanged()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Status change failed')
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
 
@@ -217,17 +287,36 @@ function PlanRow({ plan, stats, price, selected, providerActive, onSelect, onCha
         }`}>
           {active ? 'Active' : 'Inactive'}
         </span>
-        {plan.private && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full leading-none bg-info/15 text-info">Private</span>
-        )}
+        <button
+          type="button"
+          onClick={togglePrivate}
+          disabled={anyBusy}
+          className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none shrink-0 disabled:opacity-40 transition-colors inline-flex items-center gap-1 ${
+            showPrivate ? 'bg-info/15 text-info hover:bg-info/25' : 'bg-bg-tertiary text-text-tertiary hover:text-text-secondary'
+          }`}
+          title={
+            plan.private
+              ? 'Private: hidden from the catalog unless a subscriber opts to show private plans. Click to make it public.'
+              : 'Public: listed in the catalog. Click to make it private.'
+          }
+        >
+          {busy?.kind === 'private' && <Spinner size="sm" />}
+          {showPrivate ? 'Private' : 'Public'}
+        </button>
         <span className="flex-1" />
+        {/* min-w holds the busy label's width, so swapping to the gerund doesn't shove the row. */}
         <button
           type="button"
           onClick={toggleStatus}
-          disabled={busy}
-          className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 ${active ? 'btn-secondary' : 'btn-primary'}`}
+          disabled={anyBusy}
+          className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 inline-flex items-center justify-center gap-1.5 min-w-[128px] ${
+            showActive ? 'btn-secondary' : 'btn-primary'
+          }`}
         >
-          {busy ? '…' : active ? 'Deactivate' : 'Activate'}
+          {busy?.kind === 'status' && <Spinner size="sm" />}
+          {busy?.kind === 'status'
+            ? (busy.target ? 'Activating…' : 'Deactivating…')
+            : (active ? 'Deactivate' : 'Activate')}
         </button>
       </div>
       <div className="text-text-secondary text-xs mt-1.5 flex items-center gap-3">
@@ -358,6 +447,61 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
 }
 
 /**
+ * What activating this plan is about to mean, in full.
+ *
+ * Two separate questions get conflated here, so the copy keeps them apart:
+ *
+ * 1. What the CHAIN does. MsgUpdatePlanStatus checks ownership and that the
+ *    PROVIDER is active, and nothing else, because linking nodes is a separate
+ *    message with its own lease precondition. So an empty plan can go live and be
+ *    sold with nothing to serve the buyer. Worth saying out loud, not worth
+ *    blocking, the same line BreakEvenHint draws.
+ * 2. Whether anyone will FIND it. That is the consumer catalog's business, and
+ *    three of its filters can hide a freshly activated plan, two of which are
+ *    invisible from this tab. `private` is a real chain flag; "Test plans" is this
+ *    app's own guess from the PROVIDER NAME (shared/test-plan.ts), which surprises
+ *    anyone who called their provider something with "test" in it; and
+ *    "Ready to connect" (on by default) drops any plan counted at zero nodes.
+ *
+ * The zero node count has to be CONFIRMED. `stats` is undefined while the counters
+ * load and null when the chain read failed, and neither means "no nodes" — warning
+ * on those would put a false accusation in front of the one action the provider
+ * came here to take.
+ */
+function activateBody(plan: MyPlan, stats: PlanStats | null | undefined, providerName: string): string[] {
+  // Optional chaining IS the confirmed-zero test: undefined (loading) and null
+  // (read failed) both compare false against 0.
+  const nodeless = stats?.nodes === 0
+  const looksLikeTest = isTestPlan(providerName)
+  const hidden = plan.private || looksLikeTest || nodeless
+
+  const body = [
+    hidden
+      ? 'The chain will let subscribers buy it. Whether they can find it is a separate matter, and right now this app keeps it out of the default catalog view:'
+      : 'It appears in the plan catalog and subscribers can buy it.',
+  ]
+
+  if (plan.private) {
+    body.push(
+      'It is private, so only subscribers who tick the "Private" filter will see it. That flag is on chain, so other Sentinel clients should honour it too.',
+    )
+  }
+  if (looksLikeTest) {
+    body.push(
+      `This app reads your provider name ("${providerName}") as a test account, so it files the plan under "Test plans" and hides it by default. That is a local guess from the name, not anything the chain records.`,
+    )
+  }
+  if (nodeless) {
+    body.push(
+      'It has no nodes linked, so anyone who does buy it has nothing to connect to, and the default "Ready to connect" filter drops it. You can lease and link nodes afterwards without deactivating.',
+    )
+  }
+
+  body.push('This is an on-chain transaction.')
+  return body
+}
+
+/**
  * Translates the plan price into the number of subscribers that would cover the
  * lease burn — the one figure connecting the two halves of the business, since
  * nodes bill by time and plans sell by allocation.
@@ -370,11 +514,14 @@ function BreakEvenHint({ net, burnDailyUdvpn, result }: {
   burnDailyUdvpn: string
   result: ReturnType<typeof computeBreakEven>
 }) {
+  // No leases yet, so there is no burn to break even against. Nothing is wrong and
+  // nothing is blocked, so this states the next steps rather than warning: the node
+  // picker lives inside the plan's own pane, which does not exist until the plan does.
   if (result.kind === 'no-burn') {
     return (
       <p className="text-text-tertiary text-xs">
-        You have no nodes leased yet, so there is nothing to cover. Lease one before activating this
-        plan. A plan with no nodes has nothing to serve its subscribers.
+        Nothing to break even against yet, because you have no nodes leased. Create this plan first,
+        then select it to lease and link a node, and activate it once something can serve it.
       </p>
     )
   }

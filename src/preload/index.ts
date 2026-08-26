@@ -170,6 +170,8 @@ contextBridge.exposeInMainWorld('api', {
   providerPlanCreate: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_PLAN_CREATE, params),
   providerPlanSetStatus: (planId: string, active: boolean) =>
     ipcRenderer.invoke(IPC.PROVIDER_PLAN_SET_STATUS, { planId, active }),
+  providerPlanSetPrivate: (planId: string, isPrivate: boolean) =>
+    ipcRenderer.invoke(IPC.PROVIDER_PLAN_SET_PRIVATE, { planId, private: isPrivate }),
   providerPlanLink: (planId: string, nodeAddress: string) =>
     ipcRenderer.invoke(IPC.PROVIDER_PLAN_LINK, { planId, nodeAddress }),
   providerPlanUnlink: (planId: string, nodeAddress: string) =>
@@ -183,6 +185,9 @@ contextBridge.exposeInMainWorld('api', {
   leaseParams: () => ipcRenderer.invoke(IPC.LEASE_PARAMS),
   leaseQuote: (nodeAddress: string, hours: number) => ipcRenderer.invoke(IPC.LEASE_QUOTE, { nodeAddress, hours }),
   leaseStart: (params: unknown) => ipcRenderer.invoke(IPC.LEASE_START, params),
+  leaseRenew: (leaseId: string, hours: number) => ipcRenderer.invoke(IPC.LEASE_RENEW, { leaseId, hours }),
+  leaseUpdatePolicy: (leaseId: string, renewalPolicy: number) =>
+    ipcRenderer.invoke(IPC.LEASE_UPDATE_POLICY, { leaseId, renewalPolicy }),
   leaseEnd: (leaseId: string) => ipcRenderer.invoke(IPC.LEASE_END, { leaseId }),
 
   onPlanDiscoverProgress: (callback: (progress: { done: number; total: number; phase: string }) => void) => {

@@ -407,6 +407,8 @@ export interface MyProvider extends ProviderDetailsInput {
   registered: boolean
   /** sentinel.types.v1.Status: 1 active, 3 inactive, 0 when not registered. */
   status: number
+  /** When the status last changed, ISO string. null when not registered or not reported. */
+  statusAt: string | null
 }
 
 export interface MyPlan {
@@ -637,6 +639,7 @@ export interface ElectronAPI {
     private: boolean
   }) => Promise<void>
   providerPlanSetStatus: (planId: string, active: boolean) => Promise<void>
+  providerPlanSetPrivate: (planId: string, isPrivate: boolean) => Promise<void>
   providerPlanLink: (planId: string, nodeAddress: string) => Promise<void>
   providerPlanUnlink: (planId: string, nodeAddress: string) => Promise<void>
   /** Keyed by plan id; a plan the chain couldn't answer for is simply absent. */
@@ -651,6 +654,8 @@ export interface ElectronAPI {
   leaseParams: () => Promise<{ minHours: number; maxHours: number } | null>
   leaseQuote: (nodeAddress: string, hours: number) => Promise<LeaseQuote>
   leaseStart: (params: { nodeAddress: string; hours: number; renewalPolicy: number }) => Promise<void>
+  leaseRenew: (leaseId: string, hours: number) => Promise<void>
+  leaseUpdatePolicy: (leaseId: string, renewalPolicy: number) => Promise<void>
   leaseEnd: (leaseId: string) => Promise<void>
 
   trafficStats: () => Promise<TrafficStats>

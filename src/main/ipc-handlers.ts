@@ -59,6 +59,9 @@ import {
   setProviderStatus,
   createPlan,
   setPlanStatus,
+  updatePlanDetails,
+  updateLease,
+  renewLease,
   linkNode,
   unlinkNode,
   startLease,
@@ -67,6 +70,8 @@ import {
 import { listLeasesForProvider, getLeaseParams } from './lease-query'
 import { getTokenPrice } from './price-service'
 import { assertValidLeaseHours, leaseDepositNumber, leaseDepositUdvpn, toProviderAddress } from './provider-msgs'
+import { renewalPolicyRefusal } from '../shared/renewal-policy'
+import { assertValidProviderDetails } from '../shared/provider-details'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { getCachedPlans } from './plan-cache'
@@ -4399,6 +4404,9 @@ export function registerIpcHandlers(): void {
       website: params.website ?? '',
       description: params.description ?? '',
     }
+    // Mirrors the hub's ValidateBasic (64/64/64/256 bytes, website must parse as
+    // a request URI), so over-long or malformed input fails before it costs gas.
+    assertValidProviderDetails(details, { requireName: true })
     // The deposit is spent to the community pool, not escrowed — check for it
     // explicitly rather than letting the tx fail after the gas simulation.
     const deposit = await getProviderDeposit().catch(noteChainError)
@@ -4406,20 +4414,29 @@ export function registerIpcHandlers(): void {
     await registerProvider({ wallet, accountAddress: address, details }).catch(noteChainError)
   })
 
+  /**
+   * Overwrite the provider's metadata.
+   *
+   * The hub's handler is ASYMMETRIC: it keeps the stored name when the message
+   * carries an empty one, but overwrites identity, website and description
+   * unconditionally. So this is a full replace for three of the four fields, and
+   * a caller that sends a partially filled form wipes whatever it left blank —
+   * which is why the renderer's edit form is pre-filled from the current record.
+   */
   handle(IPC.PROVIDER_UPDATE_DETAILS, async (_event, params: { name: string; identity: string; website: string; description: string }) => {
     const { wallet, address } = requireProviderContext()
     assertString(params?.name, 'name')
+    const details = {
+      name: params.name,
+      identity: params.identity ?? '',
+      website: params.website ?? '',
+      description: params.description ?? '',
+    }
+    // requireName is false to match the hub: an empty name means "keep the one
+    // you have", not "clear it".
+    assertValidProviderDetails(details, { requireName: false })
     await assertSufficientFunds(0)
-    await updateProviderDetails({
-      wallet,
-      accountAddress: address,
-      details: {
-        name: params.name,
-        identity: params.identity ?? '',
-        website: params.website ?? '',
-        description: params.description ?? '',
-      },
-    }).catch(noteChainError)
+    await updateProviderDetails({ wallet, accountAddress: address, details }).catch(noteChainError)
   })
 
   handle(IPC.PROVIDER_SET_STATUS, async (_event, params: { active: boolean }) => {
@@ -4465,6 +4482,23 @@ export function registerIpcHandlers(): void {
     if (typeof params?.active !== 'boolean') throw new Error('Invalid active: expected boolean')
     await assertSufficientFunds(0)
     await setPlanStatus({ wallet, accountAddress: address, planId: params.planId, active: params.active }).catch(noteChainError)
+  })
+
+  /**
+   * Flip a plan between public and private after creation.
+   *
+   * Only reachable because provider-msgs registers the type URL itself: the SDK
+   * ships the codec but omits it from SentinelRegistry, which is what made the
+   * flag write-once. The hub checks ownership and nothing else, so this works at
+   * any plan status.
+   */
+  handle(IPC.PROVIDER_PLAN_SET_PRIVATE, async (_event, params: { planId: string; private: boolean }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.planId, 'planId')
+    if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
+    if (typeof params?.private !== 'boolean') throw new Error('Invalid private: expected boolean')
+    await assertSufficientFunds(0)
+    await updatePlanDetails({ wallet, accountAddress: address, planId: params.planId, private: params.private }).catch(noteChainError)
   })
 
   handle(IPC.PROVIDER_PLAN_LINK, async (_event, params: { planId: string; nodeAddress: string }) => {
@@ -4600,6 +4634,73 @@ export function registerIpcHandlers(): void {
       nodeAddress: params.nodeAddress,
       hours: params.hours,
       hourlyQuoteValue: price.hourlyPrice,
+      renewalPricePolicy: params.renewalPolicy,
+    }).catch(noteChainError)
+  })
+
+  /**
+   * Extend a lease early.
+   *
+   * The hub does NOT top the remaining term up: it resets Hours to 0, sets
+   * MaxHours to the new duration, refunds the old escrow and charges a fresh
+   * deposit for the whole period. So the funds check is priced on the full new
+   * term, not the difference.
+   *
+   * The renewal policy is checked HERE as well as in the renderer, because it is
+   * the chain's own gate (the same one the BeginBlocker applies) and failing it
+   * costs a broadcast: a lease bought as "never renew" can never be extended at
+   * all until MsgUpdateLease changes the policy.
+   */
+  handle(IPC.LEASE_RENEW, async (_event, params: { leaseId: string; hours: number }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.leaseId, 'leaseId')
+    if (!/^\d+$/.test(params.leaseId)) throw new Error('Invalid leaseId')
+    assertIntRange(params?.hours, 'hours', 1, 720)
+
+    // The lease is read from the provider's own list rather than trusted from the
+    // renderer: it carries the node address, the stored price the policy compares
+    // against, and implicitly the ownership check.
+    const leases = await listLeasesForProvider(toProviderAddress(address)).catch(noteChainError)
+    const lease = leases.find((l) => l.id === params.leaseId)
+    if (!lease) throw new Error('That lease is no longer on chain. Reopen the Provider tab to see the current state.')
+
+    const [price, leaseParams] = await Promise.all([
+      getNodeHourlyPrice(lease.nodeAddress).catch(noteChainError),
+      getLeaseParams().catch(noteChainError),
+    ])
+    if (!price.hourlyPrice) {
+      throw new Error('That node no longer publishes an hourly price in P2P, so its lease cannot be renewed.')
+    }
+    const refusal = renewalPolicyRefusal(lease.renewalPricePolicy, price.hourlyPrice, lease.hourlyPrice)
+    if (refusal) throw new Error(refusal)
+
+    assertValidLeaseHours(params.hours, leaseParams.minHours, leaseParams.maxHours)
+    await assertSufficientFunds(leaseDepositNumber(price.hourlyPrice, params.hours))
+
+    await renewLease({
+      wallet,
+      accountAddress: address,
+      leaseId: params.leaseId,
+      hours: params.hours,
+      hourlyQuoteValue: price.hourlyPrice,
+    }).catch(noteChainError)
+  })
+
+  /**
+   * Change a live lease's renewal price policy. Gas only, and the only escape
+   * from a lease bought under policy 0, which the chain will otherwise never
+   * renew by any route.
+   */
+  handle(IPC.LEASE_UPDATE_POLICY, async (_event, params: { leaseId: string; renewalPolicy: number }) => {
+    const { wallet, address } = requireProviderContext()
+    assertString(params?.leaseId, 'leaseId')
+    if (!/^\d+$/.test(params.leaseId)) throw new Error('Invalid leaseId')
+    assertNumber(params?.renewalPolicy, 'renewalPolicy', 0, 7)
+    await assertSufficientFunds(0)
+    await updateLease({
+      wallet,
+      accountAddress: address,
+      leaseId: params.leaseId,
       renewalPricePolicy: params.renewalPolicy,
     }).catch(noteChainError)
   })

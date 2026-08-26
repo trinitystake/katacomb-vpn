@@ -19,6 +19,13 @@ interface Props {
   // Called after a wallet rename / derive succeeds, so the top-bar Wallet
   // popover can re-fetch the active wallet's display name.
   onWalletsChanged?: () => void
+  /**
+   * Whether the Provider tab is actually showing right now.
+   *
+   * Passed in rather than read off the wallet entry, because `providerMode` is
+   * tri-state and the unset case is decided by the chain (see useProvider).
+   */
+  providerTabVisible: boolean
 }
 
 const DNS_OPTIONS = [
@@ -40,7 +47,7 @@ const CLIPBOARD_CLEAR_MS = 30_000
 // retained seed — which has an encrypted file but no index entry, hence no address.
 type SeedSource = { id: string; name: string; address?: string; accountIndex?: number }
 
-export default function Settings({ initialTab, onClose, onWalletSwitch, onWalletsChanged }: Props) {
+export default function Settings({ initialTab, onClose, onWalletSwitch, onWalletsChanged, providerTabVisible }: Props) {
   const { reload: reloadGlobalSettings } = useSettings()
   const rpcHealth = useRpcHealth()
   const [settings, setSettings] = useState<AppSettings | null>(null)
@@ -551,11 +558,16 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                     <span className="text-text-primary text-sm">Provider Mode: this wallet</span>
                     <p className="text-text-tertiary text-xs mt-0.5">
                       Show the Provider tab, where you can register as a provider, publish plans and lease nodes.
-                      Applies to the selected wallet only.
+                      Applies to the selected wallet only. Turning it off only hides the tab: your provider,
+                      plans and leases carry on exactly as they are on chain.
                     </p>
                   </div>
+                  {/* The EFFECTIVE state, not the stored flag. providerMode is tri-state:
+                      left unset, a provider found on chain reveals the tab on its own, and
+                      a toggle reading "off" beside a visible tab is just wrong. Flipping it
+                      writes an explicit true/false either way, which then wins outright. */}
                   <Toggle
-                    checked={Boolean(wallets.find((w) => w.id === activeWalletId)?.providerMode)}
+                    checked={providerTabVisible}
                     disabled={!activeWalletId}
                     onChange={async (checked) => {
                       await window.api.providerModeSet(checked)

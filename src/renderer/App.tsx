@@ -232,7 +232,9 @@ function AppInner() {
   // Provider mode is per-wallet, so it comes off the active entry rather than app
   // settings — a newly imported seed must not inherit the previous wallet's tab.
   const activeWallet = wallet.store?.wallets.find((w) => w.id === wallet.store?.activeWalletId)
-  const providerState = useProvider(wallet.address, !isConnected, Boolean(activeWallet?.providerMode))
+  // NOT Boolean(): undefined has to survive, it is what lets a provider found on
+  // chain reveal the tab while still letting an explicit `false` hide it again.
+  const providerState = useProvider(wallet.address, !isConnected, activeWallet?.providerMode)
   const providerVisible = providerState.visible
   const mainTabs: MainTab[] = providerVisible
     ? ['map', 'nodes', 'multihop', 'plans', 'sessions', 'provider']
@@ -418,6 +420,7 @@ function AppInner() {
             window.location.reload()
           }}
           onWalletsChanged={wallet.refreshIdentity}
+          providerTabVisible={providerVisible}
         />
       )}
     </div>

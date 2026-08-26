@@ -8,7 +8,7 @@ A maintenance release for the Provider console. It now checks what the chain wil
 actually accept before offering you an action, so transactions that could only ever
 be rejected are no longer presented.
 
-##Highlights
+## Highlights
 
 - The Provider console stops offering transactions the chain refuses. Creating a plan and leasing a node both need an active provider, and registration lands you inactive, so a freshly registered console was showing two buttons that were guaranteed to fail. They are held back until you activate, with the reason on screen.
 - Bad provider details are caught before they cost gas. Name, identity and website are capped at 64 bytes and the description at 256, and a website has to be a full URL, matching the chain's own rules instead of finding out after the fee.

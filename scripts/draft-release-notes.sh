@@ -58,7 +58,10 @@ ok()   { printf '  %sok%s    %s\n' "$green" "$reset" "$*"; }
 info() { printf '  ....  %s\n' "$*"; }
 die()  { printf '  %sSTOP%s  %s\n' "$red" "$reset" "$*" >&2; exit 1; }
 
-usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# Prints the header block above, down to the ruled line: everything from the title
+# to "Never tags or pushes." The range is a line count, so it silently truncates if
+# that block grows. Check `--help` OUTPUT, not the file, after editing the header.
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 VERSION=""
 DRY_RUN=0
@@ -232,6 +235,10 @@ Next:
   2. git add $NOTES && git commit
      release.sh requires a clean tree, so this has to be committed before the cut.
   3. ./scripts/release.sh $VERSION --dry-run
+
+Or let --edit do all three: ./scripts/draft-release-notes.sh $VERSION --edit
+It opens \$EDITOR, refuses to commit while a TODO: marker is left, and resumes
+this draft rather than overwriting it.
 NEXT
   exit 0
 fi

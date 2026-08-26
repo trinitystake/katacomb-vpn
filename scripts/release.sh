@@ -22,8 +22,13 @@
 # THE WHOLE RELEASE, of which this script is only step 1. The order is not
 # cosmetic — every one of these was learned by getting it wrong on 1.0.0.
 #
-#   0. notes      ./scripts/draft-release-notes.sh <version>
-#                 then edit RELEASE_NOTES.md, then commit it.
+#   0. notes      ./scripts/draft-release-notes.sh <version> --edit
+#
+#                 That is the whole step: it scaffolds RELEASE_NOTES.md, opens it in
+#                 $EDITOR, refuses to commit while a TODO: marker remains, and commits
+#                 when none do. Re-run the same command to resume a draft you left
+#                 unfinished. Without --edit it only scaffolds, and the editing and
+#                 committing are yours to do by hand.
 #
 #                 The scaffold does the mechanical half: it retitles the file, clears
 #                 the prose that belonged to the last release, and collects the commit
@@ -33,8 +38,9 @@
 #                 can do: a generator would emit commit-log prose that looks finished
 #                 and so never gets read, which is the same failure in better
 #                 formatting. Update README.md too if the release changed what the app
-#                 does. COMMIT the result: preflight refuses a dirty tree, so an
-#                 uncommitted step 0 stops the cut before any of the checks below run.
+#                 does. The result must be COMMITTED: preflight refuses a dirty tree, so
+#                 an uncommitted step 0 stops the cut before any of the checks below
+#                 run. --edit does that commit for you; by hand it is yours to remember.
 #
 #                 Every OTHER version STRING in both files ("Fixes in", the
 #                 README status line, and the install commands in both) is rewritten

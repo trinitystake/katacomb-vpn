@@ -1323,15 +1323,16 @@ older releases have no `libasound2t64` and fall through to the second alternativ
 `libasound2` is a real package and therefore beats any provider.
 
 **A container is enough to catch this class of bug and costs minutes, but `ldd` alone is
-not a sufficient check and Debian alone is not sufficient coverage.** Run all four
-(`debian:bookworm`, `debian:trixie`, `ubuntu:22.04`, `ubuntu:24.04`):
+not a sufficient check and Debian alone is not sufficient coverage.** Run all five
+(`debian:bookworm`, `debian:trixie`, `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04`):
 `apt-get install -y --no-install-recommends /tmp/app.deb`, then
 `ldd "/opt/Katacomb VPN/katacomb-vpn" | grep "not found"` (must print nothing) **and**
 actually execute the binary (`--no-sandbox --version`), which must reach Chromium's own
 startup rather than `symbol lookup error` or `error while loading shared libraries`.
 Reaching a dbus or `Missing X server or $DISPLAY` complaint is the expected pass in a
 headless container. Do that on any dependency change before reaching for the full
-interactive script below. All four re-run green on 2026-08-25 after the d3-geo globe;
+interactive script below. All five re-run green on 2026-08-26 after the d3-geo globe (26.04 resolves
+`libasound2t64` like 24.04 does, so the alternation still decides it correctly);
 note the deb's `Depends` are NOT affected by renderer dependencies, since `libgbm.so.1`
 and `libasound.so.2` are `DT_NEEDED` on the Electron binary itself (`objdump -p`).
 

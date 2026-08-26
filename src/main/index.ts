@@ -6,7 +6,8 @@ import { fileURLToPath } from 'url'
 import { is } from '@electron-toolkit/utils'
 import {
   registerIpcHandlers, cleanupOnQuit, bootstrapNodesCache, startNodeRefreshTimer, stopNodeRefreshTimer,
-  performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch, type ConnectionInfo,
+  performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch,
+  healOrphanedTunnel, type ConnectionInfo,
 } from './ipc-handlers'
 import { killAllTunnels, detectExistingConnection } from './vpn-manager'
 import { onChainPathChanged, runAutoRpcSelection, startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
@@ -395,13 +396,21 @@ app.whenReady().then(() => {
   // path (AppImage / dev).
   if (!isDaemonAvailable()) ensurePolkitSetup()
   detectExistingConnection()
-  // If a previous run left a kill-switch chain stranded (crash/OOM mid-teardown),
-  // clear it now that we know we're not connected. Fire-and-forget, best-effort.
-  // Re-probe when it lands: until then the monitor reports the chain as blocking
-  // (correctly — nothing gets out), and this is what tells it that stopped being
-  // true. Not awaited before starting the monitor, because on the pkexec path the
-  // heal can sit on a password prompt for as long as the user takes.
-  void healStrandedKillSwitch()
+  // A tunnel that outlived the run which created it comes back with no session and
+  // nothing supervising it, so close it before anything reports it as connected.
+  // Chained ahead of the kill-switch heal rather than run beside it: that heal skips
+  // while a tunnel is up, so it has to see the state this leaves behind, not the one
+  // it found. Fire-and-forget for the same reason the heal is — on the pkexec path
+  // either step can sit on a password prompt for as long as the user takes.
+  void healOrphanedTunnel()
+    .catch(() => { /* best-effort — the kill-switch heal below still runs */ })
+    // If a previous run left a kill-switch chain stranded (crash/OOM mid-teardown),
+    // clear it now that we know we're not connected. Best-effort.
+    // Re-probe when it lands: until then the monitor reports the chain as blocking
+    // (correctly — nothing gets out), and this is what tells it that stopped being
+    // true. Not awaited before starting the monitor, because on the pkexec path the
+    // heal can sit on a password prompt for as long as the user takes.
+    .then(() => healStrandedKillSwitch())
     .catch(() => { /* best-effort self-heal */ })
     .finally(() => { onChainPathChanged() })
   // Drop stale session credential files left by non-endSession exit paths (finding L4).

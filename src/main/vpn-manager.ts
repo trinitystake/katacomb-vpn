@@ -21,6 +21,7 @@ import {
   extractOpenVpnRemoteHost,
 } from './config-guard'
 import { verifyBinaryIntegrity } from './binary-integrity'
+import { trackProxyChildIn, reapOrphanedProxyChildrenIn } from './proxy-children'
 import { isChildProxyCarryingTraffic } from './connect-decisions'
 import { runPrivileged } from './privileged'
 import { loadSettings } from './settings'
@@ -518,6 +519,24 @@ function coreEnv(bin: string): NodeJS.ProcessEnv {
 }
 
 /**
+ * Where the pids of live proxy cores are recorded. The logic lives in
+ * ./proxy-children (Electron-free, so it is unit-testable under the native
+ * runner); this module owns only the userData path it operates on.
+ */
+const PROXY_CHILDREN_STATE = join(app.getPath('userData'), 'proxy-children.json')
+
+/** Record a freshly spawned core so a crash that skips every teardown does not
+ *  strand it holding the SOCKS port. Untracks itself when the child exits. */
+function trackProxyChild(child: ChildProcess, configFile: string): void {
+  trackProxyChildIn(PROXY_CHILDREN_STATE, child, configFile)
+}
+
+/** Kill proxy cores left running by a previous run. True if anything was killed. */
+export function reapOrphanedProxyChildren(): Promise<boolean> {
+  return reapOrphanedProxyChildrenIn(PROXY_CHILDREN_STATE)
+}
+
+/**
  * Spawn the proxy child (v2ray by default; xray when overridden) and monitor it.
  * xray reuses this whole lifecycle — same stdout/stderr capture, log file, and
  * exit handler that tears down the TUN — differing only in binary, CLI args, and
@@ -536,6 +555,9 @@ function spawnV2Ray(
     stdio: ['ignore', 'pipe', 'pipe'],
     env: coreEnv(bin),
   })
+  // Record the pid so a crash that skips every teardown does not strand this core
+  // holding the SOCKS port against the next connect.
+  trackProxyChild(child, configFile)
 
   // Persist the core's own output to a stable, user-readable file. The in-memory
   // ring buffer below only survives while the process is alive and is only
@@ -975,6 +997,10 @@ export async function startProvisioningProxy(configString: string): Promise<Prov
   writeFileSync(configFile, JSON.stringify(cfg, null, 2), { mode: 0o600 })
 
   const child = spawn(bin, ['run', '-c', configFile], { stdio: ['ignore', 'pipe', 'pipe'], env: coreEnv(bin) })
+  // Tracked for the same reason the main core is. Narrower window (this only lives
+  // for the length of a chain purchase) but the same consequence if it is stranded:
+  // it holds PROVISION_SOCKS_PORT against the next chain purchase.
+  trackProxyChild(child, configFile)
   let output = ''
   const collect = (chunk: Buffer): void => {
     output += chunk.toString()

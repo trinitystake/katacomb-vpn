@@ -23,6 +23,12 @@
 # THE WHOLE RELEASE, of which this script is only step 1. The order is not
 # cosmetic — every one of these was learned by getting it wrong on 1.0.0.
 #
+# ./scripts/ship.sh <version> runs the whole of it, and is the normal way in. It
+# works out which of these steps are already done and does the next one, so it is
+# re-run rather than resumed. The breakdown below stays the reference for what it
+# is doing, and for the two steps it deliberately leaves to you: the portability
+# run, and confirming that connect and disconnect actually work.
+#
 #   0. notes      ./scripts/draft-release-notes.sh <version> --edit
 #
 #                 That is the whole step: it scaffolds RELEASE_NOTES.md, opens it in

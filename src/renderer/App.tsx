@@ -152,6 +152,40 @@ function KillSwitchStuckBanner() {
 }
 
 /**
+ * A previous run left a tunnel running and this launch closed it (healOrphanedTunnel).
+ * Worth telling the user about because two things changed under them: the VPN they may
+ * have believed was still up is now down, and the session they paid for is probably
+ * still open on chain. Informational, so it takes the neutral styling rather than the
+ * danger one: traffic is flowing normally by the time this renders.
+ *
+ * No action button. Reconnecting needs a session picked from the Sessions tab, which is
+ * one click away and already handles the cases this banner cannot (quota spent, session
+ * settled, a chain whose other hop is gone). Dismissal is local state, like the expiry
+ * banner: main sets the flag once per launch and never clears it.
+ */
+function OrphanedTunnelBanner() {
+  const [dismissed, setDismissed] = useState(false)
+  if (dismissed) return null
+  return (
+    <div className="px-5 py-1.5 bg-bg-secondary border-b border-border text-text-secondary text-xs flex items-center gap-2">
+      <span aria-hidden>⚠</span>
+      <span className="flex-1">
+        Katacomb VPN closed a tunnel left running by a previous session, so you are not
+        connected right now. If that session is still open, you can reconnect to it from
+        the Sessions tab.
+      </span>
+      <button
+        onClick={() => setDismissed(true)}
+        className="hover:text-text-primary transition-colors px-1"
+        title="Dismiss"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
+/**
  * Written out rather than capitalized from the tab id: "multihop" would render as
  * "Multihop", and the hyphen is what makes it read as two hops rather than a word.
  */
@@ -319,6 +353,8 @@ function AppInner() {
       <SessionExpiredBanner key={connStatus.expired?.sessionId} expired={connStatus.expired} />
 
       {connStatus.killSwitchTeardownFailed && <KillSwitchStuckBanner />}
+
+      {connStatus.orphanedTunnelClosed && <OrphanedTunnelBanner />}
 
       {/* Main tabs. Provider is hidden until this wallet opts in (Settings → General)
           or already has a provider registered on chain. */}

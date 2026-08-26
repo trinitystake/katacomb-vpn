@@ -520,6 +520,58 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   IP lookups dial a fresh, unpooled socket every time. Anything else in main that fetches
   the same host on both sides of a tunnel transition inherits this hazard.
 
+- **The tunnel never outlives the app, and NOTHING outside the app will end it.** A crash
+  leaves everything running by construction: WG/AWG/OpenVPN interfaces are kernel-resident
+  and root-created, tun2socks is spawned detached by the helper, and the daemon has no
+  notion of whether a GUI is alive (`daemon-core`'s socket close carries no meaning, since
+  `daemon-client` opens one connection per request by design, and the unit has no
+  `ExecStop`). Teardown is therefore the app's job on both exit paths:
+  - **Quit** runs `cleanupOnQuit` → `performDisconnect()`, NOT a lighter copy of it. The
+    copy skipped `rememberSessionUsage()` (a quit mid-session wrote no usage floor, so the
+    gauge fell back to the lagging chain figure), `isIntentionalDisconnect` + clearing
+    `activeSessionId` (so `disconnect()`'s SIGTERM to the core made `onV2RayUnexpectedExit`
+    schedule a reconnect *during* the quit), and the `connectionEpoch++` that makes an
+    in-flight connect bail. The ordering inside `performDisconnect` is load-bearing:
+    `stopQuotaWatchdog()` nulls `connectedAtMs`, which `rememberSessionUsage()` needs, so it
+    must run AFTER it. **Never pre-stop anything from the quit path.** Still capped by
+    `before-quit`'s 5s race, so on the pkexec path an unanswered polkit prompt outlives the
+    budget and the next launch's heal finishes the job.
+  - **Crash** is repaired by `healOrphanedTunnel()` at startup, ordered between
+    `detectExistingConnection()` (which sets `activeProtocol`, so `disconnect()` picks the
+    matching teardown verb) and `healStrandedKillSwitch()` (which skips while a tunnel is
+    up, so it must see the state this leaves, not the one it found). An adopted tunnel has
+    NO session behind it, because `activeSessionId` is only ever assigned on the
+    connect/reconnect paths: `startQuotaWatchdog` and `startRootTunnelMonitor` never
+    restart, so the paid quota goes unwatched, and the kill switch cannot even be armed
+    against it (`armedWith` is null and there is no endpoint recorded to whitelist, so
+    enabling it just sets `killSwitchFailed`). That is worse than no tunnel, so it is closed
+    and the user reconnects from the Sessions tab, which restores the session and the
+    watchdog properly. Traffic is deliberately NOT left blocked afterwards: full
+    `revertPostConnectSettings`, per the rule that "expired, traffic blocked" must not
+    survive a restart.
+  - **The teardown MUST tell the tray.** `createTrayIcon()` reads `getConnectionStatus()`
+    synchronously at startup, i.e. BEFORE the teardown's privileged round-trip returns, so
+    it caches "connected" off the very interface about to be deleted, and the tray only
+    ever updates on a push, unlike the renderer's 3s poll. `healOrphanedTunnel` therefore
+    ends at `notifyTraySettled()`. Live symptom (2026-08-26): idle window, orphan banner
+    and a green tray dot, all at once.
+  - **Proxy cores are reaped by pid, and an orphan does NOT die on its own.** Measured
+    2026-08-26 against the bundled xray: parent killed, child reparented to PID 1, still
+    listening 20s later. The plausible escape (piped stdio, so a write should raise SIGPIPE)
+    never fires, because at `loglevel: warning` an idle core writes nothing. It then holds
+    `127.0.0.1:1080` and the next connect's core exits with "process exited immediately
+    after starting", pointing at nothing. `proxy-children.ts` (Electron-free, unit-tested
+    against real processes) records pid+exe+configFile at spawn and clears it from the
+    child's own `exit`; the reap signals only when BOTH `/proc/<pid>/exe` matches AND the
+    recorded config path appears as a whole argv entry, because the pid may have been reused
+    and the user may run their own v2ray/xray (`resolveV2RayBinary` falls back to the system
+    one). **Never reap by process name.**
+  - The window's X is NOT a quit: with a tray host it hides, without one it falls through to
+    `window-all-closed` → `app.quit()`. And the `state === 'connected'` window during startup
+    healing is HONEST, not a glitch to paper over: the orphan really is carrying traffic
+    until it is torn down, so the IP display and tray are right to say so for those seconds.
+    Do not add a "verifying" state (see the rule above forbidding one).
+
 ### Session lifecycle (verified against live mainnet, not inferred)
 
 - **Ending a session is two phases, and cancel/expiry are ONE path.** `x/session` has only

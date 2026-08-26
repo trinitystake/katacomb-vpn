@@ -208,6 +208,11 @@ export interface ConnectionStatus {
   v2raySummary?: string
   killSwitchFailed?: boolean
   killSwitchTeardownFailed?: boolean
+  /**
+   * This launch closed a tunnel that a previous run left running (crash, OOM, kill).
+   * The on-chain session behind it may still be active and reconnectable.
+   */
+  orphanedTunnelClosed?: boolean
   /** Connected in local-proxy mode: SOCKS5 only, system routing untouched. */
   proxyMode?: boolean
   /** Where to point apps in proxy mode, e.g. '127.0.0.1:1080'. */

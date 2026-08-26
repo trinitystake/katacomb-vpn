@@ -111,7 +111,7 @@ import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } fr
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './node-tester'
 import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './multihop-config'
 import { SocksHttpsAgent } from './socks-agent'
-import { onV2RayUnexpectedExit } from './vpn-manager'
+import { onV2RayUnexpectedExit, reapOrphanedProxyChildren } from './vpn-manager'
 import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'
@@ -238,6 +238,10 @@ let armedWith: { iface: string; remoteHost: string; dnsIp?: string; lanSharing: 
 // still be blocking traffic until the next-launch self-heal. Surfaced so the renderer
 // can warn even in the idle state (finding M6).
 let killSwitchTeardownFailed = false
+// True when this launch closed a tunnel left behind by a previous run (see
+// healOrphanedTunnel). Set once at startup and never cleared in main: the banner it
+// drives is dismissed in the renderer, and a per-launch fact has no reason to expire.
+let orphanedTunnelClosed = false
 
 // Cached values returned when VPN is active and RPC is unreachable. Balance stays
 // null until a fetch actually succeeds: the renderer's affordability check must be
@@ -1832,6 +1836,69 @@ async function restoreDnsOverride(): Promise<void> {
 }
 
 /**
+ * On startup, tear down a tunnel that outlived the process that was supervising it.
+ *
+ * The tunnel survives a crash by construction: WG/AWG/OpenVPN interfaces are created
+ * by root and live in the kernel, tun2socks is spawned detached by the helper, and the
+ * daemon has no notion of whether a GUI is alive (its socket close carries no meaning —
+ * daemon-client opens one connection per request by design). detectExistingConnection()
+ * then adopts the interface, so getConnectionStatus() reports connected and the UI says
+ * so.
+ *
+ * What does NOT come back is the supervision. `activeSessionId` is only ever assigned
+ * on the connect/reconnect paths, so an adopted tunnel has no session behind it, and
+ * therefore no startQuotaWatchdog (the only thing that watches the paid quota, and the
+ * only caller of checkTunnelStalled) and no startRootTunnelMonitor (gated on the same
+ * id). connectedAtMs is null, so nothing accrues usage either. The kill switch cannot
+ * even be armed against it: armedWith is null, so a re-arm is skipped, and there is no
+ * endpoint recorded to whitelist, so turning it on just sets killSwitchFailed.
+ *
+ * A tunnel in that state is worse than no tunnel: it carries traffic and bills a paid
+ * session that nothing will stand down at its cap. So we close it, and let the user
+ * reconnect from the Sessions tab, which restores the session id and the watchdog
+ * properly. The chain session is untouched (cancel is not a refund) and is still listed
+ * there.
+ *
+ * Traffic is deliberately NOT left blocked afterwards: revertPostConnectSettings is the
+ * full revert, matching the rule that the "expired, traffic blocked" state must not
+ * survive a restart. Same order as performDisconnect: firewall first, then the tunnel.
+ *
+ * Must run AFTER detectExistingConnection (which sets activeProtocol, so disconnect()
+ * picks the matching teardown verb) and BEFORE healStrandedKillSwitch (which would
+ * otherwise see connected: true and skip). It leaves nothing for that heal to do on
+ * this path, but the heal still covers the case where no tunnel survived at all.
+ */
+export async function healOrphanedTunnel(): Promise<void> {
+  // Always runs, including on a launch that finds no interface: a crash in local-proxy
+  // mode leaves a core and no interface at all, and in tunnel mode the stale sntl-tun
+  // is torn down by detectExistingConnection before we get here, which takes the
+  // interface away but not the process behind it.
+  const reapedProxyChild = await reapOrphanedProxyChildren()
+
+  if (getConnectionStatus().connected && !activeSessionId) {
+    console.log('[startup] Tunnel survived a previous run with no session behind it — closing it')
+    await revertPostConnectSettings()
+    await disconnect()
+    orphanedTunnelClosed = true
+  } else if (reapedProxyChild) {
+    // A reaped core is the same story from the user's side: a tunnel a previous run
+    // left running is now closed.
+    orphanedTunnelClosed = true
+  }
+
+  // The tray must be told, explicitly. createTrayIcon() builds its icon from
+  // getConnectionStatus() and runs BEFORE this finishes (the teardown waits on a
+  // privileged round-trip, which on the pkexec path is a password dialog), so it
+  // caches "connected" off the very interface we are about to delete. Nothing else
+  // corrects it: the tray only ever updates on a push, unlike the renderer, which
+  // re-polls every 3s and settles on its own. Observed live 2026-08-26 as an idle
+  // window, the orphan banner, and a green tray dot, all at the same time.
+  // Idempotent, and harmlessly a no-op when the listener is not registered yet —
+  // that ordering means createTrayIcon() reads the settled state for itself.
+  notifyTraySettled()
+}
+
+/**
  * On startup, clear a kill-switch chain stranded by a crash/OOM mid-teardown (the
  * chain otherwise keeps dropping all traffic with the tunnel down — no internet
  * even after "disconnect"). Gated on the armed marker (so clean launches never
@@ -3362,6 +3429,10 @@ export function registerIpcHandlers(): void {
       v2raySummary: activeNodeInfo?.v2raySummary,
       killSwitchFailed: killSwitchFailed || undefined,
       killSwitchTeardownFailed: killSwitchTeardownFailed || undefined,
+      // This launch closed a tunnel a previous run left running. Reported alongside
+      // the connection rather than on its own channel for the same reason `expired`
+      // is: useConnection already polls this, so no new push is needed to surface it.
+      orphanedTunnelClosed: orphanedTunnelClosed || undefined,
       sessionId: activeSessionId,
       // The active session's on-chain subscription, read off the session cache
       // (primed by every connect flow). Lets the Plans tab say "connected via
@@ -4550,13 +4621,27 @@ export function registerIpcHandlers(): void {
   })
 }
 
+/**
+ * Quit-path teardown. Delegates to performDisconnect() rather than repeating a
+ * lighter version of it, because the three things this used to skip all matter:
+ *
+ * - rememberSessionUsage(), so quitting mid-session still writes the usage floor.
+ *   Node proofs lag by tens of minutes, so without it the Sessions gauge reads
+ *   the not-yet-settled chain figure after a relaunch (see the usage-floor rule).
+ * - isIntentionalDisconnect + clearing activeSessionId BEFORE disconnect() SIGTERMs
+ *   the proxy core, or the core's exit handler schedules an auto-reconnect in the
+ *   middle of the quit (onV2RayUnexpectedExit gates on exactly those two).
+ * - connectionEpoch++, set synchronously ahead of the lock, so an in-flight
+ *   connect or reconnect bails instead of completing a bring-up after teardown.
+ *
+ * Note the ordering inside performDisconnect is load-bearing here: stopQuotaWatchdog()
+ * nulls connectedAtMs, so it must run AFTER rememberSessionUsage(), not before.
+ * Nothing may be pre-stopped from this function.
+ *
+ * Still bounded by before-quit's 5s race, so this stays best-effort: on the pkexec
+ * path an unanswered polkit prompt outlives the budget and healStrandedKillSwitch()
+ * repairs the firewall at the next launch.
+ */
 export async function cleanupOnQuit(): Promise<void> {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-  stopRootTunnelMonitor()
-  stopQuotaWatchdog()
-  await revertPostConnectSettings()
-  await disconnect()
+  await performDisconnect()
 }

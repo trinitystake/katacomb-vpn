@@ -34,6 +34,32 @@ export function formatP2pCeil(udvpn: number): string {
   return (Math.ceil(udvpn / (UDVPN_PER_P2P / 100)) / 100).toFixed(2)
 }
 
+/**
+ * What registering a provider costs, in udvpn, from the chain's deposit param.
+ *
+ * Fails CLOSED on anything it cannot price: a deposit in a denom other than
+ * udvpn cannot be checked against the wallet's udvpn balance (and the register
+ * handler would spend it blind), and an unparseable amount must not read as
+ * free. The zero deposit mainnet uses today passes as 0 whatever its denom says,
+ * since a zero of anything costs nothing.
+ */
+export function registrationDepositCost(deposit: { denom: string; amount: string }): number {
+  if (!/^\d+$/.test(deposit.amount)) {
+    throw new Error('The provider deposit could not be read from the chain. Try again in a moment.')
+  }
+  const amount = Number(deposit.amount)
+  if (!Number.isSafeInteger(amount)) {
+    throw new Error('The provider deposit could not be read from the chain. Try again in a moment.')
+  }
+  if (amount > 0 && deposit.denom !== 'udvpn') {
+    throw new Error(
+      `The provider deposit is priced in ${deposit.denom}, which this app cannot verify funds for. ` +
+      'Registration is refused rather than risking a failed spend.',
+    )
+  }
+  return amount
+}
+
 export interface FundsCheck {
   ok: boolean
   /** udvpn the wallet holds. */

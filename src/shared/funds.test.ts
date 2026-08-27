@@ -6,6 +6,7 @@ import {
   formatP2p,
   formatP2pCeil,
   insufficientFundsMessage,
+  registrationDepositCost,
   udvpnOf,
 } from './funds.ts'
 
@@ -74,4 +75,25 @@ test('insufficientFundsMessage uses the gas-only wording when cost is 0', () => 
   assert.match(msg, /needs ~0\.05 P2P/)
   assert.match(msg, /wallet has 0\.01/)
   assert.doesNotMatch(msg, /costs/)
+})
+
+test('registrationDepositCost prices a udvpn deposit', () => {
+  assert.equal(registrationDepositCost({ denom: 'udvpn', amount: '25000000' }), 25_000_000)
+})
+
+test('registrationDepositCost accepts a zero deposit whatever the denom (mainnet today)', () => {
+  assert.equal(registrationDepositCost({ denom: 'udvpn', amount: '0' }), 0)
+  assert.equal(registrationDepositCost({ denom: 'ibc/ABC', amount: '0' }), 0)
+})
+
+test('registrationDepositCost fails closed on a non-udvpn deposit it cannot verify', () => {
+  assert.throws(() => registrationDepositCost({ denom: 'ibc/ABC', amount: '5' }), /cannot verify funds/)
+})
+
+test('registrationDepositCost fails closed on an unparseable amount, never pricing it as free', () => {
+  assert.throws(() => registrationDepositCost({ denom: 'udvpn', amount: '' }), /could not be read/)
+  assert.throws(() => registrationDepositCost({ denom: 'udvpn', amount: 'nope' }), /could not be read/)
+  assert.throws(() => registrationDepositCost({ denom: 'udvpn', amount: '-5' }), /could not be read/)
+  assert.throws(() => registrationDepositCost({ denom: 'udvpn', amount: '12.5' }), /could not be read/)
+  assert.throws(() => registrationDepositCost({ denom: 'udvpn', amount: '999999999999999999999' }), /could not be read/)
 })

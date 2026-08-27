@@ -186,6 +186,16 @@ export function invalidatePlanNodes(planId: string): void {
   planNodesCache.delete(planId)
 }
 
+/**
+ * Drop EVERY plan's cached node list. For the chain-side cascades a single-plan
+ * invalidation cannot follow: ending a lease unlinks that node from every plan it
+ * served (x/plan's LeaseInactivePreHook), and deactivating the provider unlinks
+ * everything — neither says which plans were touched.
+ */
+export function invalidateAllPlanNodes(): void {
+  planNodesCache.clear()
+}
+
 export async function listNodesForPlan(planId: string, sharedClient?: SentinelClient): Promise<string[]> {
   if (!/^\d+$/.test(planId)) return []
   const now = Date.now()

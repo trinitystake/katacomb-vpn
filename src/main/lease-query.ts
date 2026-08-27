@@ -14,6 +14,7 @@ import {
   QueryLeasesForProviderRequest,
   QueryParamsRequest,
 } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/lease/v1/querier.js'
+import type { ProtobufRpcClient } from '@cosmjs/stargate'
 import { withTimeout } from './async-utils'
 import { withProtobufQuery, QUERY_TIMEOUT_MS } from './protobuf-query'
 
@@ -73,11 +74,11 @@ function toLeaseInfo(l: RawLease): LeaseInfo {
   }
 }
 
-async function withLeaseQuery<T>(fn: (q: QueryServiceClientImpl) => Promise<T>): Promise<T> {
-  return withProtobufQuery((rpc) => fn(new QueryServiceClientImpl(rpc)))
+async function withLeaseQuery<T>(fn: (q: QueryServiceClientImpl) => Promise<T>, shared?: ProtobufRpcClient): Promise<T> {
+  return withProtobufQuery((rpc) => fn(new QueryServiceClientImpl(rpc)), shared)
 }
 
-export async function listLeasesForProvider(provAddress: string): Promise<LeaseInfo[]> {
+export async function listLeasesForProvider(provAddress: string, shared?: ProtobufRpcClient): Promise<LeaseInfo[]> {
   return withLeaseQuery(async (query) => {
     const results: LeaseInfo[] = []
     let nextKey: Uint8Array = new Uint8Array()
@@ -111,11 +112,11 @@ export async function listLeasesForProvider(provAddress: string): Promise<LeaseI
     }
 
     return results
-  })
+  }, shared)
 }
 
 /** Live bounds for MsgStartLease's `hours` (mainnet today: 1 and 720). */
-export async function getLeaseParams(): Promise<LeaseParams> {
+export async function getLeaseParams(shared?: ProtobufRpcClient): Promise<LeaseParams> {
   return withLeaseQuery(async (query) => {
     const resp = await withTimeout(
       query.QueryParams(QueryParamsRequest.fromPartial({})),
@@ -127,5 +128,5 @@ export async function getLeaseParams(): Promise<LeaseParams> {
       maxHours: resp.params?.maxHours?.toNumber() ?? 720,
       stakingShare: resp.params?.stakingShare ?? '',
     }
-  })
+  }, shared)
 }

@@ -15,15 +15,27 @@ import { QueryClient, createProtobufRpcClient, type ProtobufRpcClient } from '@c
 import { connectComet, type CometClient } from '@cosmjs/tendermint-rpc'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
+import { resolveRpcBase } from './chain-clients'
 
 const CONNECT_TIMEOUT_MS = 10_000
 export const QUERY_TIMEOUT_MS = 10_000
 
-/** Run `fn` against a short-lived protobuf RPC client, always disconnecting after. */
-export async function withProtobufQuery<T>(fn: (rpc: ProtobufRpcClient) => Promise<T>): Promise<T> {
+/**
+ * Run `fn` against a short-lived protobuf RPC client, always disconnecting after.
+ *
+ * When a `shared` client is passed (an aggregate read reusing one connection for
+ * several queries, e.g. getProviderEconomics), `fn` runs against it directly and
+ * the CALLER keeps ownership — nothing is opened or disconnected here.
+ */
+export async function withProtobufQuery<T>(
+  fn: (rpc: ProtobufRpcClient) => Promise<T>,
+  shared?: ProtobufRpcClient,
+): Promise<T> {
+  if (shared) return fn(shared)
   let comet: CometClient | null = null
   try {
-    comet = await withTimeout(connectComet(getRpcEndpoint()), CONNECT_TIMEOUT_MS, 'RPC connect')
+    const base = await resolveRpcBase(getRpcEndpoint())
+    comet = await withTimeout(connectComet(base), CONNECT_TIMEOUT_MS, 'RPC connect')
     return await fn(createProtobufRpcClient(QueryClient.withExtensions(comet)))
   } finally {
     comet?.disconnect()

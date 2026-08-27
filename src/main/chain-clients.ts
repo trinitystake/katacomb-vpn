@@ -1,5 +1,11 @@
 import { connectComet, type CometClient } from '@cosmjs/tendermint-rpc'
-import { GasPrice, type SigningStargateClientOptions } from '@cosmjs/stargate'
+import {
+  GasPrice,
+  QueryClient,
+  createProtobufRpcClient,
+  type ProtobufRpcClient,
+  type SigningStargateClientOptions,
+} from '@cosmjs/stargate'
 import { Registry, type OfflineSigner } from '@cosmjs/proto-signing'
 import { SentinelClient, SigningSentinelClient, SentinelRegistry } from '@sentinel-official/sentinel-js-sdk'
 import { getRpcEndpoint } from './settings'
@@ -105,6 +111,12 @@ export interface ChainFlow {
  */
 export interface ChainQuery {
   query: SentinelClient
+  /**
+   * The same connection for query services the SDK doesn't wrap (x/lease, the v3
+   * params services) — what withProtobufQuery builds per call, minus the extra
+   * connection. See protobuf-query.ts for why those services need this route.
+   */
+  protobufRpc: ProtobufRpcClient
   disconnect: () => void
 }
 
@@ -113,6 +125,7 @@ export async function openChainQuery(): Promise<ChainQuery> {
   const tmClient = await withTimeout(connectComet(base), RPC_CONNECT_TIMEOUT_MS, 'RPC connect')
   return {
     query: new FlowQueryClient(tmClient),
+    protobufRpc: createProtobufRpcClient(QueryClient.withExtensions(tmClient)),
     disconnect: () => tmClient.disconnect(),
   }
 }

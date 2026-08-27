@@ -4,7 +4,7 @@ import { existsSync, unlinkSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { IPC } from '../shared/ipc-channels'
 import { INSUFFICIENT_FUNDS, RPC_UNREACHABLE } from '../shared/error-markers'
-import { checkFunds, insufficientFundsMessage, udvpnOf } from '../shared/funds'
+import { checkFunds, insufficientFundsMessage, registrationDepositCost, udvpnOf } from '../shared/funds'
 import { isRpcConnectivityError, rpcHostLabel } from '../shared/rpc-health'
 import { DERIVE_PREVIEW_MAX_COUNT } from '../shared/hd-path'
 import {
@@ -39,13 +39,13 @@ import {
   type SessionInfo,
 } from './wallet'
 import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, sendPlanProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
-import { openChainFlow } from './chain-clients'
+import { openChainFlow, openChainQuery } from './chain-clients'
 import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
 import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
+import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, invalidateAllPlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
 import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plan-connect'
 import {
   getMyProvider,
@@ -2399,6 +2399,13 @@ function assertString(value: unknown, name: string): asserts value is string {
   }
 }
 
+/** Like assertString for fields where empty (or absent) is a valid value. */
+function assertOptionalString(value: unknown, name: string): asserts value is string | undefined {
+  if (value !== undefined && typeof value !== 'string') {
+    throw new Error(`Invalid ${name}: expected string`)
+  }
+}
+
 function assertNumber(value: unknown, name: string, min?: number, max?: number): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new Error(`Invalid ${name}: expected number`)
@@ -4374,6 +4381,20 @@ export function registerIpcHandlers(): void {
     return { wallet, address }
   }
 
+  /**
+   * The lease is read back from the provider's own list rather than trusted from
+   * the renderer: that carries the ownership check (the hub only accepts a lease
+   * msg from its own provider), the stored price the renewal policy compares
+   * against, and a friendly refusal instead of a broadcast the chain rejects at
+   * the cost of gas and a raw rawLog.
+   */
+  async function assertOwnLease(accountAddress: string, leaseId: string) {
+    const leases = await listLeasesForProvider(toProviderAddress(accountAddress)).catch(noteChainError)
+    const lease = leases.find((l) => l.id === leaseId)
+    if (!lease) throw new Error('That lease is no longer on chain. Reopen the Provider tab to see the current state.')
+    return lease
+  }
+
   handle(IPC.PROVIDER_ME, async () => {
     const address = getAddress()
     if (!address) throw new Error('Wallet not loaded')
@@ -4398,6 +4419,9 @@ export function registerIpcHandlers(): void {
   handle(IPC.PROVIDER_REGISTER, async (_event, params: { name: string; identity: string; website: string; description: string }) => {
     const { wallet, address } = requireProviderContext()
     assertString(params?.name, 'name')
+    assertOptionalString(params?.identity, 'identity')
+    assertOptionalString(params?.website, 'website')
+    assertOptionalString(params?.description, 'description')
     const details = {
       name: params.name,
       identity: params.identity ?? '',
@@ -4409,8 +4433,9 @@ export function registerIpcHandlers(): void {
     assertValidProviderDetails(details, { requireName: true })
     // The deposit is spent to the community pool, not escrowed — check for it
     // explicitly rather than letting the tx fail after the gas simulation.
+    // registrationDepositCost fails CLOSED on a deposit it cannot price.
     const deposit = await getProviderDeposit().catch(noteChainError)
-    await assertSufficientFunds(parseInt(deposit.amount, 10) || 0)
+    await assertSufficientFunds(registrationDepositCost(deposit))
     await registerProvider({ wallet, accountAddress: address, details }).catch(noteChainError)
   })
 
@@ -4425,16 +4450,20 @@ export function registerIpcHandlers(): void {
    */
   handle(IPC.PROVIDER_UPDATE_DETAILS, async (_event, params: { name: string; identity: string; website: string; description: string }) => {
     const { wallet, address } = requireProviderContext()
+    // The name IS required here, although the hub would keep the stored one for
+    // an empty name: the edit form is pre-filled from the current record, so an
+    // empty name arriving is a renderer bug, not a "keep it" intent.
     assertString(params?.name, 'name')
+    assertOptionalString(params?.identity, 'identity')
+    assertOptionalString(params?.website, 'website')
+    assertOptionalString(params?.description, 'description')
     const details = {
       name: params.name,
       identity: params.identity ?? '',
       website: params.website ?? '',
       description: params.description ?? '',
     }
-    // requireName is false to match the hub: an empty name means "keep the one
-    // you have", not "clear it".
-    assertValidProviderDetails(details, { requireName: false })
+    assertValidProviderDetails(details, { requireName: true })
     await assertSufficientFunds(0)
     await updateProviderDetails({ wallet, accountAddress: address, details }).catch(noteChainError)
   })
@@ -4443,7 +4472,13 @@ export function registerIpcHandlers(): void {
     const { wallet, address } = requireProviderContext()
     if (typeof params?.active !== 'boolean') throw new Error('Invalid active: expected boolean')
     await assertSufficientFunds(0)
-    await setProviderStatus({ wallet, accountAddress: address, active: params.active }).catch(noteChainError)
+    try {
+      await setProviderStatus({ wallet, accountAddress: address, active: params.active }).catch(noteChainError)
+    } finally {
+      // Deactivation cascades on chain: every lease ends and every node is
+      // unlinked from every plan, so single-plan invalidation can't follow it.
+      if (!params.active) invalidateAllPlanNodes()
+    }
   })
 
   handle(IPC.PROVIDER_PLANS, async () => {
@@ -4507,10 +4542,15 @@ export function registerIpcHandlers(): void {
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     assertSentAddress(params?.nodeAddress, 'nodeAddress')
     await assertSufficientFunds(0)
-    await linkNode({ wallet, accountAddress: address, planId: params.planId, nodeAddress: params.nodeAddress }).catch(noteChainError)
     // The plan→nodes list is cached for 10 minutes for browsing; after our own
     // link the console re-reads it immediately and must not get the old answer.
-    invalidatePlanNodes(params.planId)
+    // In a `finally` because a tx that times out here can still LAND — the old
+    // answer must not be served for the rest of the TTL either way.
+    try {
+      await linkNode({ wallet, accountAddress: address, planId: params.planId, nodeAddress: params.nodeAddress }).catch(noteChainError)
+    } finally {
+      invalidatePlanNodes(params.planId)
+    }
   })
 
   handle(IPC.PROVIDER_PLAN_UNLINK, async (_event, params: { planId: string; nodeAddress: string }) => {
@@ -4519,15 +4559,23 @@ export function registerIpcHandlers(): void {
     if (!/^\d+$/.test(params.planId)) throw new Error('Invalid planId')
     assertSentAddress(params?.nodeAddress, 'nodeAddress')
     await assertSufficientFunds(0)
-    await unlinkNode({ wallet, accountAddress: address, planId: params.planId, nodeAddress: params.nodeAddress }).catch(noteChainError)
-    invalidatePlanNodes(params.planId)
+    try {
+      await unlinkNode({ wallet, accountAddress: address, planId: params.planId, nodeAddress: params.nodeAddress }).catch(noteChainError)
+    } finally {
+      invalidatePlanNodes(params.planId)
+    }
   })
 
   /**
    * Per-plan counters for the provider's own plan list: linked nodes, and how
    * many subscriptions the plan has sold. Batched over the wallet's plans (there
-   * are a handful) so the console makes one call rather than three per plan.
-   * Best-effort per plan — one unreadable plan must not blank the whole list.
+   * are a handful) so the console makes one call rather than three per plan, and
+   * all of it rides one connection.
+   *
+   * Best-effort per plan — one unreadable plan must not blank the whole list —
+   * but a failure is REPORTED as `null` for that id, never silently absent: the
+   * renderer must be able to tell "could not count" from "no stats", or a failed
+   * read renders as a plan with no nodes and no sales.
    */
   handle(IPC.PROVIDER_PLAN_STATS, async (_event, params: { planIds: string[] }) => {
     if (!Array.isArray(params?.planIds)) throw new Error('Invalid planIds')
@@ -4536,19 +4584,34 @@ export function registerIpcHandlers(): void {
       assertString(id, 'planId')
       if (!/^\d+$/.test(id)) throw new Error('Invalid planId')
     }
-    if (isVpnActive()) return {}
+    const nullStats = () => Object.fromEntries(params.planIds.map((id) => [id, null]))
+    if (isVpnActive()) return nullStats()
 
-    const out: Record<string, { nodes: number; subscriptions: number; active: number; truncated: boolean }> = {}
-    for (const planId of params.planIds) {
-      try {
-        const [nodes, subs] = await Promise.all([
-          listNodesForPlan(planId),
-          getPlanSubscriberStats(planId),
-        ])
-        out[planId] = { nodes: nodes.length, ...subs }
-      } catch {
-        reportRpcFailure()
+    type PlanStatsRow = { nodes: number; subscriptions: number; active: number; truncated: boolean }
+    const out: Record<string, PlanStatsRow | null> = {}
+    const q = await openChainQuery().catch(() => null)
+    if (!q) {
+      reportRpcFailure()
+      return nullStats()
+    }
+    try {
+      for (const planId of params.planIds) {
+        try {
+          const [nodes, subs] = await Promise.all([
+            listNodesForPlan(planId, q.query),
+            getPlanSubscriberStats(planId, q.query),
+          ])
+          out[planId] = { nodes: nodes.length, ...subs }
+        } catch (err) {
+          // Only an unreachable-RPC failure concerns the health monitor; a
+          // per-plan decode error must not accuse the endpoint.
+          const message = err instanceof Error ? err.message : String(err)
+          if (isRpcConnectivityError(message)) reportRpcFailure()
+          out[planId] = null
+        }
       }
+    } finally {
+      q.disconnect()
     }
     return out
   })
@@ -4616,7 +4679,9 @@ export function registerIpcHandlers(): void {
     const { wallet, address } = requireProviderContext()
     assertSentAddress(params?.nodeAddress, 'nodeAddress')
     assertIntRange(params?.hours, 'hours', 1, 720)
-    assertNumber(params.renewalPolicy, 'renewalPolicy', 0, 7)
+    // assertIntRange, not assertNumber: the policy lands in a protobuf int32,
+    // which would silently truncate a fractional value into a DIFFERENT policy.
+    assertIntRange(params.renewalPolicy, 'renewalPolicy', 0, 7)
 
     const [price, leaseParams] = await Promise.all([
       getNodeHourlyPrice(params.nodeAddress).catch(noteChainError),
@@ -4624,6 +4689,12 @@ export function registerIpcHandlers(): void {
     ])
     if (!price.hourlyPrice) {
       throw new Error('That node does not publish an hourly price in P2P, so it cannot be leased.')
+    }
+    // Enforced HERE, not just greyed out in the picker: escrow against an
+    // inactive node is money the hub's NodeInactivePreHook takes straight back
+    // by ending the lease. sentinel.types.v1.Status: 1 = active.
+    if (price.status !== 1) {
+      throw new Error('That node is not active on chain right now, so a lease on it would end immediately. Nothing was escrowed.')
     }
     assertValidLeaseHours(params.hours, leaseParams.minHours, leaseParams.maxHours)
     await assertSufficientFunds(leaseDepositNumber(price.hourlyPrice, params.hours))
@@ -4657,12 +4728,7 @@ export function registerIpcHandlers(): void {
     if (!/^\d+$/.test(params.leaseId)) throw new Error('Invalid leaseId')
     assertIntRange(params?.hours, 'hours', 1, 720)
 
-    // The lease is read from the provider's own list rather than trusted from the
-    // renderer: it carries the node address, the stored price the policy compares
-    // against, and implicitly the ownership check.
-    const leases = await listLeasesForProvider(toProviderAddress(address)).catch(noteChainError)
-    const lease = leases.find((l) => l.id === params.leaseId)
-    if (!lease) throw new Error('That lease is no longer on chain. Reopen the Provider tab to see the current state.')
+    const lease = await assertOwnLease(address, params.leaseId)
 
     const [price, leaseParams] = await Promise.all([
       getNodeHourlyPrice(lease.nodeAddress).catch(noteChainError),
@@ -4695,7 +4761,9 @@ export function registerIpcHandlers(): void {
     const { wallet, address } = requireProviderContext()
     assertString(params?.leaseId, 'leaseId')
     if (!/^\d+$/.test(params.leaseId)) throw new Error('Invalid leaseId')
-    assertNumber(params?.renewalPolicy, 'renewalPolicy', 0, 7)
+    // assertIntRange: a fractional policy would truncate in the protobuf int32.
+    assertIntRange(params?.renewalPolicy, 'renewalPolicy', 0, 7)
+    await assertOwnLease(address, params.leaseId)
     await assertSufficientFunds(0)
     await updateLease({
       wallet,
@@ -4709,8 +4777,15 @@ export function registerIpcHandlers(): void {
     const { wallet, address } = requireProviderContext()
     assertString(params?.leaseId, 'leaseId')
     if (!/^\d+$/.test(params.leaseId)) throw new Error('Invalid leaseId')
+    await assertOwnLease(address, params.leaseId)
     await assertSufficientFunds(0)
-    await endLease({ wallet, accountAddress: address, leaseId: params.leaseId }).catch(noteChainError)
+    try {
+      await endLease({ wallet, accountAddress: address, leaseId: params.leaseId }).catch(noteChainError)
+    } finally {
+      // Ending a lease unlinks its node from EVERY plan it served (the hub's
+      // LeaseInactivePreHook), so the per-plan node caches are all suspect.
+      invalidateAllPlanNodes()
+    }
   })
 
   // Register V2Ray unexpected exit handler for auto-reconnect

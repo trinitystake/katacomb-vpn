@@ -553,29 +553,15 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 {/* Provider mode — reveals the Provider tab for the ACTIVE wallet.
                     Once that wallet has a provider registered on chain the tab
                     appears regardless of this toggle. */}
-                <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
-                  <div>
-                    <span className="text-text-primary text-sm">Provider Mode: this wallet</span>
-                    <p className="text-text-tertiary text-xs mt-0.5">
-                      Show the Provider tab, where you can register as a provider, publish plans and lease nodes.
-                      Applies to the selected wallet only. Turning it off only hides the tab: your provider,
-                      plans and leases carry on exactly as they are on chain.
-                    </p>
-                  </div>
-                  {/* The EFFECTIVE state, not the stored flag. providerMode is tri-state:
-                      left unset, a provider found on chain reveals the tab on its own, and
-                      a toggle reading "off" beside a visible tab is just wrong. Flipping it
-                      writes an explicit true/false either way, which then wins outright. */}
-                  <Toggle
-                    checked={providerTabVisible}
-                    disabled={!activeWalletId}
-                    onChange={async (checked) => {
-                      await window.api.providerModeSet(checked)
-                      await load()
-                      onWalletsChanged?.()
-                    }}
-                  />
-                </div>
+                <ProviderModeRow
+                  visible={providerTabVisible}
+                  disabled={!activeWalletId}
+                  onToggle={async (checked) => {
+                    await window.api.providerModeSet(checked)
+                    await load()
+                    onWalletsChanged?.()
+                  }}
+                />
               </div>
 
               {/* DNS Resolver */}
@@ -1316,6 +1302,53 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * The Provider Mode toggle with its own busy and error state: the IPC write can
+ * fail (no active wallet resolved, disk error), and a bare Toggle swallowed the
+ * rejection so the switch just snapped back with no explanation.
+ */
+function ProviderModeRow({ visible, disabled, onToggle }: {
+  /** The EFFECTIVE state, not the stored flag. providerMode is tri-state:
+      left unset, a provider found on chain reveals the tab on its own, and
+      a toggle reading "off" beside a visible tab is just wrong. Flipping it
+      writes an explicit true/false either way, which then wins outright. */
+  visible: boolean
+  disabled: boolean
+  onToggle: (checked: boolean) => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  return (
+    <div className="flex items-center justify-between py-3 px-4 border border-border bg-bg-tertiary rounded-md">
+      <div>
+        <span className="text-text-primary text-sm">Provider Mode: this wallet</span>
+        <p className="text-text-tertiary text-xs mt-0.5">
+          Show the Provider tab, where you can register as a provider, publish plans and lease nodes.
+          Applies to the selected wallet only. Turning it off only hides the tab: your provider,
+          plans and leases carry on exactly as they are on chain.
+        </p>
+        {error && <p className="text-danger text-xs mt-1">{error}</p>}
+      </div>
+      <Toggle
+        checked={visible}
+        disabled={disabled || busy}
+        onChange={async (checked) => {
+          setBusy(true)
+          setError(null)
+          try {
+            await onToggle(checked)
+          } catch (e) {
+            setError(e instanceof Error ? e.message : 'Could not save the setting')
+          } finally {
+            setBusy(false)
+          }
+        }}
+      />
     </div>
   )
 }

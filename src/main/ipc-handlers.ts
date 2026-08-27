@@ -48,12 +48,10 @@ import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideRec
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, invalidateAllPlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
 import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plan-connect'
 import {
-  getMyProvider,
   getProviderDeposit,
+  getProviderOverview,
   getNodeHourlyPrice,
   getPlanSubscriberStats,
-  getProviderEconomics,
-  listMyPlans,
   registerProvider,
   updateProviderDetails,
   setProviderStatus,
@@ -66,6 +64,7 @@ import {
   unlinkNode,
   startLease,
   endLease,
+  type ProviderOverview,
 } from './provider-console'
 import { listLeasesForProvider, getLeaseParams } from './lease-query'
 import { getTokenPrice } from './price-service'
@@ -283,6 +282,12 @@ function toCachedNodeMeta(nodes: unknown[]): CachedNodeMeta[] {
 // Last successful PLAN_OVERVIEW chain read, served with stale: true while the
 // tunnel is up. Wallet-scoped, so WALLET_SWITCH clears it.
 let lastPlanOverview: PlanOverview | null = null
+
+// Its provider-side sibling: the last successful PROVIDER_OVERVIEW read, served
+// stale while the tunnel is up so the Provider tab stays readable when the chain
+// is unreachable through it. Tagged with the address it was read for — serving
+// another wallet's provider would be worse than serving nothing.
+let lastProviderOverview: { address: string; data: ProviderOverview; fetchedAt: number } | null = null
 
 /**
  * Everything a session row carries that the chain itself doesn't: the node's name,
@@ -2615,8 +2620,10 @@ export function registerIpcHandlers(): void {
     assertString(walletId, 'walletId')
     const address = await switchWallet(walletId)
     // The plan overview's chain half is wallet-scoped: a stale answer must
-    // never show the previous wallet's subscriptions.
+    // never show the previous wallet's subscriptions. Same for the provider
+    // overview (it is address-tagged as well, so this is belt and braces).
     lastPlanOverview = null
+    lastProviderOverview = null
     return { address }
   })
 
@@ -4395,11 +4402,39 @@ export function registerIpcHandlers(): void {
     return lease
   }
 
-  handle(IPC.PROVIDER_ME, async () => {
+  /**
+   * Everything the Provider tab renders, in one round-trip: provider record,
+   * plans, leases and economics, plus `stale` and `fetchedAt`.
+   *
+   * While the tunnel is up (or the live read fails) it serves the last good
+   * answer marked `stale: true` — the PLAN_OVERVIEW pattern — so the tab stays
+   * readable while mutations are refused by requireProviderContext. `null` means
+   * there is nothing safe to show (no cache for THIS address): the renderer must
+   * keep whatever it already has rather than treat it as "no provider".
+   */
+  handle(IPC.PROVIDER_OVERVIEW, async () => {
     const address = getAddress()
     if (!address) throw new Error('Wallet not loaded')
-    if (isVpnActive()) return null
-    return await getMyProvider(address).catch(noteChainError)
+    const cachedForActive = () =>
+      lastProviderOverview && lastProviderOverview.address === address
+        ? { ...lastProviderOverview.data, fetchedAt: lastProviderOverview.fetchedAt, stale: true }
+        : null
+    if (isVpnActive()) return cachedForActive()
+    try {
+      const data = await getProviderOverview(address)
+      const fetchedAt = Date.now()
+      lastProviderOverview = { address, data, fetchedAt }
+      return { ...data, fetchedAt, stale: false }
+    } catch (err) {
+      const cached = cachedForActive()
+      // noteChainError classifies and reports the connectivity case itself, so
+      // only the serve-from-cache path reports here (and only for connectivity —
+      // a decode error must not accuse the endpoint).
+      if (!cached) return noteChainError(err)
+      const message = err instanceof Error ? err.message : String(err)
+      if (isRpcConnectivityError(message)) reportRpcFailure()
+      return cached
+    }
   })
 
   // Reveals the Provider tab for the ACTIVE wallet only. Read back off the wallet
@@ -4479,13 +4514,6 @@ export function registerIpcHandlers(): void {
       // unlinked from every plan, so single-plan invalidation can't follow it.
       if (!params.active) invalidateAllPlanNodes()
     }
-  })
-
-  handle(IPC.PROVIDER_PLANS, async () => {
-    const address = getAddress()
-    if (!address) throw new Error('Wallet not loaded')
-    if (isVpnActive()) return []
-    return await listMyPlans(address).catch(noteChainError)
   })
 
   handle(IPC.PROVIDER_PLAN_CREATE, async (_event, params: { gigabytes: number; days: number; priceUdvpn: number; private: boolean }) => {
@@ -4616,34 +4644,12 @@ export function registerIpcHandlers(): void {
     return out
   })
 
-  /**
-   * Lease burn, escrow and estimated plan income in one read, for the console's
-   * economics strip and the break-even line on the plan form.
-   *
-   * Not best-effort like PROVIDER_PLAN_STATS: money figures either add up or they
-   * don't, so a partial read throws and the strip renders "unavailable" rather than
-   * a total silently missing a plan's income or a node's burn.
-   */
-  handle(IPC.PROVIDER_ECONOMICS, async () => {
-    const address = getAddress()
-    if (!address) throw new Error('Wallet not loaded')
-    if (isVpnActive()) return null
-    return await getProviderEconomics(address).catch(noteChainError)
-  })
-
   /** Display-only USD rate. Null when it can't be reached — the UI just omits it. */
   handle(IPC.PRICE_TOKEN, async () => {
     return await getTokenPrice()
   })
 
   // --- Leases ---
-
-  handle(IPC.LEASE_LIST, async () => {
-    const address = getAddress()
-    if (!address) throw new Error('Wallet not loaded')
-    if (isVpnActive()) return []
-    return await listLeasesForProvider(toProviderAddress(address)).catch(noteChainError)
-  })
 
   handle(IPC.LEASE_PARAMS, async () => {
     if (isVpnActive()) return null

@@ -50,10 +50,11 @@ test('renewalPolicyRefusal explains policy 0 as a dead end, not a price problem'
   assert.match(String(why), /renewal policy/)
 })
 
-test('renewalPolicyRefusal names both prices when a comparison failed', () => {
-  const why = renewalPolicyRefusal(1, '200', '100')
-  assert.match(String(why), /200/)
-  assert.match(String(why), /100/)
+test('renewalPolicyRefusal names both prices, in P2P rather than raw udvpn', () => {
+  const why = renewalPolicyRefusal(1, '2000000', '1000000')
+  assert.match(String(why), /2 P2P/)
+  assert.match(String(why), /1 P2P/)
+  assert.doesNotMatch(String(why), /udvpn/)
 })
 
 test('renewalPolicyRefusal is null exactly when the chain would accept', () => {

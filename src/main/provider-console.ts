@@ -30,7 +30,7 @@ import {
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
 import { withProtobufQuery } from './protobuf-query'
-import { listLeasesForProvider, getLeaseParams } from './lease-query'
+import { listLeasesForProvider, getLeaseParams, type LeaseInfo } from './lease-query'
 import {
   computeBurn,
   computeCommitted,
@@ -464,6 +464,41 @@ async function readEconomics(accountAddress: string, provAddress: string, q: Cha
     subscriptions,
     subscriptionStakingShare: share,
     leaseStakingShare: leaseParams.stakingShare,
+  }
+}
+
+export interface ProviderOverview {
+  provider: MyProviderInfo
+  plans: MyPlanInfo[]
+  leases: LeaseInfo[]
+  /** null when the economics half failed; the strip shows "unavailable". */
+  economics: ProviderEconomics | null
+}
+
+/**
+ * Everything the Provider tab renders, in one read over one connection — the
+ * provider-side sibling of getPlanOverview. Provider, plans and leases are
+ * required (any failure fails the whole read, so a cached answer can be served
+ * instead of a partial one); economics stays best-effort, preserving its
+ * independent "unavailable" rendering.
+ */
+export async function getProviderOverview(accountAddress: string): Promise<ProviderOverview> {
+  const q = await openChainQuery()
+  try {
+    const provider = await getMyProvider(accountAddress, q.query)
+    if (!provider.registered) {
+      // Genuinely empty, not unknown: an unregistered provider cannot own plans
+      // or leases, so nothing else is worth a query.
+      return { provider, plans: [], leases: [], economics: null }
+    }
+    const [plans, leases] = await Promise.all([
+      listMyPlans(accountAddress, q.query),
+      listLeasesForProvider(provider.address, q.protobufRpc),
+    ])
+    const economics = await getProviderEconomics(accountAddress, q).catch(() => null)
+    return { provider, plans, leases, economics }
+  } finally {
+    q.disconnect()
   }
 }
 

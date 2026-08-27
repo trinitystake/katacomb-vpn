@@ -80,27 +80,26 @@ export const IPC = {
   PROVIDER_GET: 'provider:get',
   PROVIDER_LIST: 'provider:list',
 
-  // Provider console — acting AS a provider with this wallet
-  PROVIDER_ME: 'provider:me',
+  // Provider console — acting AS a provider with this wallet.
+  // PROVIDER_OVERVIEW superseded PROVIDER_ME / PROVIDER_PLANS / LEASE_LIST /
+  // PROVIDER_ECONOMICS (one read, one connection, one stale-cache home).
+  PROVIDER_OVERVIEW: 'provider:overview',
   PROVIDER_MODE_SET: 'provider:mode-set',
   PROVIDER_DEPOSIT: 'provider:deposit',
   PROVIDER_REGISTER: 'provider:register',
   PROVIDER_UPDATE_DETAILS: 'provider:update-details',
   PROVIDER_SET_STATUS: 'provider:set-status',
-  PROVIDER_PLANS: 'provider:plans',
   PROVIDER_PLAN_CREATE: 'provider:plan-create',
   PROVIDER_PLAN_SET_STATUS: 'provider:plan-set-status',
   PROVIDER_PLAN_SET_PRIVATE: 'provider:plan-set-private',
   PROVIDER_PLAN_LINK: 'provider:plan-link',
   PROVIDER_PLAN_UNLINK: 'provider:plan-unlink',
   PROVIDER_PLAN_STATS: 'provider:plan-stats',
-  PROVIDER_ECONOMICS: 'provider:economics',
 
   // Token price in USD (display only — never used to price a transaction)
   PRICE_TOKEN: 'price:token',
 
   // Leases (x/lease — the prerequisite for linking a node to a plan)
-  LEASE_LIST: 'lease:list',
   LEASE_PARAMS: 'lease:params',
   LEASE_QUOTE: 'lease:quote',
   LEASE_START: 'lease:start',

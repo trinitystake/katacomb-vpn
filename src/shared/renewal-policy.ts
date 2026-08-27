@@ -74,11 +74,23 @@ export function renewalPolicyAllows(policy: number, currentQuoteValue: string, s
 }
 
 /**
+ * A udvpn integer string as the P2P figure the rest of the UI speaks in.
+ * Inlined (this module imports nothing, for the native test runner); the
+ * renderer's formatUdvpn agrees on the arithmetic.
+ */
+function asP2p(udvpn: string): string {
+  const n = Number(udvpn)
+  if (!isFinite(n)) return `${udvpn} udvpn`
+  return `${(n / 1e6).toLocaleString('en-US', { maximumFractionDigits: 6 })} P2P`
+}
+
+/**
  * Why the chain would refuse to renew this lease, or null when it would accept.
  *
  * Phrased for a user rather than naming the enum, because the enum name is not
  * the useful part: what they need to know is which price comparison failed and
- * that policy 0 is a dead end until the policy itself is changed.
+ * that policy 0 is a dead end until the policy itself is changed. Prices are
+ * stated in P2P, the unit every other figure on the tab uses.
  */
 export function renewalPolicyRefusal(policy: number, currentQuoteValue: string, storedQuoteValue: string): string | null {
   if (renewalPolicyAllows(policy, currentQuoteValue, storedQuoteValue)) return null
@@ -89,7 +101,7 @@ export function renewalPolicyRefusal(policy: number, currentQuoteValue: string, 
     return 'The node does not publish a comparable hourly price, so the renewal policy cannot be checked.'
   }
   return (
-    `The node now charges ${currentQuoteValue} udvpn an hour against the ${storedQuoteValue} this lease was bought at, ` +
+    `The node now charges ${asP2p(currentQuoteValue)} an hour against the ${asP2p(storedQuoteValue)} this lease was bought at, ` +
     `which its renewal policy ("${renewalPolicyLabel(policy)}") does not allow. Change the policy or end the lease and buy a new one.`
   )
 }

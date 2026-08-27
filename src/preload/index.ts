@@ -160,13 +160,12 @@ contextBridge.exposeInMainWorld('api', {
   providerList: () => ipcRenderer.invoke(IPC.PROVIDER_LIST),
 
   // Provider console
-  providerMe: () => ipcRenderer.invoke(IPC.PROVIDER_ME),
+  providerOverview: () => ipcRenderer.invoke(IPC.PROVIDER_OVERVIEW),
   providerModeSet: (enabled: boolean) => ipcRenderer.invoke(IPC.PROVIDER_MODE_SET, enabled),
   providerDeposit: () => ipcRenderer.invoke(IPC.PROVIDER_DEPOSIT),
   providerRegister: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_REGISTER, params),
   providerUpdateDetails: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_UPDATE_DETAILS, params),
   providerSetStatus: (active: boolean) => ipcRenderer.invoke(IPC.PROVIDER_SET_STATUS, { active }),
-  providerPlans: () => ipcRenderer.invoke(IPC.PROVIDER_PLANS),
   providerPlanCreate: (params: unknown) => ipcRenderer.invoke(IPC.PROVIDER_PLAN_CREATE, params),
   providerPlanSetStatus: (planId: string, active: boolean) =>
     ipcRenderer.invoke(IPC.PROVIDER_PLAN_SET_STATUS, { planId, active }),
@@ -177,11 +176,9 @@ contextBridge.exposeInMainWorld('api', {
   providerPlanUnlink: (planId: string, nodeAddress: string) =>
     ipcRenderer.invoke(IPC.PROVIDER_PLAN_UNLINK, { planId, nodeAddress }),
   providerPlanStats: (planIds: string[]) => ipcRenderer.invoke(IPC.PROVIDER_PLAN_STATS, { planIds }),
-  providerEconomics: () => ipcRenderer.invoke(IPC.PROVIDER_ECONOMICS),
 
   priceToken: () => ipcRenderer.invoke(IPC.PRICE_TOKEN),
 
-  leaseList: () => ipcRenderer.invoke(IPC.LEASE_LIST),
   leaseParams: () => ipcRenderer.invoke(IPC.LEASE_PARAMS),
   leaseQuote: (nodeAddress: string, hours: number) => ipcRenderer.invoke(IPC.LEASE_QUOTE, { nodeAddress, hours }),
   leaseStart: (params: unknown) => ipcRenderer.invoke(IPC.LEASE_START, params),

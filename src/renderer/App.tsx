@@ -227,14 +227,14 @@ function AppInner() {
   const chainDraftCount = (chainEntry ? 1 : 0) + (chainExit ? 1 : 0)
   const reconnect = useReconnect()
   // One instance for the whole app: it decides whether the tab exists AND feeds the
-  // console, so a refresh from inside the console also updates the tab. Skipped
-  // while the tunnel is up — the chain isn't reachable through it.
+  // console, so a refresh from inside the console also updates the tab. While
+  // the tunnel is up the read swaps to main's cached answer marked stale.
   // Provider mode is per-wallet, so it comes off the active entry rather than app
   // settings — a newly imported seed must not inherit the previous wallet's tab.
   const activeWallet = wallet.store?.wallets.find((w) => w.id === wallet.store?.activeWalletId)
   // NOT Boolean(): undefined has to survive, it is what lets a provider found on
   // chain reveal the tab while still letting an explicit `false` hide it again.
-  const providerState = useProvider(wallet.address, !isConnected, activeWallet?.providerMode)
+  const providerState = useProvider(wallet.address, isConnected, activeWallet?.providerMode)
   const providerVisible = providerState.visible
   const mainTabs: MainTab[] = providerVisible
     ? ['map', 'nodes', 'multihop', 'plans', 'sessions', 'provider']

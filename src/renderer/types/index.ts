@@ -469,6 +469,22 @@ export interface LeaseSummary {
   startAt: string | null
 }
 
+/**
+ * Everything the Provider tab renders, in one read. `stale: true` means the
+ * chain was unreachable (our own tunnel, usually) and this is main's memory of
+ * the last good read — show it read-only. A `null` overview means main has
+ * nothing safe to show for this wallet; keep whatever is already on screen.
+ */
+export interface ProviderOverview {
+  provider: MyProvider
+  plans: MyPlan[]
+  leases: LeaseSummary[]
+  /** null when the economics half of the read failed — render "unavailable". */
+  economics: ProviderEconomics | null
+  fetchedAt: number
+  stale: boolean
+}
+
 export interface LeaseQuote {
   hourlyPrice: string
   totalUdvpn: string
@@ -621,17 +637,16 @@ export interface ElectronAPI {
   providerList: () => Promise<ProviderInfo[]>
 
   /**
-   * Provider console. Every one of these needs the chain live: main returns null/[]
-   * rather than stale data while the VPN tunnel is up, and the writes throw.
+   * Provider console. The overview read serves main's cache marked stale while
+   * the VPN tunnel is up; every write still needs the chain live and throws.
    */
-  providerMe: () => Promise<MyProvider | null>
+  providerOverview: () => Promise<ProviderOverview | null>
   /** Sets provider mode on the ACTIVE wallet; read it back off the wallet entry. */
   providerModeSet: (enabled: boolean) => Promise<void>
   providerDeposit: () => Promise<{ denom: string; amount: string } | null>
   providerRegister: (params: ProviderDetailsInput) => Promise<void>
   providerUpdateDetails: (params: ProviderDetailsInput) => Promise<void>
   providerSetStatus: (active: boolean) => Promise<void>
-  providerPlans: () => Promise<MyPlan[]>
   providerPlanCreate: (params: {
     gigabytes: number
     days: number
@@ -642,15 +657,11 @@ export interface ElectronAPI {
   providerPlanSetPrivate: (planId: string, isPrivate: boolean) => Promise<void>
   providerPlanLink: (planId: string, nodeAddress: string) => Promise<void>
   providerPlanUnlink: (planId: string, nodeAddress: string) => Promise<void>
-  /** Keyed by plan id; a plan the chain couldn't answer for is simply absent. */
-  providerPlanStats: (planIds: string[]) => Promise<Record<string, PlanStats>>
-  /** Null while the VPN is up — chain reads don't survive the tunnel. */
-  providerEconomics: () => Promise<ProviderEconomics | null>
+  /** Keyed by plan id, an entry per requested id; null = that plan could not be read. */
+  providerPlanStats: (planIds: string[]) => Promise<Record<string, PlanStats | null>>
 
   /** USD per P2P, for display next to prices. Null when unavailable. */
   priceToken: () => Promise<TokenPrice | null>
-
-  leaseList: () => Promise<LeaseSummary[]>
   leaseParams: () => Promise<{ minHours: number; maxHours: number } | null>
   leaseQuote: (nodeAddress: string, hours: number) => Promise<LeaseQuote>
   leaseStart: (params: { nodeAddress: string; hours: number; renewalPolicy: number }) => Promise<void>

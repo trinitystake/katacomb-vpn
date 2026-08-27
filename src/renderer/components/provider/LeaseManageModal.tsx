@@ -191,7 +191,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
           </div>
           <p className="text-text-tertiary text-[11px]">
             This replaces the term rather than adding to it: the chain refunds the unspent escrow and
-            charges for the full new stretch.
+            charges for the full new stretch. The field starts at the length you originally bought.
           </p>
         </div>
 

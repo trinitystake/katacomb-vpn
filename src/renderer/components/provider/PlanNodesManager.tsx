@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNodesContext } from '../../contexts/NodesContext'
 import type { LeaseSummary, MyPlan, ProviderEconomics, SentNode, TokenPrice } from '../../types'
 import { displayConnectError } from '../../utils/connect-errors'
@@ -20,18 +20,24 @@ import LeaseManageModal from './LeaseManageModal'
  * that is leased but not linked gets its own group with a Link button, which is
  * also what the user comes back to if the app is closed between the two.
  */
-export default function PlanNodesManager({ plan, leases, price, economics, providerActive, onChanged }: {
+export default function PlanNodesManager({ plan, leases, price, economics, providerActive, readOnly, onChanged }: {
   plan: MyPlan
   leases: LeaseSummary[]
   price: TokenPrice | null
   economics: ProviderEconomics | null
   /** The chain refuses MsgStartLease under an inactive provider, so the picker is gated on it. */
   providerActive: boolean
+  /** Cached data, chain unreachable: every mutation is disabled. */
+  readOnly: boolean
   /** Resolves once the chain has been re-read, so a caller can hold its busy state until then. */
   onChanged: () => Promise<void>
 }) {
-  const { allNodes } = useNodesContext()
+  const { allNodes, loading: nodesLoading, error: nodesError } = useNodesContext()
   const [linked, setLinked] = useState<string[] | null>(null)
+  // A failed read is NOT an empty list: rendering it as "No nodes yet" states
+  // something about the plan that nobody verified. The consumer-side pane
+  // (PlanDetailPane) draws the same line.
+  const [linkedUnknown, setLinkedUnknown] = useState(false)
   const [managingLease, setManagingLease] = useState<LeaseSummary | null>(null)
   const [busyAddress, setBusyAddress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -42,13 +48,19 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
 
   const loadLinked = useCallback(async () => {
     setLinked(null)
+    setLinkedUnknown(false)
     try {
       const addrs = await window.api.planNodes(plan.id)
-      // null = main could not read the list; same fallback this catch already
-      // chose for failures (the console's mutations fail on their own anyway).
-      setLinked(addrs ?? [])
+      if (addrs === null) {
+        // main could not know (cache miss while the chain is unreachable).
+        setLinked([])
+        setLinkedUnknown(true)
+      } else {
+        setLinked(addrs)
+      }
     } catch {
       setLinked([])
+      setLinkedUnknown(true)
     }
   }, [plan.id])
 
@@ -89,12 +101,21 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
   }
 
   async function handleLink(address: string) {
+    if (!(await requestConfirm({
+      title: `Link this node to plan #${plan.id}?`,
+      body: [
+        'Subscribers to the plan can connect through it. You already hold the lease, so this costs the network fee only.',
+        'This is an on-chain transaction.',
+      ],
+      confirmLabel: 'Link',
+    }))) return
     await run(address, () => window.api.providerPlanLink(plan.id, address))
   }
 
   const leaseByNode = useMemo(() => new Map(leases.map((l) => [l.nodeAddress, l])), [leases])
 
   const leasedAddresses = useMemo(() => new Set(leases.map((l) => l.nodeAddress)), [leases])
+  const pickerDisabled = !providerActive || readOnly
 
   return (
     <div className="h-full flex flex-col min-h-0">
@@ -104,14 +125,28 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
         </span>
       </div>
 
-      {error && <p className="text-danger text-xs px-5 pt-3">{displayConnectError(error)}</p>}
+      {error && (
+        <div className="mx-5 mt-3 bg-danger-subtle border border-danger rounded-md px-3 py-2">
+          <p className="text-danger text-xs">{displayConnectError(error)}</p>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto px-5 py-3 space-y-5">
-        <Section title={`Linked (${linkedSet.size})`}>
+        <Section title={linkedUnknown ? 'Linked' : `Linked (${linkedSet.size})`}>
           {linked === null && (
             <span className="text-text-tertiary text-xs flex items-center gap-2"><Spinner /> Loading…</span>
           )}
-          {linked !== null && linkedSet.size === 0 && (
+          {linkedUnknown && (
+            <span className="flex items-center gap-2">
+              <p className="text-warning text-xs">Could not read the plan&apos;s node list right now.</p>
+              {!readOnly && (
+                <button type="button" onClick={() => void loadLinked()} className="text-warning text-[11px] hover:underline">
+                  Retry
+                </button>
+              )}
+            </span>
+          )}
+          {linked !== null && !linkedUnknown && linkedSet.size === 0 && (
             <p className="text-text-tertiary text-xs">
               No nodes yet. Add one below. Subscribers to this plan have nothing to connect to until you do.
             </p>
@@ -124,6 +159,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
                 address={address}
                 node={nodeIndex.get(address)}
                 busy={busyAddress === address}
+                disabled={readOnly}
                 note={lease ? leaseNote(lease) : undefined}
                 action={{ label: 'Unlink', busyLabel: 'Unlinking…', kind: 'danger', onClick: () => handleUnlink(address) }}
                 secondaryAction={lease ? { label: 'Lease', onClick: () => setManagingLease(lease) } : undefined}
@@ -143,6 +179,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
                 address={lease.nodeAddress}
                 node={nodeIndex.get(lease.nodeAddress)}
                 busy={busyAddress === lease.nodeAddress}
+                disabled={readOnly}
                 note={leaseNote(lease)}
                 action={{ label: 'Link', busyLabel: 'Linking…', kind: 'primary', onClick: () => handleLink(lease.nodeAddress) }}
                 secondaryAction={{ label: 'Lease', onClick: () => setManagingLease(lease) }}
@@ -152,17 +189,20 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
         )}
 
         <Section title="Add a node">
-          {!providerActive && (
-            <p className="text-warning text-xs">
-              Activate your provider first. Leasing a node is a chain transaction that is rejected while
-              the provider is inactive.
-            </p>
-          )}
           <NodePicker
             nodes={allNodes}
+            nodesLoading={nodesLoading}
+            nodesError={nodesError}
             excluded={leasedAddresses}
             price={price}
-            disabled={!providerActive}
+            disabled={pickerDisabled}
+            disabledReason={
+              readOnly
+                ? 'The chain is not reachable while the VPN is connected'
+                : !providerActive
+                  ? 'Activate your provider first'
+                  : undefined
+            }
             onPick={setLeasingNode}
           />
         </Section>
@@ -213,10 +253,12 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function NodeRow({ address, node, busy, note, action, secondaryAction }: {
+function NodeRow({ address, node, busy, disabled, note, action, secondaryAction }: {
   address: string
   node: SentNode | undefined
   busy: boolean
+  /** Read-only mode: the buttons render but refuse. */
+  disabled?: boolean
   note?: string
   /** `busyLabel` is spelled out rather than derived: "End lease" + "ing" is not a word. */
   action: { label: string; busyLabel: string; kind: 'primary' | 'danger'; onClick: () => void }
@@ -241,8 +283,8 @@ function NodeRow({ address, node, busy, note, action, secondaryAction }: {
         <button
           type="button"
           onClick={secondaryAction.onClick}
-          disabled={busy}
-          className="btn btn-secondary text-xs py-1 px-2.5 shrink-0 disabled:opacity-40"
+          disabled={busy || disabled}
+          className="btn btn-secondary text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {secondaryAction.label}
         </button>
@@ -250,8 +292,8 @@ function NodeRow({ address, node, busy, note, action, secondaryAction }: {
       <button
         type="button"
         onClick={action.onClick}
-        disabled={busy}
-        className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 inline-flex items-center justify-center gap-1.5 min-w-[104px] ${
+        disabled={busy || disabled}
+        className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 min-w-[104px] ${
           action.kind === 'danger' ? 'btn-danger' : 'btn-primary'
         }`}
       >
@@ -265,16 +307,19 @@ function NodeRow({ address, node, busy, note, action, secondaryAction }: {
 const PICKER_LIMIT = 25
 
 /** Only nodes that publish an hourly price can be leased, so the rest are never offered. */
-function NodePicker({ nodes, excluded, price, disabled, onPick }: {
+function NodePicker({ nodes, nodesLoading, nodesError, excluded, price, disabled, disabledReason, onPick }: {
   nodes: SentNode[]
+  nodesLoading: boolean
+  nodesError: string | null
   excluded: Set<string>
   price: TokenPrice | null
   disabled?: boolean
+  disabledReason?: string
   onPick: (node: SentNode) => void
 }) {
   const [search, setSearch] = useState('')
 
-  const matches = useMemo(() => {
+  const { matches, matchTotal } = useMemo(() => {
     const q = search.trim().toLowerCase()
     const leasable = nodes.filter(
       (n) => !excluded.has(n.address) && n.isActive && n.hourlyPrices.some((p) => p.denom === 'udvpn'),
@@ -289,11 +334,15 @@ function NodePicker({ nodes, excluded, price, disabled, onPick }: {
         )
       : leasable
     const hourlyOf = (n: SentNode) => Number(n.hourlyPrices.find((p) => p.denom === 'udvpn')?.value ?? Infinity)
-    return [...filtered].sort((a, b) => hourlyOf(a) - hourlyOf(b)).slice(0, PICKER_LIMIT)
+    return {
+      matches: [...filtered].sort((a, b) => hourlyOf(a) - hourlyOf(b)).slice(0, PICKER_LIMIT),
+      matchTotal: filtered.length,
+    }
   }, [nodes, excluded, search])
 
   return (
     <div className="space-y-1.5">
+      {disabledReason && <p className="text-warning text-xs">{disabledReason}</p>}
       <input
         type="text"
         value={search}
@@ -301,7 +350,15 @@ function NodePicker({ nodes, excluded, price, disabled, onPick }: {
         placeholder="Search nodes by name, country, city or address…"
         className="w-full bg-bg-tertiary border border-border text-text-primary text-xs px-2.5 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
       />
-      {matches.length === 0 && (
+      {/* The node list has its own lifecycle: an empty result while it is still
+          loading (or failed to load) says nothing about leasable nodes. */}
+      {matches.length === 0 && nodesLoading && (
+        <span className="text-text-tertiary text-xs flex items-center gap-2"><Spinner /> Loading the node list…</span>
+      )}
+      {matches.length === 0 && !nodesLoading && nodesError && nodes.length === 0 && (
+        <p className="text-warning text-xs">The node list could not be loaded, so there is nothing to pick from yet.</p>
+      )}
+      {matches.length === 0 && !nodesLoading && !(nodesError && nodes.length === 0) && (
         <p className="text-text-tertiary text-xs">
           No leasable nodes match. A node must be active and publish an hourly price in P2P.
         </p>
@@ -330,13 +387,19 @@ function NodePicker({ nodes, excluded, price, disabled, onPick }: {
               type="button"
               onClick={() => onPick(node)}
               disabled={disabled}
-              className="btn btn-primary text-xs py-1 px-2.5 shrink-0 disabled:opacity-40"
+              title={disabledReason}
+              className="btn btn-primary text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Lease &amp; link
             </button>
           </div>
         )
       })}
+      {matchTotal > PICKER_LIMIT && (
+        <p className="text-text-tertiary text-[11px]">
+          Showing the {PICKER_LIMIT} cheapest of {matchTotal.toLocaleString('en-US')} matches. Search to narrow the list.
+        </p>
+      )}
     </div>
   )
 }
@@ -362,6 +425,9 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'idle' | 'leasing' | 'linking'>('idle')
   const { requestConfirm, confirmDialog } = useConfirm()
+  // The default length is clamped into the chain's own bounds once the first
+  // quote reports them, but never over anything the user has typed.
+  const hoursTouched = useRef(false)
 
   const hourCount = Number(hours)
   const hoursValid = Number.isInteger(hourCount) && hourCount > 0
@@ -372,7 +438,14 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
     setQuoteError(null)
     window.api
       .leaseQuote(node.address, hourCount)
-      .then((q) => { if (!cancelled) setQuote(q) })
+      .then((q) => {
+        if (cancelled) return
+        setQuote(q)
+        if (!hoursTouched.current) {
+          const clamped = Math.min(Math.max(hourCount, q.minHours), q.maxHours)
+          if (clamped !== hourCount) setHours(String(clamped))
+        }
+      })
       .catch((e: unknown) => {
         if (!cancelled) setQuoteError(e instanceof Error ? e.message : 'Could not price this lease')
       })
@@ -426,14 +499,21 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-6" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={busy ? undefined : onClose}>
       <div
-        className="bg-bg-secondary border border-border rounded-lg w-full max-w-md p-5 space-y-4"
+        className="bg-bg-secondary border border-border w-full max-w-md mx-4 p-6 space-y-4 rounded-lg shadow-overlay"
         onClick={(e) => e.stopPropagation()}
       >
-        <div>
-          <h3 className="text-text-primary text-sm font-semibold">Lease &amp; link</h3>
-          <p className="text-text-secondary text-xs mt-1">{node.moniker || node.address}</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-text-primary text-base font-semibold">Lease &amp; link</h3>
+            <p className="text-text-secondary text-xs mt-1">{node.moniker || node.address}</p>
+          </div>
+          {!busy && (
+            <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-lg transition-colors">
+              ×
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -443,16 +523,21 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
               type="text"
               inputMode="numeric"
               value={hours}
-              onChange={(e) => setHours(e.target.value)}
-              className="mt-0.5 w-full bg-bg-tertiary border border-border text-text-primary text-xs px-2 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
+              disabled={busy}
+              onChange={(e) => {
+                hoursTouched.current = true
+                setHours(e.target.value)
+              }}
+              className="mt-0.5 w-full bg-bg-tertiary border border-border text-text-primary text-xs px-2 py-1.5 rounded-sm focus:outline-none focus:border-border-focus disabled:opacity-40"
             />
           </label>
           <label className="block">
             <span className="text-text-tertiary text-[10px] uppercase tracking-wide">Renewal</span>
             <select
               value={policy}
+              disabled={busy}
               onChange={(e) => setPolicy(parseInt(e.target.value, 10))}
-              className="mt-0.5 w-full bg-bg-tertiary border border-border text-text-primary text-xs px-2 py-1.5 rounded-sm focus:outline-none focus:border-border-focus"
+              className="mt-0.5 w-full bg-bg-tertiary border border-border text-text-primary text-xs px-2 py-1.5 rounded-sm focus:outline-none focus:border-border-focus disabled:opacity-40"
             >
               {RENEWAL_POLICY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -489,7 +574,7 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
             )}
             <div className="flex justify-between px-3 py-2">
               <dt className="text-text-secondary">Allowed length</dt>
-              <dd className="text-text-tertiary">{quote.minHours}–{quote.maxHours} hours</dd>
+              <dd className="text-text-tertiary">{quote.minHours} to {quote.maxHours} hours</dd>
             </div>
           </dl>
         )}
@@ -504,11 +589,19 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
           )}
         </p>
 
-        {quoteError && <p className="text-danger text-xs">{displayConnectError(quoteError)}</p>}
+        {quoteError && (
+          <div className="bg-danger-subtle border border-danger rounded-md px-3 py-2">
+            <p className="text-danger text-xs">{displayConnectError(quoteError)}</p>
+          </div>
+        )}
         {!withinBounds && quote && (
           <p className="text-warning text-xs">Length must be between {quote.minHours} and {quote.maxHours} hours.</p>
         )}
-        {error && <p className="text-danger text-xs">{displayConnectError(error)}</p>}
+        {error && (
+          <div className="bg-danger-subtle border border-danger rounded-md px-3 py-2">
+            <p className="text-danger text-xs">{displayConnectError(error)}</p>
+          </div>
+        )}
         {busy && (
           <p className="text-text-secondary text-xs flex items-center gap-2">
             <Spinner />
@@ -517,14 +610,19 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
         )}
 
         <div className="flex gap-2">
-          <button type="button" onClick={onClose} disabled={busy} className="btn btn-secondary text-xs py-2 flex-1 disabled:opacity-40">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="btn btn-secondary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
             Cancel
           </button>
           <button
             type="button"
             onClick={handleConfirm}
             disabled={busy || !quote || !withinBounds}
-            className="btn btn-primary text-xs py-2 flex-1 disabled:opacity-40"
+            className="btn btn-primary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy ? '…' : quote ? `Lease for ${formatUdvpn(quote.totalUdvpn)}` : 'Pricing…'}
           </button>

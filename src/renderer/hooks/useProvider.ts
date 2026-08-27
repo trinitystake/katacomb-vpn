@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LeaseSummary, MyPlan, MyProvider } from '../types'
+import type { LeaseSummary, MyPlan, MyProvider, ProviderEconomics, ProviderOverview } from '../types'
 
 /** What the fetch produced, tagged with the wallet it belongs to. */
 interface ProviderData {
   address: string
-  provider: MyProvider | null
-  plans: MyPlan[]
-  leases: LeaseSummary[]
+  /**
+   * null = main had nothing safe to show (tunnel up, no cache for this wallet).
+   * Recorded rather than ignored so `loading` can settle: the console renders
+   * its own "disconnect to manage" pane for it.
+   */
+  overview: ProviderOverview | null
 }
 
 export interface ProviderState {
   provider: MyProvider | null
   plans: MyPlan[]
   leases: LeaseSummary[]
+  economics: ProviderEconomics | null
+  /** True when the data is main's memory of the last good read (chain unreachable). */
+  stale: boolean
+  /** When the data was actually read from the chain. null before the first answer. */
+  fetchedAt: number | null
   loading: boolean
   error: string | null
   refresh: () => Promise<void>
@@ -20,11 +28,17 @@ export interface ProviderState {
 }
 
 /**
- * The provider console's data. Deliberately NOT polled: every field is read
- * straight from the chain, provider actions are rare and deliberate, and each one
- * calls `refresh()` itself — a background poll would only burn RPC calls. It IS
- * re-read whenever the wallet changes (a different seed is a different provider)
- * and when the tunnel drops.
+ * The provider console's data: one PROVIDER_OVERVIEW round-trip (provider record,
+ * plans, leases, economics, staleness). Deliberately NOT polled: provider actions
+ * are rare and deliberate, and each one calls `refresh()` itself — a background
+ * poll would only burn RPC calls. It IS re-read whenever the wallet changes (a
+ * different seed is a different provider) and when the tunnel state flips: on
+ * connect the re-read swaps to main's cached answer marked `stale` (the tab goes
+ * read-only rather than blank), on disconnect it swaps back to a live read.
+ *
+ * A `null` overview never clobbers data already shown — main only answers null
+ * when it has no cache for this wallet, so there is nothing newer to replace it
+ * with, and the tab must not vanish mid-session.
  *
  * `visible` drives whether the Provider tab exists at all, and `providerMode` is
  * deliberately TRI-STATE for it. Undefined means the user has never touched the
@@ -44,14 +58,10 @@ export interface ProviderState {
  * Everything is tagged with the address it was read for, so a wallet switch shows
  * nothing rather than the previous wallet's provider, and a slow response that
  * lands after the switch is discarded instead of overwriting the new wallet's.
- *
- * `enabled` is false while the tunnel is up — the chain isn't reachable through it
- * and the main-process reads answer `null`/`[]` by design. Skipping the read (and
- * keeping the last answer) is what stops the tab from vanishing mid-session.
  */
 export function useProvider(
   address: string | null,
-  enabled: boolean,
+  tunnelUp: boolean,
   /** undefined = never set, so the chain decides. true/false = the user decided. */
   providerMode: boolean | undefined,
 ): ProviderState {
@@ -65,18 +75,20 @@ export function useProvider(
   wanted.current = address
 
   const refresh = useCallback(async () => {
-    if (!address || !enabled) {
+    if (!address) {
       setLoading(false)
       return
     }
     setLoading(true)
     try {
-      const me = await window.api.providerMe()
-      const [plans, leases] = me?.registered
-        ? await Promise.all([window.api.providerPlans(), window.api.leaseList()])
-        : [[], []]
+      const overview = await window.api.providerOverview()
       if (wanted.current !== address) return
-      setData({ address, provider: me, plans, leases })
+      setData((prev) => {
+        // Keep what is on screen when main has nothing newer: a null answer only
+        // happens with the tunnel up and no cache, never after a good read.
+        if (!overview && prev?.address === address && prev.overview) return prev
+        return { address, overview }
+      })
       setFailure(null)
     } catch (e) {
       if (wanted.current !== address) return
@@ -84,24 +96,30 @@ export function useProvider(
     } finally {
       if (wanted.current === address) setLoading(false)
     }
-  }, [address, enabled])
+    // tunnelUp is a real dependency: its flip is what swaps the tab between the
+    // live answer and main's stale cache.
+  }, [address, tunnelUp])
 
   useEffect(() => {
     void refresh()
   }, [refresh])
 
   const current = data?.address === address ? data : null
-  const provider = current?.provider ?? null
+  const overview = current?.overview ?? null
+  const provider = overview?.provider ?? null
   const error = failure?.address === address ? failure.message : null
   // Between the render that brings a new address and the effect that fetches for
   // it there is neither data nor an error — report that as loading, or the console
   // flashes its "could not read your provider" branch on every wallet switch.
-  const pending = Boolean(address) && enabled && !current && !error
+  const pending = Boolean(address) && !current && !error
 
   return {
     provider,
-    plans: current?.plans ?? [],
-    leases: current?.leases ?? [],
+    plans: overview?.plans ?? [],
+    leases: overview?.leases ?? [],
+    economics: overview?.economics ?? null,
+    stale: overview?.stale ?? false,
+    fetchedAt: overview?.fetchedAt ?? null,
     loading: loading || pending,
     error,
     refresh,

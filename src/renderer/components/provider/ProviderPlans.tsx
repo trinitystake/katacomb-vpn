@@ -3,10 +3,10 @@ import type { LeaseSummary, MyPlan, PlanStats, ProviderEconomics, TokenPrice } f
 import { computeBreakEven, netOfStakingShare, parseDecShare } from '../../../shared/provider-economics'
 import { isTestPlan } from '../../../shared/test-plan'
 import { displayConnectError } from '../../utils/connect-errors'
-import { useConfirm } from '../ConfirmModal'
+import { useConfirm, type ConfirmOptions } from '../ConfirmModal'
 import Spinner from '../Spinner'
 import PlanNodesManager from './PlanNodesManager'
-import { STATUS_ACTIVE, formatUdvpn, formatUdvpnAmount, formatUsd } from '../../utils/provider-format'
+import { STATUS_ACTIVE, formatUdvpnAmount, formatUsd } from '../../utils/provider-format'
 
 function formatSize(bytes: string): string {
   const gb = Number(bytes) / 1e9
@@ -21,9 +21,12 @@ function formatDays(seconds: number | null): string {
   return days >= 1 ? `${days.toLocaleString('en-US', { maximumFractionDigits: 1 })}d` : `${Math.round(seconds / 3600)}h`
 }
 
+// formatUdvpnAmount, not formatUdvpn: on the provider's own row a zero price must
+// read "0 P2P". "free" is the consumer catalog's word, and it sat oddly next to
+// figures the provider chose.
 function planPrice(plan: MyPlan): string {
   const udvpn = plan.prices.find((p) => p.denom === 'udvpn')
-  return udvpn ? formatUdvpn(udvpn.quoteValue) : '—'
+  return udvpn ? formatUdvpnAmount(udvpn.quoteValue) : '—'
 }
 
 function planUsd(plan: MyPlan, price: TokenPrice | null): string | null {
@@ -48,40 +51,68 @@ interface Props {
   plans: MyPlan[]
   leases: LeaseSummary[]
   providerActive: boolean
+  /** Cached data, chain unreachable: every mutation is disabled. */
+  readOnly: boolean
   /** The provider's own name. Feeds the test-plan heuristic, which reads the NAME, not the plan. */
   providerName: string
   /** Null while unread — the pricing hints simply don't render rather than guess. */
   economics: ProviderEconomics | null
   /** Resolves once the chain has been re-read, so a caller can hold its busy state until then. */
   onChanged: () => Promise<void>
+  /**
+   * Total nodes CONFIRMED linked across all plans, for the setup path. null when
+   * the counters could not be read for every plan — never a guessed zero.
+   */
+  onLinkedNodesCounted: (count: number | null) => void
 }
 
-export default function ProviderPlans({ plans, leases, providerActive, providerName, economics, onChanged }: Props) {
+export default function ProviderPlans({
+  plans,
+  leases,
+  providerActive,
+  readOnly,
+  providerName,
+  economics,
+  onChanged,
+  onLinkedNodesCounted,
+}: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const selected = plans.find((p) => p.id === selectedId) ?? null
+  // ONE confirm dialog for the whole pane, threaded to the rows — each row used
+  // to mount its own inside the clickable row div, one overlay per plan.
+  const { requestConfirm, confirmDialog } = useConfirm()
 
   // Counters and the USD rate are extra chain/network reads, so they load after
   // the plans themselves and each row shows what it has. Keyed by the plan ids
   // as a string — the plans array is rebuilt on every refresh, its ids are not.
-  // null until the first answer arrives; a plan missing from it afterwards is one
-  // the chain wouldn't answer for, which the row shows as "—" rather than a
-  // spinner that never stops.
-  const [stats, setStats] = useState<Record<string, PlanStats> | null>(null)
+  // null until the first answer arrives; a per-plan null in the answer is a plan
+  // the chain wouldn't answer for. statsFailed marks the whole batch failing.
+  const [stats, setStats] = useState<Record<string, PlanStats | null> | null>(null)
+  const [statsFailed, setStatsFailed] = useState(false)
   const [price, setPrice] = useState<TokenPrice | null>(null)
   const planIds = plans.map((p) => p.id).join(',')
 
   const loadStats = useCallback(async () => {
+    if (readOnly) {
+      // The counters need the chain, which the tunnel blocks. Leaving them
+      // unknown is honest; the rows say so instead of showing zeros.
+      setStats(null)
+      setStatsFailed(false)
+      return
+    }
     if (!planIds) {
       setStats({})
+      setStatsFailed(false)
       return
     }
     try {
       setStats(await window.api.providerPlanStats(planIds.split(',')))
+      setStatsFailed(false)
     } catch {
-      setStats({})
+      setStatsFailed(true)
     }
-  }, [planIds])
+  }, [planIds, readOnly])
 
   // Not `useEffect(loadStats, ...)`: an async callback returns a Promise, and an
   // effect may only return a cleanup function.
@@ -90,6 +121,29 @@ export default function ProviderPlans({ plans, leases, providerActive, providerN
   useEffect(() => {
     window.api.priceToken().then(setPrice).catch(() => setPrice(null))
   }, [])
+
+  // The setup path needs the linked total, CONFIRMED: every plan must have
+  // answered, or the answer is null and the path shows "could not check".
+  useEffect(() => {
+    if (plans.length === 0) {
+      onLinkedNodesCounted(0)
+      return
+    }
+    if (!stats || statsFailed) {
+      onLinkedNodesCounted(null)
+      return
+    }
+    let total = 0
+    for (const plan of plans) {
+      const s = stats[plan.id]
+      if (!s) {
+        onLinkedNodesCounted(null)
+        return
+      }
+      total += s.nodes
+    }
+    onLinkedNodesCounted(total)
+  }, [plans, stats, statsFailed, onLinkedNodesCounted])
 
   // Linking a node or selling a subscription changes the counters without
   // changing the plan list, so every action re-reads both.
@@ -109,45 +163,67 @@ export default function ProviderPlans({ plans, leases, providerActive, providerN
           <span className="text-text-secondary text-xs font-medium uppercase tracking-wide">
             Your plans ({plans.length})
           </span>
-          <button
-            type="button"
-            onClick={() => setCreating((v) => !v)}
-            disabled={!providerActive && !creating}
-            className="btn btn-secondary text-xs py-1 px-2.5 disabled:opacity-40"
-            title={providerActive ? undefined : 'The chain refuses MsgCreatePlan while your provider is inactive'}
-          >
-            {creating ? 'Cancel' : 'New plan'}
-          </button>
+          <span className="flex items-center gap-2">
+            {statsFailed && (
+              <button
+                type="button"
+                onClick={() => void loadStats()}
+                className="text-warning text-[11px] hover:underline"
+                title="The per-plan counters could not be read. Click to try again."
+              >
+                counters unavailable, retry
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setCreating((v) => !v)}
+              disabled={(!providerActive || readOnly) && !creating}
+              className="btn btn-secondary text-xs py-1 px-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {creating ? 'Cancel' : 'New plan'}
+            </button>
+          </span>
         </div>
 
         {creating && (
           <CreatePlanForm
             price={price}
             economics={economics}
+            requestConfirm={requestConfirm}
             onCreated={() => {
               setCreating(false)
-              handleChanged()
+              void handleChanged()
             }}
           />
         )}
 
         <div className="flex-1 overflow-y-auto">
           {plans.length === 0 && !creating && (
-            <p className="text-text-tertiary text-xs px-5 py-4">
-              {providerActive
-                ? 'No plans yet. Create one, select it to lease and link a node, then activate it.'
-                : 'No plans yet. Activate your provider first: the chain will not accept a new plan until you do.'}
-            </p>
+            <div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
+              <p className="text-text-primary text-sm font-medium">No plans yet</p>
+              <p className="text-text-secondary text-xs max-w-[260px]">
+                A plan is what subscribers buy: gigabytes over a period, at your price, served by the
+                nodes you link to it.
+              </p>
+              {providerActive && !readOnly && (
+                <button type="button" onClick={() => setCreating(true)} className="btn btn-primary text-xs py-1.5 px-4">
+                  New plan
+                </button>
+              )}
+            </div>
           )}
           {plans.map((plan) => (
             <PlanRow
               key={plan.id}
               plan={plan}
-              stats={stats ? stats[plan.id] ?? null : undefined}
+              stats={stats ? stats[plan.id] : readOnly ? null : undefined}
+              statsUnknown={readOnly || statsFailed}
               price={price}
               selected={plan.id === selectedId}
               providerActive={providerActive}
+              readOnly={readOnly}
               providerName={providerName}
+              requestConfirm={requestConfirm}
               onSelect={() => setSelectedId(plan.id === selectedId ? null : plan.id)}
               onChanged={handleChanged}
             />
@@ -163,28 +239,51 @@ export default function ProviderPlans({ plans, leases, providerActive, providerN
             price={price}
             economics={economics}
             providerActive={providerActive}
+            readOnly={readOnly}
             onChanged={handleChanged}
           />
         ) : (
-          <div className="h-full flex items-center justify-center px-8">
-            <p className="text-text-tertiary text-sm text-center max-w-sm">
-              Select a plan to manage the nodes that serve it.
+          <div className="h-full flex flex-col items-center justify-center gap-2 px-8 text-center">
+            <p className="text-text-primary text-sm font-medium">
+              {plans.length === 0 ? 'Nothing to manage yet' : 'Select a plan'}
+            </p>
+            <p className="text-text-tertiary text-xs max-w-sm">
+              {plans.length === 0
+                ? 'Once a plan exists, this pane is where you lease nodes and link them to it.'
+                : 'Pick a plan on the left to manage the nodes that serve it.'}
             </p>
           </div>
         )}
       </div>
+      {confirmDialog}
     </div>
   )
 }
 
-function PlanRow({ plan, stats, price, selected, providerActive, providerName, onSelect, onChanged }: {
+function PlanRow({
+  plan,
+  stats,
+  statsUnknown,
+  price,
+  selected,
+  providerActive,
+  readOnly,
+  providerName,
+  requestConfirm,
+  onSelect,
+  onChanged,
+}: {
   plan: MyPlan
   /** undefined while the counters are still being read, null if they couldn't be. */
   stats: PlanStats | null | undefined
+  /** True when no counter for this batch is trustworthy (cached data or a failed read). */
+  statsUnknown: boolean
   price: TokenPrice | null
   selected: boolean
   providerActive: boolean
+  readOnly: boolean
   providerName: string
+  requestConfirm: (options: ConfirmOptions) => Promise<boolean>
   onSelect: () => void
   onChanged: () => Promise<void>
 }) {
@@ -201,11 +300,13 @@ function PlanRow({ plan, stats, price, selected, providerActive, providerName, o
   // pre-action appearance, so each settles in one visible step.
   const [busy, setBusy] = useState<{ kind: 'status' | 'private'; target: boolean } | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const { requestConfirm, confirmDialog } = useConfirm()
   const anyBusy = busy !== null
   // Pre-action values are the opposite of what each action is moving to.
   const showActive = busy?.kind === 'status' ? !busy.target : active
   const showPrivate = busy?.kind === 'private' ? !busy.target : plan.private
+  // Activating needs an active provider (the chain refuses otherwise);
+  // deactivating does not. Both need the chain reachable.
+  const statusBlocked = readOnly || anyBusy || (!active && !providerActive)
 
   /**
    * Flip the plan between public and private.
@@ -214,8 +315,7 @@ function PlanRow({ plan, stats, price, selected, providerActive, providerName, o
    * the SDK omits it, which made `private` a create-once decision. The chain
    * imposes no status precondition, so this works on a live plan.
    */
-  async function togglePrivate(e: React.MouseEvent) {
-    e.stopPropagation()
+  async function togglePrivate() {
     const next = !plan.private
     if (!(await requestConfirm({
       title: next ? `Make plan #${plan.id} private?` : `Make plan #${plan.id} public?`,
@@ -241,12 +341,7 @@ function PlanRow({ plan, stats, price, selected, providerActive, providerName, o
     }
   }
 
-  async function toggleStatus(e: React.MouseEvent) {
-    e.stopPropagation()
-    if (!active && !providerActive) {
-      setError('Activate your provider first. The chain rejects an active plan under an inactive provider.')
-      return
-    }
+  async function toggleStatus() {
     if (!(await requestConfirm(
       active
         ? {
@@ -275,80 +370,98 @@ function PlanRow({ plan, stats, price, selected, providerActive, providerName, o
 
   return (
     <div
-      onClick={onSelect}
-      className={`px-5 py-3 border-b border-border cursor-pointer transition-colors ${
-        selected ? 'bg-accent-subtle' : 'hover:bg-bg-hover'
-      }`}
+      className={`border-b border-border transition-colors ${selected ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`}
     >
-      <div className="flex items-center gap-2.5">
-        <span className="text-accent font-mono text-xs">plan #{plan.id}</span>
-        <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none ${
-          active ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
-        }`}>
-          {active ? 'Active' : 'Inactive'}
-        </span>
-        <button
-          type="button"
-          onClick={togglePrivate}
-          disabled={anyBusy}
-          className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none shrink-0 disabled:opacity-40 transition-colors inline-flex items-center gap-1 ${
-            showPrivate ? 'bg-info/15 text-info hover:bg-info/25' : 'bg-bg-tertiary text-text-tertiary hover:text-text-secondary'
-          }`}
-          title={
-            plan.private
-              ? 'Private: hidden from the catalog unless a subscriber opts to show private plans. Click to make it public.'
-              : 'Public: listed in the catalog. Click to make it private.'
-          }
-        >
-          {busy?.kind === 'private' && <Spinner size="sm" />}
-          {showPrivate ? 'Private' : 'Public'}
+      <div className="flex items-stretch">
+        {/* The selectable body is a real button, so the row works from the keyboard;
+            the action cluster sits beside it rather than nested inside it. */}
+        <button type="button" onClick={onSelect} className="flex-1 min-w-0 text-left px-5 py-3 cursor-pointer">
+          <div className="flex items-center gap-2.5">
+            <span className="text-accent font-mono text-xs">plan #{plan.id}</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none ${
+              active ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
+            }`}>
+              {active ? 'Active' : 'Inactive'}
+            </span>
+            {plan.private && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full leading-none bg-info/15 text-info">
+                Private
+              </span>
+            )}
+          </div>
+          <div className="text-text-secondary text-xs mt-1.5 flex items-center gap-3">
+            <span>{formatSize(plan.bytes)}</span>
+            <span>{formatDays(plan.durationSeconds)}</span>
+            <span className="text-text-primary">{planPrice(plan)}</span>
+            {planUsd(plan, price) && <span className="text-text-tertiary">{planUsd(plan, price)}</span>}
+          </div>
+          <div className="text-text-tertiary text-[11px] mt-1 flex items-center gap-3">
+            {stats ? (
+              <>
+                <span title="Nodes linked to this plan">
+                  {stats.nodes} node{stats.nodes === 1 ? '' : 's'}
+                </span>
+                <span title="Subscriptions ever bought for this plan (one account can hold several)">
+                  {stats.subscriptions} subscriber{stats.subscriptions === 1 ? '' : 's'}
+                </span>
+                <span
+                  className={stats.active > 0 ? 'text-success' : undefined}
+                  title={stats.truncated
+                    ? `At least ${stats.active} are active: this plan has too many subscriptions to count them all`
+                    : 'Subscriptions currently active'}
+                >
+                  {stats.truncated ? `${stats.active}+` : stats.active} active
+                </span>
+              </>
+            ) : (
+              <span>
+                {stats === null || statsUnknown ? 'counters not readable right now' : 'counting…'}
+              </span>
+            )}
+          </div>
+          {error && <p className="text-danger text-xs mt-1.5">{displayConnectError(error)}</p>}
         </button>
-        <span className="flex-1" />
-        {/* min-w holds the busy label's width, so swapping to the gerund doesn't shove the row. */}
-        <button
-          type="button"
-          onClick={toggleStatus}
-          disabled={anyBusy}
-          className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 inline-flex items-center justify-center gap-1.5 min-w-[128px] ${
-            showActive ? 'btn-secondary' : 'btn-primary'
-          }`}
-        >
-          {busy?.kind === 'status' && <Spinner size="sm" />}
-          {busy?.kind === 'status'
-            ? (busy.target ? 'Activating…' : 'Deactivating…')
-            : (active ? 'Deactivate' : 'Activate')}
-        </button>
+
+        <div className="flex flex-col items-end justify-center gap-1.5 pr-5 py-3 shrink-0">
+          {/* min-w holds the busy label's width, so swapping to the gerund doesn't shove the row. */}
+          <button
+            type="button"
+            onClick={toggleStatus}
+            disabled={statusBlocked}
+            title={
+              readOnly
+                ? 'The chain is not reachable while the VPN is connected'
+                : !active && !providerActive
+                  ? 'Activate your provider first'
+                  : undefined
+            }
+            className={`btn text-xs py-1 px-2.5 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 min-w-[128px] ${
+              showActive ? 'btn-secondary' : 'btn-primary'
+            }`}
+          >
+            {busy?.kind === 'status' && <Spinner size="sm" />}
+            {busy?.kind === 'status'
+              ? (busy.target ? 'Activating…' : 'Deactivating…')
+              : (active ? 'Deactivate' : 'Activate')}
+          </button>
+          <button
+            type="button"
+            onClick={togglePrivate}
+            disabled={anyBusy || readOnly}
+            className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none shrink-0 disabled:opacity-40 disabled:cursor-not-allowed transition-colors inline-flex items-center gap-1 ${
+              showPrivate ? 'bg-info/15 text-info hover:bg-info/25' : 'bg-bg-tertiary text-text-tertiary hover:text-text-secondary'
+            }`}
+            title={
+              plan.private
+                ? 'Private: hidden from the catalog unless a subscriber opts to show private plans. Click to make it public.'
+                : 'Public: listed in the catalog. Click to make it private.'
+            }
+          >
+            {busy?.kind === 'private' && <Spinner size="sm" />}
+            {showPrivate ? 'Make public' : 'Make private'}
+          </button>
+        </div>
       </div>
-      <div className="text-text-secondary text-xs mt-1.5 flex items-center gap-3">
-        <span>{formatSize(plan.bytes)}</span>
-        <span>{formatDays(plan.durationSeconds)}</span>
-        <span className="text-text-primary">{planPrice(plan)}</span>
-        {planUsd(plan, price) && <span className="text-text-tertiary">{planUsd(plan, price)}</span>}
-      </div>
-      <div className="text-text-tertiary text-[11px] mt-1 flex items-center gap-3">
-        {stats ? (
-          <>
-            <span title="Nodes linked to this plan">
-              {stats.nodes} node{stats.nodes === 1 ? '' : 's'}
-            </span>
-            <span title="Subscriptions ever bought for this plan (one account can hold several)">
-              {stats.subscriptions} subscriber{stats.subscriptions === 1 ? '' : 's'}
-            </span>
-            <span
-              className={stats.active > 0 ? 'text-success' : undefined}
-              title={stats.truncated
-                ? `At least ${stats.active} are active: this plan has too many subscriptions to count them all`
-                : 'Subscriptions currently active'}
-            >
-              {stats.truncated ? `${stats.active}+` : stats.active} active
-            </span>
-          </>
-        ) : (
-          <span>{stats === null ? '— nodes · — subscribers' : 'counting…'}</span>
-        )}
-      </div>
-      {error && <p className="text-danger text-xs mt-1.5">{displayConnectError(error)}</p>}
-      {confirmDialog}
     </div>
   )
 }
@@ -357,9 +470,10 @@ function PlanRow({ plan, stats, price, selected, providerActive, providerName, o
  * Create a plan. It lands INACTIVE on chain — activation is a separate tx, offered
  * on the row once it appears — so nothing here needs to track a half-created plan.
  */
-function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
+function CreatePlanForm({ price: tokenPrice, economics, requestConfirm, onCreated }: {
   price: TokenPrice | null
   economics: ProviderEconomics | null
+  requestConfirm: (options: ConfirmOptions) => Promise<boolean>
   onCreated: () => void
 }) {
   const [gigabytes, setGigabytes] = useState('100')
@@ -368,7 +482,6 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
   const [isPrivate, setIsPrivate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { requestConfirm, confirmDialog } = useConfirm()
 
   const gb = Number(gigabytes)
   const dayCount = Number(days)
@@ -398,7 +511,7 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
   async function handleCreate() {
     if (!valid || priceUdvpn === null) return
     if (!(await requestConfirm({
-      title: `Create a plan for ${gb} GB over ${dayCount} days at ${formatUdvpn(priceUdvpn)}?`,
+      title: `Create a plan for ${gb} GB over ${dayCount} days at ${formatUdvpnAmount(priceUdvpn)}?`,
       body: ['It is created inactive, and you activate it afterwards. This is an on-chain transaction.'],
       confirmLabel: 'Create plan',
     }))) return
@@ -427,7 +540,7 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
       </label>
       <p className="text-text-tertiary text-xs">
         {valid && priceUdvpn !== null
-          ? `${gb} GB for ${dayCount} days · ${formatUdvpn(priceUdvpn)}` +
+          ? `${gb} GB for ${dayCount} days · ${formatUdvpnAmount(priceUdvpn)}` +
             (tokenPrice ? ` ≈ ${formatUsd(priceUdvpn, tokenPrice.usd)}` : '')
           : 'Size and days must be whole numbers; price accepts up to 6 decimals.'}
       </p>
@@ -437,11 +550,10 @@ function CreatePlanForm({ price: tokenPrice, economics, onCreated }: {
         type="button"
         onClick={handleCreate}
         disabled={!valid || busy}
-        className="btn btn-primary text-xs py-1.5 w-full disabled:opacity-40"
+        className="btn btn-primary text-xs py-1.5 w-full disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {busy ? 'Creating…' : 'Create plan'}
       </button>
-      {confirmDialog}
     </div>
   )
 }

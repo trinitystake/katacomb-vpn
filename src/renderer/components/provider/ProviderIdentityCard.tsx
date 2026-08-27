@@ -7,17 +7,27 @@ import Spinner from '../Spinner'
 import ProviderDetailsModal from './ProviderDetailsModal'
 
 /**
- * The provider record as the chain holds it, plus the two actions that change it.
+ * The provider record as the chain holds it, plus the two actions that change it,
+ * plus the tab's one refresh affordance.
  *
  * Shows all four metadata fields rather than just the name: they are what
  * subscribers see next to the plans, they were previously unreachable once
  * registered, and a provider with no way to read back what it published cannot
  * tell a typo from a rendering choice.
+ *
+ * The refresh cluster exists because nothing on this tab polls: chain-side
+ * changes (a lease renewing, a subscription sold) are invisible until an action
+ * re-reads, so the data age is shown and a manual re-read offered.
  */
-export default function ProviderIdentityCard({ provider, plans, leases, onChanged }: {
+export default function ProviderIdentityCard({ provider, plans, leases, stale, fetchedAt, onRefresh, onChanged }: {
   provider: MyProvider
   plans: MyPlan[]
   leases: LeaseSummary[]
+  /** Read-only mode: the data is cached and the chain unreachable, so actions are disabled. */
+  stale: boolean
+  /** When the data was read from the chain (ms), or null before the first read. */
+  fetchedAt: number | null
+  onRefresh: () => Promise<void>
   /** Resolves once the chain has been re-read, so the button can stay busy until then. */
   onChanged: () => Promise<void>
 }) {
@@ -36,6 +46,7 @@ export default function ProviderIdentityCard({ provider, plans, leases, onChange
   // Pre-action status is the opposite of what we are moving to.
   const showActive = pendingTarget === null ? active : !pendingTarget
   const [editing, setEditing] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { requestConfirm, confirmDialog } = useConfirm()
 
@@ -56,14 +67,29 @@ export default function ProviderIdentityCard({ provider, plans, leases, onChange
     }
   }, [leases, onChanged, plans, requestConfirm])
 
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true)
+    setError(null)
+    try {
+      await onRefresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Refresh failed')
+    } finally {
+      setRefreshing(false)
+    }
+  }, [onRefresh])
+
   const since = formatSince(provider.statusAt)
+  const age = fetchedAt !== null ? formatSince(new Date(fetchedAt).toISOString()) : null
+  const dataOld = stale || (fetchedAt !== null && Date.now() - fetchedAt > 10 * 60 * 1000)
 
   return (
     <div className="border-b border-border bg-bg-secondary px-5 py-3 shrink-0">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
-            <span className="text-text-primary text-sm font-medium truncate">
+            <span className={`status-dot ${active ? 'status-dot-active' : 'status-dot-inactive'}`} />
+            <span className="text-text-primary text-base font-semibold truncate">
               {provider.name || 'Unnamed provider'}
             </span>
             <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none ${
@@ -98,23 +124,36 @@ export default function ProviderIdentityCard({ provider, plans, leases, onChange
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {age && (
+            <span className="flex items-center gap-1.5 text-text-tertiary text-[11px]" title="When this tab last read the chain">
+              <span className={`status-dot ${dataOld ? 'status-dot-pending' : 'status-dot-active'}`} />
+              Updated {age}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => void handleRefresh()}
+            disabled={busy || refreshing || stale}
+            title={stale ? 'The chain is not reachable while the VPN is connected' : 'Re-read your provider, plans and leases from the chain'}
+            className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {refreshing ? <Spinner size="sm" /> : 'Refresh'}
+          </button>
           <button
             type="button"
             onClick={() => setEditing(true)}
-            disabled={busy}
-            className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-40"
-            title="Change the name, website, identity or description subscribers see"
+            disabled={busy || stale}
+            className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Edit details
           </button>
           <button
             type="button"
             onClick={() => setStatus(!active)}
-            disabled={busy}
-            className={`btn text-xs py-1.5 px-3 disabled:opacity-40 inline-flex items-center justify-center gap-1.5 min-w-[132px] ${
+            disabled={busy || stale}
+            className={`btn text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 min-w-[132px] ${
               showActive ? 'btn-secondary' : 'btn-primary'
             }`}
-            title={active ? 'Stop offering your plans' : 'Required before any plan, lease or link will be accepted'}
           >
             {busy && <Spinner size="sm" />}
             {pendingTarget === null
@@ -124,13 +163,11 @@ export default function ProviderIdentityCard({ provider, plans, leases, onChange
         </div>
       </div>
 
-      {!active && (
-        <p className="text-warning text-xs mt-2">
-          Your provider is inactive, so the chain will refuse to create a plan, activate one, or
-          start a lease. Activate to do any of those.
-        </p>
+      {error && (
+        <div className="bg-danger-subtle border border-danger rounded-md px-3 py-2 mt-2">
+          <p className="text-danger text-xs">{displayConnectError(error)}</p>
+        </div>
       )}
-      {error && <p className="text-danger text-xs mt-2">{displayConnectError(error)}</p>}
       {editing && (
         <ProviderDetailsModal provider={provider} onClose={() => setEditing(false)} onSaved={onChanged} />
       )}

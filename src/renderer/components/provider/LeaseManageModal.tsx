@@ -157,7 +157,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
             type="button"
             onClick={handlePolicy}
             disabled={anyBusy || policy === lease.renewalPricePolicy}
-            className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-40"
+            className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy === 'policy' ? 'Saving…' : 'Change policy'}
           </button>
@@ -179,7 +179,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
               type="button"
               onClick={handleRenew}
               disabled={anyBusy || Boolean(refusal) || !validHours || !quote}
-              className="btn btn-primary text-xs py-1.5 px-3 disabled:opacity-40"
+              className="btn btn-primary text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed"
               title={refusal ?? undefined}
             >
               {busy === 'renew'
@@ -206,7 +206,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
             type="button"
             onClick={handleEnd}
             disabled={anyBusy}
-            className="btn btn-danger text-xs py-1.5 px-3 disabled:opacity-40 flex items-center gap-2"
+            className="btn btn-danger text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {busy === 'end' && <Spinner size="sm" />}
             {busy === 'end' ? 'Ending…' : 'End lease'}

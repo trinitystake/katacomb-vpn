@@ -88,14 +88,14 @@ export default function ProviderDetailsModal({ provider, onClose, onSaved }: {
         )}
 
         <div className="flex gap-2">
-          <button type="button" onClick={onClose} disabled={busy} className="btn btn-secondary text-xs py-2 flex-1 disabled:opacity-40">
+          <button type="button" onClick={onClose} disabled={busy} className="btn btn-secondary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed">
             Cancel
           </button>
           <button
             type="button"
             onClick={handleSave}
             disabled={busy || Boolean(problem) || unchanged}
-            className="btn btn-primary text-xs py-2 flex-1 disabled:opacity-40 inline-flex items-center justify-center gap-1.5"
+            className="btn btn-primary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
             title={unchanged ? 'Nothing has changed yet' : undefined}
           >
             {busy && <Spinner size="sm" />}

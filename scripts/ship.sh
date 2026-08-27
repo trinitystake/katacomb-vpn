@@ -140,8 +140,85 @@ git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository: $REPO_ROOT
 BRANCH="$(git branch --show-current)"
 [ "$BRANCH" = "$RELEASE_BRANCH" ] || die "on branch '$BRANCH', releases are cut from '$RELEASE_BRANCH'"
 
-# --- 1. notes ---------------------------------------------------------------
-phase 1/6 "release notes"
+# --- 1. credentials ---------------------------------------------------------
+# Every password this run will ever need, taken here, so no later phase stops to
+# ask. There are three, and they are different things:
+#   ssh   signs every commit and tag (gpg.format=ssh) and authenticates every
+#         push and ls-remote: seven key operations per full run. A live agent
+#         holding the key answers all seven silently; without one, each prompts.
+#   sudo  the apt install in the install phase.
+#   gpg   the SHA256SUMS signature (release.sh step 7). NOT primed here on
+#         purpose: gpg-agent's cache is 10 minutes and the build alone can outrun
+#         it, so pinentry at the signing step is the one honest place for it.
+phase 1/7 "credentials"
+
+# Find a live agent socket. The session's $SSH_AUTH_SOCK can point at a dead
+# socket (gnome-keyring's, after the agent component moved to gcr), and ssh then
+# silently falls back to reading the key file, which is what makes every single
+# operation ask for the passphrase. Exported here, so all three sub-scripts
+# inherit the working socket. Exit 1 from ssh-add is a live agent with no keys
+# loaded yet, which the ssh-add below fixes; only 2 (cannot connect) disqualifies.
+ensure_ssh_agent() {
+  local candidate rc
+  for candidate in "${SSH_AUTH_SOCK:-}" \
+                   "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/gcr/ssh" \
+                   "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/keyring/ssh"; do
+    [ -S "$candidate" ] || continue
+    SSH_AUTH_SOCK="$candidate" ssh-add -l >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -le 1 ]; then
+      export SSH_AUTH_SOCK="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ensure_ssh_agent; then
+  SIGNING_PUB="$(git config user.signingkey 2>/dev/null || true)"
+  SIGNING_FPR=""
+  [ -f "$SIGNING_PUB" ] && SIGNING_FPR="$(ssh-keygen -lf "$SIGNING_PUB" 2>/dev/null | awk '{print $2}')"
+  if [ -n "$SIGNING_FPR" ] && ssh-add -l 2>/dev/null | grep -qF "$SIGNING_FPR"; then
+    ok "ssh agent holds the signing key ($SSH_AUTH_SOCK)"
+  elif [ -f "$SIGNING_PUB" ]; then
+    info "the signing key is not in the agent. Adding it: one passphrase now instead
+        of one per commit, tag and push"
+    ssh-add "${SIGNING_PUB%.pub}" || die "could not add ${SIGNING_PUB%.pub} to the agent"
+    ok "signing key added to the agent"
+  else
+    # No ssh signing key configured: pushes still ride the agent, nothing to preload.
+    ok "ssh agent live ($SSH_AUTH_SOCK)"
+  fi
+else
+  info "no usable ssh agent found. Carrying on, but every signed commit, signed tag
+        and push will ask for the key passphrase individually"
+fi
+
+# Checked by publish-release.sh too, but that is the last phase, after the human
+# connect test: discovering an unauthenticated gh there wastes the whole run.
+command -v gh >/dev/null 2>&1 || die "gh CLI not installed, and the publish phase needs it. Install gh first."
+gh auth status >/dev/null 2>&1 || die "gh is not authenticated. Run: gh auth login"
+ok "gh authenticated"
+
+if [ "$DRY_RUN" = 1 ]; then
+  skip "sudo not taken in a dry run"
+else
+  info "sudo now, so the install phase does not stop to ask later"
+  sudo -v || die "sudo is required for the install phase"
+  # Refresh the timestamp for as long as this script lives: the notes edit and
+  # the build can both outlast sudo's 15-minute cache. The loop dies with the
+  # script (kill -0 on the parent) and the trap covers the normal exit.
+  ( while sleep 60; do
+      kill -0 "$$" 2>/dev/null || exit
+      sudo -n -v 2>/dev/null || exit
+    done ) &
+  SUDO_KEEPALIVE=$!
+  trap 'kill "$SUDO_KEEPALIVE" 2>/dev/null' EXIT
+  ok "sudo cached and kept warm for the whole run"
+fi
+
+# --- 2. notes ---------------------------------------------------------------
+phase 2/7 "release notes"
 NOTES_READY=0
 if [ -f "$NOTES" ] && [ "$(head -1 "$NOTES")" = "# Katacomb VPN $VERSION" ] &&
    [ -z "$(git status --porcelain --untracked-files=no -- "$NOTES")" ] &&
@@ -155,8 +232,8 @@ else
   run_phase "writing the release notes" "$SCRIPT_DIR/draft-release-notes.sh" "$VERSION" --edit
 fi
 
-# --- 2. cut -----------------------------------------------------------------
-phase 2/6 "cut the release"
+# --- 3. cut -----------------------------------------------------------------
+phase 3/7 "cut the release"
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   skip "$TAG already cut"
 else
@@ -164,10 +241,10 @@ else
   run_phase "cutting the release" "$SCRIPT_DIR/release.sh" "$VERSION"
 fi
 
-# --- 3. portability ---------------------------------------------------------
+# --- 4. portability ---------------------------------------------------------
 # Same rule release.sh applies, asked here so the plan can mention it before the
 # mode question rather than after.
-phase 3/6 "packaging verification"
+phase 4/7 "packaging verification"
 # Measured against the tag once it exists, and against HEAD before it does. Without
 # the fallback a rehearsal (where phase 2 never really runs) has no previous tag to
 # compare with, so it reports every release as a packaging change and asks a question
@@ -212,8 +289,8 @@ EOF
   fi
 fi
 
-# --- 4. install -------------------------------------------------------------
-phase 4/6 "install this build"
+# --- 5. install -------------------------------------------------------------
+phase 5/7 "install this build"
 INSTALLED="$(dpkg-query -W -f='${Version}' "$DEB_PACKAGE" 2>/dev/null || true)"
 NEED_INSTALL=1
 REINSTALL=0
@@ -291,8 +368,8 @@ EOF
   [ "$DRY_RUN" = 1 ] || ok "installed $VERSION"
 fi
 
-# --- 5. group + the test ----------------------------------------------------
-phase 5/6 "confirm the build works"
+# --- 6. group + the test ----------------------------------------------------
+phase 6/7 "confirm the build works"
 
 # Only meaningful in split mode: it is the whole point of logging out, and in
 # one-pass mode the user has explicitly chosen to skip it. A stale group is not
@@ -336,8 +413,8 @@ else
   esac
 fi
 
-# --- 6. publish -------------------------------------------------------------
-phase 6/6 "publish"
+# --- 7. publish -------------------------------------------------------------
+phase 7/7 "publish"
 if [ "$DRY_RUN" = 1 ]; then
   # Actually run it, rather than printing that we would: publish-release.sh's own
   # --dry-run is read-only and is the single most useful thing a rehearsal can

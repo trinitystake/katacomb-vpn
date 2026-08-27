@@ -164,7 +164,9 @@ ok "gh authenticated as $(gh api user --jq .login 2>/dev/null || echo 'unknown')
 REMOTE_REFS="$(git ls-remote origin 2>/dev/null)" ||
   die "cannot reach origin, so what is already published is unknowable.
         If this repo pushes over SSH, the agent may not be reachable from here:
-        try  SSH_AUTH_SOCK=/run/user/\$(id -u)/keyring/ssh $0 $VERSION"
+        try  SSH_AUTH_SOCK=/run/user/\$(id -u)/gcr/ssh $0 $VERSION
+        (keyring/ssh is the DEAD socket gnome-keyring leaves behind; gcr/ssh is
+        the live agent. ship.sh works this out for itself.)"
 [ -n "$REMOTE_REFS" ] || die "origin returned no refs at all, which should not happen"
 ok "read remote state from origin"
 
@@ -214,18 +216,26 @@ fi
 
 # Order matters: the tag has to exist on the remote before the release can attach
 # assets to it, and the branch has to carry the tagged commit before the tag makes
-# sense to anyone fetching it.
-if [ "$BRANCH_PUSHED" = 0 ]; then
+# sense to anyone fetching it. When both are pending they go in ONE push with
+# --atomic: one SSH connection instead of two, and both-or-neither, which closes
+# the exact half-pushed state (branch up, tag not) the idempotence here otherwise
+# exists to repair.
+if [ "$BRANCH_PUSHED" = 0 ] && [ "$TAG_PUSHED" = 0 ]; then
+  git push --atomic origin "$RELEASE_BRANCH" "refs/tags/$TAG"
+  ok "pushed $RELEASE_BRANCH and $TAG together (atomic)"
+elif [ "$BRANCH_PUSHED" = 0 ]; then
   git push origin "$RELEASE_BRANCH"
   ok "pushed $RELEASE_BRANCH"
-fi
-if [ "$TAG_PUSHED" = 0 ]; then
+elif [ "$TAG_PUSHED" = 0 ]; then
   git push origin "$TAG"
   ok "pushed $TAG"
 fi
 
 if [ "$RELEASE_EXISTS" = 0 ]; then
+  # --verify-tag: without it gh quietly CREATES the tag on the remote if the push
+  # above was somehow skipped, detaching the release from the tag audited here.
   gh release create "$TAG" \
+    --verify-tag \
     --notes-file "$NOTES" \
     "dist/$DEB_NAME" \
     "dist/$APPIMAGE_NAME" \

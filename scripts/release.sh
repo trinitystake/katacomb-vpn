@@ -514,12 +514,14 @@ ok "working tree clean"
 ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "tag $TAG already exists"
 ok "tag $TAG is free"
 
+resolve_node || die "no node >= $MIN_NODE_MAJOR found (looked on PATH and in ~/.nvm/versions/node)"
+ok "node $(node -v) at $(command -v node)"
+
+# After resolve_node, so `node -p` is a real node rather than leaning on the sed
+# fallback whenever the nvm stub is on PATH.
 CURRENT="$(node -p "require('./package.json').version" 2>/dev/null || sed -n 's/.*"version": "\(.*\)".*/\1/p' package.json | head -1)"
 [ "$CURRENT" != "$VERSION" ] || die "package.json is already at $VERSION"
 ok "version $CURRENT -> $VERSION"
-
-resolve_node || die "no node >= $MIN_NODE_MAJOR found (looked on PATH and in ~/.nvm/versions/node)"
-ok "node $(node -v) at $(command -v node)"
 
 gpg --list-secret-keys "$SIGNING_KEY" >/dev/null 2>&1 || die "no secret key $SIGNING_KEY in the keyring, import it with: gpg --import private.asc"
 ok "signing key $SIGNING_KEY present"

@@ -1,7 +1,8 @@
 import { app, BrowserWindow, shell, Tray, Menu, nativeImage, nativeTheme, dialog, powerMonitor } from 'electron'
 import { join } from 'path'
 import { execSync, execFile, execFileSync } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, mkdtempSync, copyFileSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
 import { is } from '@electron-toolkit/utils'
 import {
@@ -304,8 +305,8 @@ function checkSystemDeps(): void {
 function ensurePolkitSetup(): void {
   // Locate resource files — in dev they're in project root, in production in resourcesPath
   const resourceDir = is.dev
-    ? join(__dirname, '../../resources/linux')
-    : join(process.resourcesPath, 'linux')
+    ? join(__dirname, '../../resources/linux/privileged')
+    : join(process.resourcesPath, 'linux/privileged')
 
   const helperSrc = join(resourceDir, 'katacomb-vpn-helper.sh')
   const policySrc = join(resourceDir, 'com.katacomb.vpn.policy')
@@ -336,7 +337,24 @@ function ensurePolkitSetup(): void {
 
   if (result !== 0) return
 
+  // pkexec's `cp` runs as root, and root CANNOT read the AppImage. The runtime
+  // mounts the squashfs as FUSE with user_id=<uid> and neither allow_root nor
+  // allow_other, and FUSE's default denies every other uid — root is not exempt
+  // (it is FUSE's own check, not DAC). Measured 2026-09-02: three authenticated
+  // Install clicks, `cp` EACCES on /tmp/.mount_kataco*/resources/linux/privileged/…,
+  // nothing installed, and the dialog back on the next launch because the catch
+  // below swallowed each one. So stage both files into a private tmpfs dir first
+  // and hand pkexec THOSE paths: a 0700 mkdtemp is enough, since plain DAC lets
+  // root through. Harmless on the deb and in dev, where the sources were already
+  // root-readable.
+  let staging: string | null = null
   try {
+    staging = mkdtempSync(join(tmpdir(), 'katacomb-helper-'))
+    const stagedHelper = join(staging, 'katacomb-vpn-helper.sh')
+    const stagedPolicy = join(staging, 'com.katacomb.vpn.policy')
+    copyFileSync(helperSrc, stagedHelper)
+    copyFileSync(policySrc, stagedPolicy)
+
     // Use execFileSync to avoid shell interpolation of paths
     const script = [
       `cp -- "$1" "$3"`,
@@ -356,12 +374,14 @@ function ensurePolkitSetup(): void {
     // is what runPrivileged allows for the same shape of call, a prompt plus a fast
     // command. Failure here is already survivable: the app falls back to
     // per-operation prompts.
-    execFileSync('pkexec', ['sh', '-c', script, '--', helperSrc, policySrc, HELPER_PATH, POLICY_PATH], {
+    execFileSync('pkexec', ['sh', '-c', script, '--', stagedHelper, stagedPolicy, HELPER_PATH, POLICY_PATH], {
       stdio: 'pipe',
       timeout: 60000,
     })
   } catch {
     // User cancelled or pkexec failed — app still works with per-operation prompts
+  } finally {
+    if (staging) rmSync(staging, { recursive: true, force: true })
   }
 }
 

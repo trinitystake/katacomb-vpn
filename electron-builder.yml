@@ -16,15 +16,21 @@ files:
 electronLanguages:
   - en-US
 extraResources:
+  # Everything under resources/linux/ ships to <resourcesPath>/linux/ with its
+  # subdirectory layout intact (copyDir preserves structure): bin/ holds the
+  # vendored binaries beside their licence texts, privileged/ holds the helper,
+  # polkit policy and systemd unit that postinstall copies onto the system.
+  # packaging/ is excluded on purpose. It is fpm's INPUT, not runtime data:
+  # afterInstall/afterRemove below are resolved from projectDir and embedded in
+  # the deb control archive macro-EXPANDED, so the copy this glob would otherwise
+  # leave at /opt/.../resources/linux/ is root-owned, +x and macro-UNexpanded.
+  # Run by hand it sets APP_DIR to /opt/ and repoints the /opt/katacomb-vpn
+  # symlink the systemd unit's ExecStart depends on. Nothing reads it.
   - from: resources/linux/
     to: linux/
     filter:
       - "**/*"
-      - "!v2ray/"
-  - from: resources/linux/v2ray/
-    to: linux/v2ray/
-    filter:
-      - "**/*"
+      - "!packaging/"
   # Standalone root-daemon bundle → /opt/Katacomb VPN/resources/daemon/index.js
   - from: out/daemon/index.js
     to: daemon/index.js
@@ -166,14 +172,14 @@ deb:
     # rather than adding to it (FpmTarget: options.recommends ? asArray(it) :
     # getDefaultRecommends()), so the default must be repeated here or the tray
     # icon silently loses its library. Same replace-don't-merge trap as
-    # afterInstall — see the header of resources/linux/postinstall.sh.
+    # afterInstall — see the header of resources/linux/packaging/postinstall.sh.
     - libappindicator3-1
     # libsecret is only a client — it needs a Secret Service daemon to talk to.
     # GNOME and KDE ship different ones and a bare XFCE/LXQt install has neither.
     # An alternation (not a plain Depends) so KDE boxes are satisfied by the
     # kwallet they already have instead of pulling in gnome-keyring.
     - gnome-keyring | kwalletmanager
-  afterInstall: resources/linux/postinstall.sh
-  afterRemove: resources/linux/postrm.sh
+  afterInstall: resources/linux/packaging/postinstall.sh
+  afterRemove: resources/linux/packaging/postrm.sh
 appImage:
   artifactName: katacomb-vpn-${version}.AppImage

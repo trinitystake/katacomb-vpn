@@ -98,7 +98,7 @@ runs on the `xray` binary, since xray-core reads the same config and is a strict
 superset of what the builder emits. The exit hop additionally has to serve plain TCP:
 grpc and websocket bring their own dialer and fail when carried inside another hop.
 
-Bundled binaries live in [resources/linux/v2ray/](resources/linux/v2ray/) and are
+Bundled binaries live in [resources/linux/bin/](resources/linux/bin/) and are
 SHA-256 pinned in [binary-integrity.ts](src/main/binary-integrity.ts). Both the app and
 the root daemon refuse to execute one whose hash doesn't match. The AmneziaWG trio is
 built from source at the commits upstream pins (no prebuilt `amneziawg-go` exists), via
@@ -317,8 +317,9 @@ Per-protocol config builders are pure, Electron-free and unit-tested:
 [xray-config.ts](src/main/xray-config.ts),
 [hysteria-config.ts](src/main/hysteria-config.ts).
 
-Privileged surface: [resources/linux/](resources/linux/) holds the polkit helper script,
-its policy, the systemd unit and the install/remove hooks.
+Privileged surface: [resources/linux/privileged/](resources/linux/privileged/) holds the
+polkit helper script, its policy and the systemd unit;
+[resources/linux/packaging/](resources/linux/packaging/) holds the deb install/remove hooks.
 
 ## Development notes
 
@@ -370,6 +371,6 @@ GPL-3.0-or-later, see [LICENSE](LICENSE).
 
 The packages also ship six third-party executables (v2ray, tun2socks, xray, hysteria,
 amneziawg-go, awg/awg-quick), each a separate program under its own license, with the
-full text alongside it in `resources/linux/v2ray/`. Pinned versions, licenses and the
+full text alongside it in `resources/linux/bin/`. Pinned versions, licenses and the
 GPL-2.0 source offer for `awg` are in
 [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

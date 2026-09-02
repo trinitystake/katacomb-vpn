@@ -113,7 +113,7 @@ const defaultDeps: DaemonDeps = {
     return WG_CONFIG_PATH
   },
   resolveTun2Socks: () => {
-    const bundled = join(__dirname, '../linux/v2ray/tun2socks')
+    const bundled = join(__dirname, '../linux/bin/tun2socks')
     if (!existsSync(bundled)) throw new Error('bundled tun2socks not found')
     if (!verifyBinaryIntegrity(bundled, 'tun2socks')) {
       throw new Error('tun2socks failed SHA-256 integrity check')
@@ -122,7 +122,7 @@ const defaultDeps: DaemonDeps = {
   },
   resolveAmneziaWgBinDir: () => {
     // All three run as root via awg-up — fail closed on any missing/tampered one.
-    const dir = join(__dirname, '../linux/v2ray')
+    const dir = join(__dirname, '../linux/bin')
     for (const name of ['awg', 'awg-quick', 'amneziawg-go']) {
       const bundled = join(dir, name)
       if (!existsSync(bundled)) throw new Error(`bundled ${name} not found`)

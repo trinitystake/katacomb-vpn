@@ -21,12 +21,16 @@
 #             the deb phases; run it with the deb UNINSTALLED, self-reverting)
 #   revert  put kernel.apparmor_restrict_unprivileged_userns back to 0 (Mint default)
 #
-# Or, to do the whole thing unattended from a clean slate (purge -> install ->
-# launch -> negative control -> upgrade -> remove -> both AppImage states -> restore):
+# Or, to do the whole thing from a clean slate (purge -> install -> launch ->
+# negative control -> upgrade -> remove -> both AppImage states -> restore):
 #     sudo ./scripts/verify-deb-portability.sh fullcycle
-# It drives the GUI as $SUDO_USER, so it needs an X11 session. It leaves the deb
-# UNINSTALLED and the sysctl at Mint's default. It cannot cover the password-free
-# connect (needs a fresh login + real funds) — that stays manual.
+# It drives the GUI as $SUDO_USER, so it needs an X11 session plus xdotool and
+# wmctrl (checked up front). ONE step needs you: section 7 leaves the AppImage's
+# "VPN Helper Setup" dialog up and asks you to click Install and authenticate,
+# because that install used to fail silently for every AppImage user (root cannot
+# read the FUSE mount — see CLAUDE.md "Packaging") and nothing else exercises it.
+# It leaves the deb UNINSTALLED and the sysctl at Mint's default. It cannot cover
+# the password-free connect (needs a fresh login + real funds) — that stays manual.
 #
 # Nothing here spends money or touches the chain. Only phase4 removes the package.
 # DEB below picks the newest built package by mtime — rebuild with `npm run dist`
@@ -60,6 +64,16 @@ summary() {
 
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "run me with sudo"; exit 1; }; }
 
+# The unattended launches drive the desktop with these two. Fail loudly: with
+# xdotool absent, dismiss_helper_dialog used to no-op behind its 2>/dev/null and
+# the "unattended" run silently waited on a human to click Skip (2026-09-02).
+need_gui_tools() {
+  local missing=""
+  command -v xdotool >/dev/null 2>&1 || missing="$missing xdotool"
+  command -v wmctrl  >/dev/null 2>&1 || missing="$missing wmctrl"
+  [ -z "$missing" ] || { echo "missing:$missing — apt install$missing" >&2; exit 1; }
+}
+
 # ---------------------------------------------------------------------------
 # GUI helpers — let a root-run phase drive the desktop as the invoking user, so
 # the launch tests don't need a human to alt-tab. X11 only (Type=x11 sessions).
@@ -87,7 +101,8 @@ app_windows() { as_user wmctrl -lx 2>/dev/null | grep -i ' katacomb-vpn\.katacom
 # experiment: 'xdotool key --window ... Escape' uses XSendEvent, which GTK
 # ignores, and even a real XTEST Escape after windowactivate does not dismiss
 # it. WM_DELETE maps to the dialog's cancelId, i.e. "Skip": no pkexec runs and
-# no helper is installed (asserted after the cycle).
+# no helper is installed (asserted right after section 6). Section 7 deliberately
+# does NOT call this — see launch_and_install_helper.
 dismiss_helper_dialog() {
   local winid
   winid="$(as_user xdotool search --name '^VPN Helper Setup$' 2>/dev/null | head -1)"
@@ -108,6 +123,40 @@ launch_and_wait() {
   done
   return 1
 }
+
+# Section 7's launcher: leave the "VPN Helper Setup" dialog UP, ask the human to
+# click Install and authenticate, and wait for pkexec to land the helper before
+# waiting for the main window (which only appears once the modal is answered).
+# This is the ONLY thing that exercises the AppImage's helper install. It used to
+# fail silently for every AppImage user: the runtime's FUSE mount has no
+# allow_root, so root's `cp` got EACCES and the app's catch{} swallowed it —
+# three authenticated clicks, nothing on disk (2026-09-02). The app now stages
+# the two files through mkdtemp; this proves that works from a real AppImage.
+# Returns 0 if the helper landed AND the main window appeared.
+launch_and_install_helper() {
+  local cmd="$1" logf="$2" secs="${3:-120}" i
+  as_user bash -c "$cmd" >"$logf" 2>&1 &
+  for i in $(seq 1 60); do
+    app_windows | grep -qi 'VPN Helper Setup' && break
+    sleep 0.5
+  done
+  printf '\n  \033[1m>>> The AppImage is showing "VPN Helper Setup".\n'
+  printf '  >>> Click INSTALL and enter your password at the polkit prompt (within %ss).\033[0m\n\n' "$secs"
+  for i in $(seq 1 "$secs"); do
+    [ -x /usr/local/bin/katacomb-vpn-helper ] && [ -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy ] && break
+    sleep 1
+  done
+  [ -x /usr/local/bin/katacomb-vpn-helper ] || return 1
+  for i in $(seq 1 120); do
+    app_windows | grep -qi 'Katacomb VPN$' && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# The AppImage's mount as seen from /tmp's listing only — readdir on /tmp is
+# allowed to everyone, entering the mount is not (that is the whole point).
+appimage_mount() { local m; m="$(ls -A /tmp 2>/dev/null | grep -m1 '^\.mount_kataco')"; [ -n "$m" ] && echo "/tmp/$m"; }
 
 # Patterns are ANCHORED at the start of the cmdline on purpose. An unanchored
 # 'katacomb-vpn' would also match any shell whose command line merely mentions the
@@ -180,6 +229,14 @@ phase1() {
   check "systemctl is-active --quiet katacomb-vpn-daemon"     "katacomb-vpn-daemon active"
   check "systemctl is-enabled --quiet katacomb-vpn-daemon"    "katacomb-vpn-daemon enabled at boot"
   check "[ -L /opt/katacomb-vpn ]"                            "/opt/katacomb-vpn space-free symlink"
+  # A deb shipping resources/linux/ with NO binaries in it passed every check
+  # above (2026-09-02): electron-builder only WARNS on a missing extraResources
+  # source. Assert the layout the two resolvers (vpn-manager, daemon-core) read.
+  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]"  "tun2socks bundled + executable"
+  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
+  check "! grep -q 'linux/v2ray' '/opt/Katacomb VPN/resources/daemon/index.js'" "daemon bundle has no stale path literal"
   check "getent group katacomb-vpn | grep -q '${SUDO_USER:-neo}'" \
                                                               "user ${SUDO_USER:-neo} is in group katacomb-vpn"
   info  "helper perms: $(stat -c '%a %U:%G' /usr/local/bin/katacomb-vpn-helper 2>&1)"
@@ -317,19 +374,39 @@ EOM
   configured correctly" abort. That would mean the AppImage stopped launching
   on stock Ubuntu entirely.
 
+  ALSO: on the "VPN Helper Setup" dialog click INSTALL and authenticate. That
+  install failed silently for every AppImage user until 2026-09-02 (root cannot
+  read the FUSE mount; the app now stages the files through mkdtemp) and this is
+  where it gets checked. Leave the app running until you press Enter.
+
   Press Enter when done — the sysctl is restored to Mint's default either way.
 EOM
   read -r _
+  local mnt; mnt="$(appimage_mount)"
+  if [ -n "$mnt" ]; then
+    check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper.sh' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
+  else
+    info "AppImage not running — FUSE read check skipped"
+  fi
+  check "[ -x /usr/local/bin/katacomb-vpn-helper ]"                                                          "helper installed by the AppImage's Install click"
+  check "[ \"\$(stat -c '%a %U:%G' /usr/local/bin/katacomb-vpn-helper)\" = '755 root:root' ]"                  "helper is 755 root:root"
+  check "cmp -s '$REPO_ROOT/resources/linux/privileged/katacomb-vpn-helper.sh' /usr/local/bin/katacomb-vpn-helper" "helper byte-identical to resources/linux/privileged/"
+  check "cmp -s '$REPO_ROOT/resources/linux/privileged/com.katacomb.vpn.policy' /usr/share/polkit-1/actions/com.katacomb.vpn.policy" "policy byte-identical to resources/linux/privileged/"
+  check "! ls -d /tmp/katacomb-helper-* >/dev/null 2>&1"                                                      "mkdtemp staging dir cleaned up"
+  # Self-revert so the deb phases start from the clean slate they assert.
+  rm -f /usr/local/bin/katacomb-vpn-helper /usr/share/polkit-1/actions/com.katacomb.vpn.policy
   sysctl -w "$SYSCTL=0"
-  info "sysctl restored to $(sysctl -n $SYSCTL) (Mint default)"
+  info "sysctl restored to $(sysctl -n $SYSCTL) (Mint default); helper + policy removed again"
   summary "appimage"
 }
 
-# Everything the deb owns, from a clean slate, unattended. The one thing it can
-# NOT cover is the password-free connect: that needs a fresh login session for the
-# katacomb-vpn group and spends real funds, so it stays a human step (phase2's tail).
+# Everything the deb owns, from a clean slate. Unattended except section 7's one
+# Install click (see launch_and_install_helper). The one thing it can NOT cover is
+# the password-free connect: that needs a fresh login session for the katacomb-vpn
+# group and spends real funds, so it stays a human step (phase2's tail).
 fullcycle() {
   need_root
+  need_gui_tools
   [ -n "$DEB" ] || { echo "No deb in dist/ — run 'npm run dist' first." >&2; exit 1; }
   [ -n "$APPIMAGE" ] || { echo "No AppImage in dist/ — run 'npm run dist' first." >&2; exit 1; }
   local log=/tmp/katacomb-verify-logs; rm -rf "$log"; mkdir -p "$log"; chmod 755 "$log"
@@ -361,6 +438,11 @@ fullcycle() {
   check "systemctl is-active --quiet katacomb-vpn-daemon"           "daemon active"
   check "systemctl is-enabled --quiet katacomb-vpn-daemon"          "daemon enabled at boot"
   check "[ -L /opt/katacomb-vpn ]"                                  "/opt symlink created"
+  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]"  "tun2socks bundled + executable"
+  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
+  check "! grep -q 'linux/v2ray' '/opt/Katacomb VPN/resources/daemon/index.js'" "daemon bundle has no stale path literal"
   check "getent group katacomb-vpn | grep -q '$GUI_USER'"           "$GUI_USER added to katacomb-vpn group"
   check "dpkg-deb -I '$DEB' | grep -q 'License: GPL-3.0-or-later'"  "deb declares a real License"
 
@@ -430,28 +512,49 @@ fullcycle() {
   fi
   kill_app
   assert_no_app
+  # Proves the helper dialog was cancelled, not accepted: if WM_DELETE had hit
+  # "Install" instead of its cancelId, pkexec would have deployed these.
+  check "[ ! -e /usr/local/bin/katacomb-vpn-helper ]" "helper dialog auto-dismissed (Skip) — nothing installed"
+  check "[ ! -e /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]" "no polkit policy installed by the Skip path"
 
-  head_ "7. AppImage at the Mint default (sandbox should come back)"
+  head_ "7. AppImage at the Mint default (sandbox back) + the helper install (needs YOUR click)"
   sysctl -w "$SYSCTL=0" >/dev/null; info "$SYSCTL = $(sysctl -n $SYSCTL)"
-  if launch_and_wait "'$APPIMAGE'" "$log/appimage-off.log" 60; then
-    ok "AppImage GUI opens"
+  check "[ ! -e /usr/local/bin/katacomb-vpn-helper ]" "clean slate before the install test"
+  if launch_and_install_helper "'$APPIMAGE'" "$log/appimage-off.log" 120; then
+    ok "AppImage GUI opens after Install"
     if pgrep -u "$GUI_USER" -af '\.mount_kataco.*--no-sandbox' >/dev/null 2>&1; then
       no "still --no-sandbox with the restriction OFF — sandbox never engages"
     else
       ok "no --no-sandbox flag: Chromium sandbox active"
     fi
   else
-    no "AppImage GUI did not open at Mint default"; head -20 "$log/appimage-off.log"
+    no "no helper after the Install click — either nothing was clicked within 120s, or pkexec's cp failed (journalctl _COMM=pkexec)"; head -20 "$log/appimage-off.log"
   fi
+  # Why the app stages the helper through mkdtemp: root cannot enter the mount.
+  # If this ever FAILS the runtime started passing allow_root — re-read the note
+  # in CLAUDE.md "Packaging" before touching ensurePolkitSetup.
+  local mnt; mnt="$(appimage_mount)"
+  if [ -n "$mnt" ]; then
+    check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper.sh' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
+  else
+    no "AppImage mount not found under /tmp while the app was running"
+  fi
+  check "[ -x /usr/local/bin/katacomb-vpn-helper ]"                                                          "helper installed by the AppImage"
+  check "[ \"\$(stat -c '%a %U:%G' /usr/local/bin/katacomb-vpn-helper)\" = '755 root:root' ]"                  "helper is 755 root:root"
+  check "cmp -s '$REPO_ROOT/resources/linux/privileged/katacomb-vpn-helper.sh' /usr/local/bin/katacomb-vpn-helper" "helper byte-identical to resources/linux/privileged/"
+  check "[ -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]"                                         "polkit policy installed by the AppImage"
+  check "[ \"\$(stat -c '%a %U:%G' /usr/share/polkit-1/actions/com.katacomb.vpn.policy)\" = '644 root:root' ]" "policy is 644 root:root"
+  check "cmp -s '$REPO_ROOT/resources/linux/privileged/com.katacomb.vpn.policy' /usr/share/polkit-1/actions/com.katacomb.vpn.policy" "policy byte-identical to resources/linux/privileged/"
+  check "! ls -d /tmp/katacomb-helper-* >/dev/null 2>&1"                                                      "mkdtemp staging dir cleaned up"
   kill_app
   assert_no_app
+  # Self-revert: the deb phases and section 8 assert a clean slate.
+  rm -f /usr/local/bin/katacomb-vpn-helper /usr/share/polkit-1/actions/com.katacomb.vpn.policy
 
   head_ "8. Restore"
   sysctl -w "$SYSCTL=0" >/dev/null
   check "[ \"$(sysctl -n $SYSCTL)\" = 0 ]" "sysctl back to Mint default"
-  # Proves the helper dialog was cancelled, not accepted: if WM_DELETE had hit
-  # "Install" instead of its cancelId, pkexec would have deployed these.
-  check "[ ! -e /usr/local/bin/katacomb-vpn-helper ]" "AppImage dialog was cancelled — no helper installed"
+  check "[ ! -e /usr/local/bin/katacomb-vpn-helper ]" "install test reverted — no helper left behind"
   check "[ ! -e /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]" "no polkit policy left behind"
   info "logs kept in $log"
 

@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
 
 // SHA-256 hashes of the bundled binaries (vendored in-repo under
-// resources/linux/v2ray/ and shipped in the package). Shared by the user-space
+// resources/linux/bin/ and shipped in the package). Shared by the user-space
 // app (vpn-manager) and the root daemon, which both refuse to execute a binary
 // whose hash doesn't match. Update these whenever the vendored binaries are
 // replaced. Node builtins only — importable by the standalone daemon (no Electron deps).

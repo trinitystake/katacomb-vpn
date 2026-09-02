@@ -44,8 +44,8 @@ const V2RAY_CONFIG = join(SECURE_TMPDIR, 'v2ray.json')
  */
 function resolveBundled(name: string): string {
   const bundled = is.dev
-    ? join(__dirname, '../../resources/linux/v2ray', name)
-    : join(process.resourcesPath, 'linux/v2ray', name)
+    ? join(__dirname, '../../resources/linux/bin', name)
+    : join(process.resourcesPath, 'linux/bin', name)
 
   if (existsSync(bundled)) {
     if (!verifyBinaryIntegrity(bundled, name)) {

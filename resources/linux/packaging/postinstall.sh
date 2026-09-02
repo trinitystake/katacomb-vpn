@@ -76,9 +76,9 @@ fi
 # Katacomb VPN specifics
 # ============================================================================
 
-HELPER_SRC="$APP_DIR/resources/linux/katacomb-vpn-helper.sh"
-POLICY_SRC="$APP_DIR/resources/linux/com.katacomb.vpn.policy"
-UNIT_SRC="$APP_DIR/resources/linux/katacomb-vpn-daemon.service"
+HELPER_SRC="$APP_DIR/resources/linux/privileged/katacomb-vpn-helper.sh"
+POLICY_SRC="$APP_DIR/resources/linux/privileged/com.katacomb.vpn.policy"
+UNIT_SRC="$APP_DIR/resources/linux/privileged/katacomb-vpn-daemon.service"
 
 HELPER_DEST="/usr/local/bin/katacomb-vpn-helper"
 POLICY_DEST="/usr/share/polkit-1/actions/com.katacomb.vpn.policy"

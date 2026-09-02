@@ -25,7 +25,7 @@
 set -euo pipefail
 AWG_GO_COMMIT=1cc94272ca8e9e223a5fe76382f5880f09d3c12d
 AWG_TOOLS_COMMIT=61e741780e8465a67a7d7fb6cffe14a8a15d624a
-DEST="$(cd "$(dirname "$0")/.." && pwd)/resources/linux/v2ray"
+DEST="$(cd "$(dirname "$0")/.." && pwd)/resources/linux/bin"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # debian:bullseye == glibc 2.31. Raise only with a deliberate decision to drop

@@ -3,7 +3,7 @@
 Katacomb VPN itself is **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
 
 The packages (`.deb`, AppImage) additionally ship six third-party executables under
-`resources/linux/v2ray/`. Each is a **separate program**, executed as its own process —
+`resources/linux/bin/`. Each is a **separate program**, executed as its own process —
 Katacomb VPN never links their code into its own. Their licenses apply to those files
 only, and the full text of each accompanies the binary in the same directory.
 
@@ -58,7 +58,7 @@ enough for Debian 11+). Run it to reproduce the shipped binaries byte-for-byte:
 
 ```bash
 ./scripts/build-amneziawg.sh
-sha256sum resources/linux/v2ray/{amneziawg-go,awg,awg-quick}   # must match binary-integrity.ts
+sha256sum resources/linux/bin/{amneziawg-go,awg,awg-quick}   # must match binary-integrity.ts
 ```
 
 The upstream sources themselves:

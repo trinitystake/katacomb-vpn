@@ -95,10 +95,13 @@ Strict Electron security isolation with three process boundaries:
 
 ### Privilege Escalation
 
-VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a polkit helper:
-- `resources/linux/katacomb-vpn-helper.sh` — installed to `/usr/local/bin/katacomb-vpn-helper`
-- `resources/linux/com.katacomb.vpn.policy` — polkit policy for cached auth
-- `resources/linux/postinstall.sh` — deb postinstall that deploys the helper + policy
+VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a polkit helper.
+`resources/linux/` is laid out by role: `bin/` (vendored binaries beside their licence
+texts), `privileged/` (what postinstall copies onto the system), `packaging/` (the deb
+maintainer scripts, deliberately NOT shipped inside the package):
+- `resources/linux/privileged/katacomb-vpn-helper.sh` — installed to `/usr/local/bin/katacomb-vpn-helper`
+- `resources/linux/privileged/com.katacomb.vpn.policy` — polkit policy for cached auth
+- `resources/linux/packaging/postinstall.sh` — deb postinstall that deploys the helper + policy
 - Helper commands: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard/AmneziaWG interface: `sntl0`. tun2socks: `sntl-tun`. OpenVPN: `sntl-ovpn`.
 
@@ -827,7 +830,7 @@ What differs:
 - The handshake reuses the generic `sdkHandshake(sid, { uuid }, …)` (VLESS peer
   material is a UUID, same as V2Ray); `performHandshake`'s `nodeType === 4` branch
   generates the uuid from an SDK `V2Ray` instance purely for that.
-- A separate **`xray`** binary is bundled in `resources/linux/v2ray/` (Xray-core
+- A separate **`xray`** binary is bundled in `resources/linux/bin/` (Xray-core
   official release, SHA-pinned in `binary-integrity.ts` — vendor + verify checksum +
   update the pin when upgrading). `extraResources` ships everything under that dir.
 
@@ -836,7 +839,7 @@ the child-process + tun2socks tunnel path because the `hysteria` client exposes 
 SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What differs:
 - Its own bundled **`hysteria`** binary (apernet/hysteria, SHA-pinned in
   `binary-integrity.ts`; CLI `hysteria client -c <file>`, JSON config via viper by `.json`
-  ext) in `resources/linux/v2ray/`.
+  ext) in `resources/linux/bin/`.
 - The SDK has no Hysteria2 class at all, so `src/main/hysteria-config.ts`
   (`buildHysteria2Config`, pure + unit-tested) synthesizes the whole client config from a
   few handshake-metadata scalars: `server`/`auth`(=uuid)/`tls{insecure:true,pinSHA256}`/
@@ -869,7 +872,7 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   the client generates them (Jc [3,10], Jmin [64,256], Jmax [512,1024], the SDK's
   own defaults). Constraint re-checks (S1+56≠S2; H1-H4 all-zero or all distinct >4;
   I1-I5 tag grammar) throw → refund.
-- Three bundled binaries in `resources/linux/v2ray/` — **`amneziawg-go`, `awg`,
+- Three bundled binaries in `resources/linux/bin/` — **`amneziawg-go`, `awg`,
   `awg-quick`** — built from source by `scripts/build-amneziawg.sh` at the exact
   commits the upstream node pins (no prebuilt amneziawg-go exists anywhere), SHA-pinned incl.
   the root-run awg-quick bash script. **No system-PATH fallback — root-run binaries
@@ -1398,13 +1401,19 @@ This codebase follows Karpathy-style discipline. Apply these in order of precede
 ### Packaging
 
 `electron-builder.yml` targets Linux only (AppImage + deb). Bundled binaries live in
-`resources/linux/v2ray/` and are copied wholesale to `extraResources`.
+`resources/linux/bin/`, beside their `LICENSE.*` texts, and reach the package through the
+ONE `extraResources` entry for `resources/linux/` (copyDir preserves the `bin/` and
+`privileged/` subfolders). That entry excludes `packaging/` on purpose: fpm embeds a
+macro-EXPANDED copy of postinstall/postrm in the control archive, and the copy the glob
+used to leave at `/opt/.../resources/linux/` was root-owned, +x and macro-UNexpanded, so
+running it by hand would set `APP_DIR` to `/opt/` and repoint the `/opt/katacomb-vpn`
+symlink the systemd unit depends on. Nothing reads it.
 
 **Every custom key in `electron-builder.yml` REPLACES its default, never merges.**
 This cost three of the four defects in the portability audit: `deb.depends` dropped
 all nine of Chromium's GUI libraries, `deb.recommends` dropped `libappindicator3-1`,
 and `afterInstall` dropped electron-builder's own postinst (the AppArmor profile and
-the chrome-sandbox SUID logic — `resources/linux/postinstall.sh` now begins with that
+the chrome-sandbox SUID logic — `resources/linux/packaging/postinstall.sh` now begins with that
 generated block verbatim, then appends ours). Each site says so inline; if you add a
 custom key, re-add whatever the default supplied.
 
@@ -1490,6 +1499,29 @@ The `.deb` is unaffected — its profile makes the probe succeed. The README ste
 Ubuntu users to the deb; don't patch `AppRun` (diverges from upstream) and don't add
 `--no-sandbox` anywhere yourself.
 
+**Root cannot read a running AppImage, so anything handed to `pkexec` must be staged
+off the mount first.** The runtime mounts the squashfs as
+`fuse … user_id=<uid>,group_id=<gid>` with neither `allow_root` nor `allow_other`
+(measured; the runtime embeds neither string and `/etc/fuse.conf` leaves
+`user_allow_other` off), and FUSE's default denies every other uid — root is not
+exempt, because the check is FUSE's own, not DAC. `ensurePolkitSetup` (`main/index.ts`)
+used to hand `pkexec sh -c 'cp -- "$1" …'` a `$1` on that mount: root's `cp` got EACCES,
+the `&&` chain stopped, and the `catch {}` swallowed it — so the "VPN Helper Setup"
+dialog came back on every launch, and an AppImage-only user could NEVER get the helper
+(then `privileged.ts` fails every root-requiring connect with "VPN helper not
+installed"). Confirmed 2026-09-02: three authenticated Install clicks, nothing on disk,
+while the identical code path worked from `/opt` (deb) and from the repo (dev). Latent
+since the first commit, because the QA script's `dismiss_helper_dialog` deliberately
+answered Skip. The fix stages both files through a private `mkdtempSync` dir under
+`tmpdir()` (a 0700 dir is enough — plain DAC lets root through) and removes it in a
+`finally`. `verify-deb-portability.sh` section 7 (and the phased `appimage` step) now
+click **Install** once, assert the helper is 755 root:root and byte-identical to
+`resources/linux/privileged/`, assert that root really cannot `cat` the mount (a FAIL
+there means the runtime started passing `allow_root` — re-read this before "simplifying"
+the staging away), and then remove both files again so the deb phases keep their clean
+slate. Anything else in main that ever hands a resource path to `pkexec`, `sudo`, or the
+daemon inherits this: copy it out first.
+
 **Verify packaging by installing, not by reading config** —
 `scripts/verify-deb-portability.sh` (interactive, needs root, pauses for GUI steps)
 does the full install/launch/connect/upgrade/remove cycle, plus an `appimage` phase for
@@ -1503,7 +1535,7 @@ Flip the sysctl to reproduce stock behaviour on this hardware.
 
 Licensing (required for any public distribution): the app is **GPL-3.0-or-later**
 (`LICENSE`, `package.json` `license` → the deb's `License:` field). All six bundled
-binaries carry their upstream text as `resources/linux/v2ray/LICENSE.<name>`, and
+binaries carry their upstream text as `resources/linux/bin/LICENSE.<name>`, and
 `THIRD-PARTY-LICENSES.md` records each one's pinned version/commit plus the GPL-2.0
 source offer for `awg`/`awg-quick` (the only copyleft binary — `tun2socks` v2.6.0 is
 MIT, despite the v1 series having been GPL-3.0). `LICENSE` and `THIRD-PARTY-LICENSES.md`

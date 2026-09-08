@@ -17,6 +17,23 @@ import { migrateLegacyUserData, dedupeWalletEntries, migrateProviderModeToWallet
 import { listProviders } from './provider-service'
 import { isDaemonAvailable } from './daemon-client'
 import { IPC } from '../shared/ipc-channels'
+import { setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net'
+
+// Node's connection selection ("happy eyeballs") tries a host's addresses one at
+// a time and CANCELS an attempt that has not connected within this budget. The
+// default (250 ms in older Node, 500 ms in current) is shorter than a round trip
+// through a far tunnel: via a node on the other side of the world the SYN-ACK
+// lands ~330 ms or more after the SYN, by which time Node has closed the socket,
+// so the kernel answers the reply with RST and the lookup fails with ETIMEDOUT.
+// Seen as "IP: unreachable" on every far node while browsing through the same
+// tunnel worked, because Chromium races addresses instead of cancelling. Only
+// hosts with both A and AAAA records are affected (icanhazip, ipapi.co, most RPC
+// endpoints); single-family hosts and IP literals never enter this path. The cost
+// of a long budget is paid only when an address family is silently blackholed (no
+// ICMP), which is rare; an unroutable family fails instantly and moves on. 2 s
+// covers a two-hop chain across the world; every caller still bounds the request
+// with its own AbortSignal.
+setDefaultAutoSelectFamilyAttemptTimeout(2_000)
 
 const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
 const POLICY_PATH = '/usr/share/polkit-1/actions/com.katacomb.vpn.policy'

@@ -101,6 +101,7 @@ texts), `privileged/` (what postinstall copies onto the system), `packaging/` (t
 maintainer scripts, deliberately NOT shipped inside the package):
 - `resources/linux/privileged/katacomb-vpn-helper.sh` — installed to `/usr/local/bin/katacomb-vpn-helper`
 - `resources/linux/privileged/com.katacomb.vpn.policy` — polkit policy for cached auth
+- `resources/linux/privileged/katacomb-vpn-daemon.service` — systemd unit for the root daemon
 - `resources/linux/packaging/postinstall.sh` — deb postinstall that deploys the helper + policy
 - Helper commands: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard/AmneziaWG interface: `sntl0`. tun2socks: `sntl-tun`. OpenVPN: `sntl-ovpn`.
@@ -348,7 +349,7 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   documented meaning, "system traffic is redirected", which is FALSE in that window.
   **It was invisible until `runPrivileged` went async** (the fix for the disconnect
   freeze): while it was `execFileSync` the main process could not turn the event loop
-  during the dialog, so the 3 s status poll never observed the gap. WireGuard was never
+  during the dialog, so the renderer's status poll never observed the gap. WireGuard was never
   affected, its branch checks for the interface. **And the one helper that
   spawns-waits-and-asks whether the core survived** (`assertProxyChildStarted`, reached
   from the reconnect body and, via `finishChildProxyConnect`, the v2ray/xray/hysteria2
@@ -555,7 +556,7 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   - **The teardown MUST tell the tray.** `createTrayIcon()` reads `getConnectionStatus()`
     synchronously at startup, i.e. BEFORE the teardown's privileged round-trip returns, so
     it caches "connected" off the very interface about to be deleted, and the tray only
-    ever updates on a push, unlike the renderer's 3s poll. `healOrphanedTunnel` therefore
+    ever updates on a push, unlike the renderer, which also polls. `healOrphanedTunnel` therefore
     ends at `notifyTraySettled()`. Live symptom (2026-08-26): idle window, orphan banner
     and a green tray dot, all at once.
   - **Proxy cores are reaped by pid, and an orphan does NOT die on its own.** Measured
@@ -611,7 +612,7 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 
 ### Renderer Conventions
 
-- Hooks in `src/renderer/hooks/`: `useWallet` (balance polling 300s), `useNodes` (node fetch + filter/sort, 60s refresh), `useConnection` (status polling 3s). Polling intervals are hardcoded per-hook — not user-tunable.
+- Hooks in `src/renderer/hooks/`: `useWallet` (active wallet + store, no polling), `useBalance` (balance, 30s), `useNodes` (filter/sort over `useNodesContext().allNodes` — it does NOT fetch), `useConnection` (status, state-dependent: 15s idle, 10s connected, 3s reconnecting). The node feed's own 60s refresh lives in main (`ipc-handlers.ts`) and reaches the renderer as `NODES_UPDATE` pushes. Intervals are hardcoded per-hook — not user-tunable.
 - Node table uses `@tanstack/react-virtual` for virtualized rendering (5000+ nodes).
 - **The node list is NOT chain data** — it comes from `api.sentnodes.com` over plain
   HTTPS, so a bad `rpcEndpoint` never explains an empty node table (and picking a

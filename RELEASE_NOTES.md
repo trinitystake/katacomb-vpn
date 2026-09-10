@@ -41,21 +41,7 @@ arrives as a dismissible chip, so you can start there and narrow it down.
   bookmark toggle, address copy, and latency probe button. All four are keyboard-native,
   no tab traps.
 
-## Known limitations
-
-- **A chain has a hard life of about two hours.** Measured on mainnet: exit hops report
-  no usage to the chain, so the exit's idle deadline is pinned at purchase and never
-  moves, even while the entry still has quota. This is node-side behaviour, not a client
-  bug, but it is yours to plan around.
-- Chains can only be built from V2Ray and XRAY nodes. The other protocols have no
-  equivalent of the relay mechanism a chain needs.
-- Expect roughly 2 to 3 MB/s and a large latency increase on a chain. Chains are for
-  privacy, not speed.
-- Local-proxy mode tunnels only the apps you point at its SOCKS address. Everything else
-  leaks, by design, and the kill switch does not apply.
-- The TLS and Reality wrapping does not authenticate the node. There is nothing on chain
-  to verify a node's certificate against, so an attacker on your local network can answer
-  a handshake in a node's place.
+## Fixes in 1.6.0
 
 ## Known limitations
 

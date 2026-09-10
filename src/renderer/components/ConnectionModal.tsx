@@ -5,6 +5,8 @@ import { usePlansContext } from '../contexts/PlansContext'
 import ConnectErrorActions from './ConnectErrorActions'
 import ProgressSteps from './ProgressSteps'
 import Spinner from './Spinner'
+import CopyButton from './CopyButton'
+import ProtocolIcon from './ProtocolIcon'
 import { useNavigation } from '../contexts/NavigationContext'
 import { useConnection } from '../hooks/useConnection'
 import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
@@ -250,13 +252,19 @@ export default function ConnectionModal({ node, onClose }: Props) {
             <span className="text-text-secondary shrink-0">Address</span>
             {/* Full address, not truncated: it is the node's on-chain identity and the
                 only way to tell two nodes of the same operator apart. */}
-            <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.address}</span>
+            <span className="flex items-start justify-end gap-2 min-w-0">
+              <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.address}</span>
+              <CopyButton value={node.address} label="Copy address" className="mt-0.5" />
+            </span>
           </div>
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary shrink-0">Endpoint</span>
             {/* host:port the node advertises. Usually already an IPv4 literal; when it
                 is a hostname the tunnel pins it to an IP at connect time. */}
-            <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.api}</span>
+            <span className="flex items-start justify-end gap-2 min-w-0">
+              <span className="text-text-primary font-mono text-xs break-all text-right select-text">{node.api}</span>
+              <CopyButton value={node.api} label="Copy endpoint" className="mt-0.5" />
+            </span>
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Location</span>
@@ -267,7 +275,8 @@ export default function ConnectionModal({ node, onClose }: Props) {
           </div>
           <div className="flex justify-between">
             <span className="text-text-secondary">Type</span>
-            <span className={protocolMeta(node.type).color}>
+            <span className={`flex items-center gap-1.5 ${protocolMeta(node.type).color}`}>
+              <ProtocolIcon type={node.type} />
               {protocolMeta(node.type).label}
             </span>
           </div>

@@ -4,10 +4,8 @@ import { useNodesContext } from '../contexts/NodesContext'
 import { v2rayConnectionCategory } from '../utils/v2ray-connection'
 import { nodeStatusRank } from '../utils/node-status'
 
-/** Exported so the filter bar can tell whether a control is still at its default. */
-export const DEFAULT_FILTER: NodeFilter = {
+const DEFAULT_FILTER: NodeFilter = {
   country: '',
-  city: '',
   type: 'all',
   activeOnly: true,
   healthyOnly: true,
@@ -19,7 +17,7 @@ export const DEFAULT_FILTER: NodeFilter = {
   search: '',
 }
 
-type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'peers' | 'latency' | 'status' | 'eligibility'
+type SortKey = 'country' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'leases' | 'sessions' | 'peers' | 'latency' | 'status' | 'eligibility'
 type SortDir = 'asc' | 'desc'
 
 function getUdvpnPrice(prices: { denom: string; value: string }[]): number {
@@ -38,9 +36,6 @@ function compareNodes(
     case 'country':
       cmp = a.country.localeCompare(b.country)
       break
-    case 'city':
-      cmp = a.city.localeCompare(b.city)
-      break
     case 'moniker':
       cmp = a.moniker.localeCompare(b.moniker)
       break
@@ -52,6 +47,12 @@ function compareNodes(
       break
     case 'priceHr':
       cmp = getUdvpnPrice(a.hourlyPrices) - getUdvpnPrice(b.hourlyPrices)
+      break
+    case 'leases':
+      cmp = a.leases - b.leases
+      break
+    case 'sessions':
+      cmp = a.sessions - b.sessions
       break
     case 'peers':
       cmp = a.peers - b.peers
@@ -86,9 +87,8 @@ const EMPTY_RANK_MAP: Map<string, number> = new Map()
 /**
  * @param prefilter Narrows the universe this consumer sees, BEFORE anything else.
  *   The Multi-hop tab passes `isChainable`. Applied here rather than to the result so
- *   that the country and city dropdowns, and the total, describe the same universe as
- *   the table: filtered afterwards, they would offer places with no chainable node in
- *   them. Pass a stable (module-level) function, or the memo below recomputes forever.
+ *   that the total in the filter bar describes the same universe as the table.
+ *   Pass a stable (module-level) function, or the memo below recomputes forever.
  * @param eligibilityRank Scores for the `eligibility` sort key, by node address. Same
  *   arrangement as `latencyMap`: the value is measured by the consumer, this hook only
  *   orders by it.
@@ -112,24 +112,10 @@ export function useNodes(
   const [sortKey, setSortKey] = useState<SortKey>('country')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
 
-  const countries = useMemo(() => {
-    const set = new Set(allNodes.map((n) => n.country).filter(Boolean))
-    return Array.from(set).sort()
-  }, [allNodes])
-
-  const cities = useMemo(() => {
-    const filtered = filter.country
-      ? allNodes.filter((n) => n.country === filter.country)
-      : allNodes
-    const set = new Set(filtered.map((n) => n.city).filter(Boolean))
-    return Array.from(set).sort()
-  }, [allNodes, filter.country])
-
   const filteredNodes = useMemo(() => {
     let nodes = allNodes
 
     if (filter.country) nodes = nodes.filter((n) => n.country === filter.country)
-    if (filter.city) nodes = nodes.filter((n) => n.city === filter.city)
     if (filter.type !== 'all') nodes = nodes.filter((n) => n.type === filter.type)
     if (filter.activeOnly) nodes = nodes.filter((n) => n.isActive)
     if (filter.healthyOnly) nodes = nodes.filter((n) => n.isHealthy)
@@ -140,8 +126,15 @@ export function useNodes(
     nodes = nodes.filter((n) => n.type !== 2 || filter.v2rayConnection[v2rayConnectionCategory(n.connection)])
     if (filter.bookmarkedOnly) nodes = nodes.filter((n) => bookmarks.has(n.address))
     if (filter.search) {
-      const q = filter.search.toLowerCase()
-      nodes = nodes.filter((n) => n.moniker.toLowerCase().includes(q))
+      // Address too, and the bech32 address is already lowercase: pasting one from
+      // the Sessions tab or a block explorer finds the node.
+      const q = filter.search.trim().toLowerCase()
+      nodes = nodes.filter((n) =>
+        n.moniker.toLowerCase().includes(q) ||
+        n.address.includes(q) ||
+        n.country.toLowerCase().includes(q) ||
+        n.city.toLowerCase().includes(q),
+      )
     }
 
     return nodes.slice().sort((a, b) => compareNodes(a, b, sortKey, sortDir, latencyMap, eligibilityRank))
@@ -157,14 +150,7 @@ export function useNodes(
   }
 
   function updateFilter(patch: Partial<NodeFilter>) {
-    setFilter((f) => {
-      const next = { ...f, ...patch }
-      // Reset city when country changes
-      if (patch.country !== undefined && patch.country !== f.country) {
-        next.city = ''
-      }
-      return next
-    })
+    setFilter((f) => ({ ...f, ...patch }))
   }
 
   return {
@@ -178,8 +164,6 @@ export function useNodes(
     loading,
     lastFetched,
     error,
-    countries,
-    cities,
     refresh,
     bookmarks,
     toggleBookmark,

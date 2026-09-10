@@ -40,8 +40,10 @@ export interface NodePrice {
 }
 
 export interface NodeFilter {
+  // Set only by the Map tab's handoff (a country picked on the globe); the filter bar
+  // shows it as a dismissible chip and has no select for it, since the search box
+  // and the Map tab between them cover typing and browsing a place.
   country: string
-  city: string
   type: 'all' | ProtocolType
   activeOnly: boolean
   healthyOnly: boolean

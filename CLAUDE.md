@@ -614,6 +614,16 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 
 - Hooks in `src/renderer/hooks/`: `useWallet` (active wallet + store, no polling), `useBalance` (balance, 30s), `useNodes` (filter/sort over `useNodesContext().allNodes` — it does NOT fetch), `useConnection` (status, state-dependent: 15s idle, 10s connected, 3s reconnecting). The node feed's own 60s refresh lives in main (`ipc-handlers.ts`) and reaches the renderer as `NODES_UPDATE` pushes. Intervals are hardcoded per-hook — not user-tunable.
 - Node table uses `@tanstack/react-virtual` for virtualized rendering (5000+ nodes).
+  Rows are a FIXED 48px (`ROW_HEIGHT`), so a cell is at most two lines with
+  `leading-tight`; a third line clips silently. The Nodes and Multi-hop tables share
+  their cells and column widths through `NodeCells.tsx` (`NODE_COL`), so a width or a
+  rule (the directory-claim tooltips, whitelisted-never-green, the cleartext-red V2Ray
+  badge, the status pill) changes in one place for both; NodeTable's doc comment holds
+  the width arithmetic against the 960px window minimum. Icons are hand-drawn SVGs in
+  `Icons.tsx`, never Unicode glyphs (U+29C9 is missing from DejaVu Sans on a minimal
+  Debian). The protocol marks in `ProtocolIcon.tsx` are ORIGINAL glyphs, not the
+  projects' logos: WireGuard's trademark policy forbids its logo in third-party
+  application graphics without written permission and OpenVPN Inc. has a similar policy.
 - **The node list is NOT chain data** — it comes from `api.sentnodes.com` over plain
   HTTPS, so a bad `rpcEndpoint` never explains an empty node table (and picking a
   faster RPC never fixes one). `NodesContext` must stay *active*, not passive: it

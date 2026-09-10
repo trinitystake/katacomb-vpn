@@ -17,9 +17,18 @@ import {
 } from '../../utils/chain-node'
 import { formatP2p } from '../../../shared/funds'
 import { COUNTRY_CODES } from '../../utils/country-codes'
-import { nodeStatusMeta } from '../../utils/node-status'
-import { protocolMeta } from '../../utils/protocols'
 import NodeFilters from '../NodeFilters'
+import CountryFlag from '../CountryFlag'
+import { ChevronIcon, StarIcon } from '../Icons'
+import {
+  NODE_COL,
+  ROW_HEIGHT,
+  NodeIdentityCell,
+  TypeCell,
+  PriceCell,
+  LatencyCell,
+  StatusCell,
+} from '../NodeCells'
 import ChainReviewModal from './ChainReviewModal'
 import InfoTip from '../InfoTip'
 import Spinner from '../Spinner'
@@ -49,30 +58,29 @@ const CHAIN_PROTOCOL_OPTIONS = [
   { value: 4, label: 'XRAY' },
 ] as const
 
-const CACHE_TTL = 10 * 60 * 1000
-
-type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'latency' | 'status' | 'eligibility'
+type SortKey = 'country' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'latency' | 'status' | 'eligibility'
 
 /**
- * The Nodes tab's columns minus Peers (a chain hop is picked on eligibility, not on
- * how busy the node is) plus the eligibility grade, which is the column this whole page
- * turns on.
+ * The Nodes tab's columns (widths shared through NODE_COL, so the two tables stay
+ * identical) minus Leases, Sessions and Peers (a chain hop is picked on eligibility,
+ * not on how busy the node is) plus the eligibility grade, which is the column this
+ * whole page turns on. Fixed widths sum to 132+110+110+96+72+80 = 600, plus the 60px
+ * of row chrome, so the identity column keeps ~287px at the window minimum.
  *
  * Every one of them is sortable, and that is also what keeps the casing consistent: the
  * header row carries `uppercase`, but a <button> does not inherit it. While eligibility
  * was the one unsortable column it was the one plain <div>, so it alone rendered
  * "ELIG." among "Country" and "Latency". Don't make a header a non-button again.
+ * Price is the one exception in shape, not in kind: one column, two sort buttons.
  */
 const COLUMNS: { key: SortKey; label: string; width: string }[] = [
-  { key: 'country', label: 'Country', width: 'w-[160px]' },
-  { key: 'city', label: 'City', width: 'w-[120px]' },
-  { key: 'moniker', label: 'Moniker', width: 'flex-1 min-w-[140px]' },
-  { key: 'type', label: 'Type', width: 'w-[80px]' },
+  { key: 'moniker', label: 'Node', width: NODE_COL.identity },
+  { key: 'country', label: 'Location', width: NODE_COL.location },
+  { key: 'type', label: 'Type', width: NODE_COL.type },
   { key: 'eligibility', label: 'Eligibility', width: 'w-[110px]' },
-  { key: 'priceGb', label: 'P2P/GB', width: 'w-[80px]' },
-  { key: 'priceHr', label: 'P2P/Hr', width: 'w-[80px]' },
-  { key: 'latency', label: 'Latency', width: 'w-[70px] justify-center' },
-  { key: 'status', label: 'Status', width: 'w-[60px] justify-center' },
+  { key: 'priceHr', label: 'Price', width: `${NODE_COL.price} justify-end` },
+  { key: 'latency', label: 'Latency', width: `${NODE_COL.latency} justify-center` },
+  { key: 'status', label: 'Status', width: `${NODE_COL.status} justify-center` },
 ]
 
 const TONE_CLASS = {
@@ -137,8 +145,6 @@ export default function MultihopView() {
     loading,
     lastFetched,
     error,
-    countries,
-    cities,
     refresh,
     bookmarks,
     toggleBookmark,
@@ -195,9 +201,14 @@ export default function MultihopView() {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 36,
+    estimateSize: () => ROW_HEIGHT,
     overscan: 20,
   })
+
+  function sortIndicator(key: SortKey) {
+    if (sortKey !== key) return null
+    return <ChevronIcon direction={sortDir === 'asc' ? 'up' : 'down'} className="w-3 h-3 text-accent" />
+  }
 
   const alreadyConnected = status.state === 'connected' || status.state === 'reconnecting'
   // `chainExit` is set only while a two-hop chain is up, so it is what tells this
@@ -349,11 +360,10 @@ export default function MultihopView() {
       <NodeFilters
         filter={filter}
         updateFilter={updateFilter}
-        countries={countries}
-        cities={cities}
         totalCount={totalCount}
         filteredCount={rows.length}
         loading={loading}
+        lastFetched={lastFetched}
         onRefresh={refresh}
         batchProgress={batchProgress}
         onTestBatch={() => {
@@ -418,44 +428,60 @@ export default function MultihopView() {
       ) : (
       <div ref={parentRef} className="flex-1 overflow-auto">
         <div className="sticky top-0 z-10 flex items-center px-4 py-2 border-b border-border bg-bg-secondary text-text-secondary text-xs font-medium uppercase tracking-wide select-none">
-          <div className="w-[28px] shrink-0" />
-          {COLUMNS.map((col) => (
-            <button
-              key={col.key}
-              onClick={() => toggleSort(col.key)}
-              className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
-              title={col.key === 'eligibility' ? 'Sort by eligibility for this hop, pickable first' : undefined}
-            >
-              {col.label}
-              {sortKey === col.key && (
-                <span className="text-accent">{sortDir === 'asc' ? '▲' : '▼'}</span>
-              )}
-            </button>
-          ))}
+          <div className={`${NODE_COL.bookmark} shrink-0`} />
+          {COLUMNS.map((col) =>
+            col.key === 'priceHr' ? (
+              <div key={col.key} className={`${col.width} flex items-center gap-1.5 shrink-0`} title="Price in P2P">
+                <span>{col.label}</span>
+                {(['priceHr', 'priceGb'] as const).map((key) => (
+                  <button
+                    key={key}
+                    onClick={() => toggleSort(key)}
+                    className={`normal-case hover:text-accent transition-colors flex items-center gap-0.5 ${
+                      sortKey === key ? 'text-text-primary' : ''
+                    }`}
+                  >
+                    {key === 'priceHr' ? '/hr' : '/GB'}
+                    {sortIndicator(key)}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <button
+                key={col.key}
+                onClick={() => toggleSort(col.key)}
+                className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
+                title={col.key === 'eligibility' ? 'Sort by eligibility for this hop, pickable first' : undefined}
+              >
+                {col.label}
+                {sortIndicator(col.key)}
+              </button>
+            ),
+          )}
         </div>
 
         <div style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const node = rows[virtualRow.index]
             if (!node) return null
-            const code = COUNTRY_CODES[node.country] || ''
-            const nodeStatus = nodeStatusMeta(node)
             const otherHop = activeSlot === 'entry' ? exit : entry
             const takenByOtherHop = otherHop?.address === node.address
             const picked = (activeSlot === 'entry' ? entry : exit)?.address === node.address
             const state = chainRowState(node, eligibility.results.get(node.address), activeSlot)
             const selectable = state.selectable && !takenByOtherHop
 
+            const activate = () => { if (selectable) setSlot(activeSlot, node) }
+
             return (
               <div
                 key={node.address}
-                onClick={() => { if (selectable) setSlot(activeSlot, node) }}
-                className={`absolute left-0 w-full flex items-center px-4 text-sm border-b transition-colors ${
+                onClick={activate}
+                className={`absolute left-0 w-full flex items-center px-4 text-sm border-b transition-colors before:absolute before:inset-y-0 before:left-0 before:w-0.5 ${
                   picked
-                    ? 'bg-success-subtle border-success'
+                    ? 'bg-success-subtle border-success before:bg-success'
                     : 'border-border'
                 } ${
-                  selectable ? 'cursor-pointer hover:bg-bg-hover' : 'opacity-40 cursor-not-allowed'
+                  selectable ? 'cursor-pointer hover:bg-bg-hover hover:before:bg-accent' : 'opacity-40 cursor-not-allowed'
                 }`}
                 style={{
                   height: `${virtualRow.size}px`,
@@ -464,26 +490,23 @@ export default function MultihopView() {
               >
                 <button
                   onClick={(e) => { e.stopPropagation(); toggleBookmark(node.address) }}
-                  className={`w-[28px] shrink-0 text-center transition-colors ${
+                  className={`${NODE_COL.bookmark} shrink-0 flex justify-center transition-colors ${
                     bookmarks.has(node.address) ? 'text-warning' : 'text-text-tertiary hover:text-text-secondary'
                   }`}
                   title={bookmarks.has(node.address) ? 'Remove bookmark' : 'Bookmark node'}
+                  aria-label={bookmarks.has(node.address) ? 'Remove bookmark' : 'Bookmark node'}
                 >
-                  {bookmarks.has(node.address) ? '★' : '☆'}
+                  <StarIcon filled={bookmarks.has(node.address)} className="w-3.5 h-3.5" />
                 </button>
-                <div className="w-[160px] shrink-0 flex items-center gap-2 truncate">
-                  {code && <span className={`fi fi-${code}`} style={{ fontSize: '12px', lineHeight: 1 }} />}
-                  <span className="truncate">{node.country || '—'}</span>
+                <NodeIdentityCell node={node} onActivate={activate} />
+                <div className={`${NODE_COL.location} shrink-0 leading-tight`}>
+                  <div className="flex items-center gap-2">
+                    <CountryFlag country={node.country} />
+                    <span className="truncate">{node.country || '—'}</span>
+                  </div>
+                  <div className="text-[10px] text-text-secondary truncate">{node.city || '—'}</div>
                 </div>
-                <div className="w-[120px] shrink-0 truncate text-text-secondary">
-                  {node.city || '—'}
-                </div>
-                <div className="flex-1 min-w-[140px] truncate text-text-primary">
-                  {node.moniker || '—'}
-                </div>
-                <div className="w-[80px] shrink-0">
-                  <span className={protocolMeta(node.type).color}>{protocolMeta(node.type).short}</span>
-                </div>
+                <TypeCell node={node} />
                 <div className={`w-[110px] shrink-0 truncate text-xs ${
                   takenByOtherHop ? 'text-text-tertiary' : TONE_CLASS[state.tone]
                 }`} title={takenByOtherHop ? undefined : state.title}>
@@ -491,35 +514,13 @@ export default function MultihopView() {
                     ? `picked as the ${activeSlot === 'entry' ? 'exit' : 'entry'}`
                     : state.badge}
                 </div>
-                <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
-                  {formatPrice(node.gigabytePrices)}
-                </div>
-                <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
-                  {formatPrice(node.hourlyPrices)}
-                </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); testNode(node.address, node.api) }}
-                  disabled={testingNodes.has(node.address)}
-                  className="w-[70px] shrink-0 text-center font-mono text-xs transition-colors hover:text-accent disabled:pointer-events-none"
-                  title="Test node latency"
-                >
-                  {(() => {
-                    if (testingNodes.has(node.address)) return <span className="text-text-tertiary">...</span>
-                    const probeResult = testResults.get(node.address)
-                    if (!probeResult) return <span className="text-text-tertiary">⏱</span>
-                    const stale = Date.now() - probeResult.timestamp > CACHE_TTL
-                    if (probeResult.reachable && probeResult.latencyMs !== null) {
-                      return <span className={stale ? 'text-text-tertiary' : 'text-success'}>{probeResult.latencyMs}ms</span>
-                    }
-                    return <span className={stale ? 'text-text-tertiary' : 'text-danger'}>Fail</span>
-                  })()}
-                </button>
-                <div className="w-[60px] shrink-0 flex justify-center">
-                  <span
-                    className={`status-dot ${nodeStatus.dotClass}`}
-                    title={`${nodeStatus.label}: ${nodeStatus.detail}`}
-                  />
-                </div>
+                <PriceCell node={node} />
+                <LatencyCell
+                  probe={testResults.get(node.address)}
+                  testing={testingNodes.has(node.address)}
+                  onTest={() => testNode(node.address, node.api)}
+                />
+                <StatusCell node={node} />
               </div>
             )
           })}
@@ -544,15 +545,6 @@ export default function MultihopView() {
       )}
     </div>
   )
-}
-
-function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
-  if (!prices) return '—'
-  const p = prices.find((x) => x.denom === 'udvpn')
-  if (!p) return '—'
-  const val = parseInt(p.value, 10) / 1e6
-  if (val >= 1000) return val.toLocaleString('en', { maximumFractionDigits: 0 })
-  return val.toLocaleString('en', { maximumFractionDigits: 2 })
 }
 
 /**

@@ -21,9 +21,11 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 **Finding a node**
 
 - **Map**: rotatable globe with per-country node counts, plus a country sidebar.
-- **Nodes**: virtualized table over the whole network (thousands of nodes). Filter by
-  country, city, protocol, residential/whitelisted, bookmarks; hide duplicates; sort on
-  any column. Latency probes (single or batch) and a download speed test.
+- **Nodes**: virtualized table over the whole network (thousands of nodes). Search by
+  moniker, address, country or city; filter by protocol, active/healthy,
+  residential/whitelisted, bookmarks; hide duplicates; sort on any column. Every row
+  shows the node's address with a copy button. Latency probes (single or batch) and a
+  download speed test.
 - **Multi-hop**: build a two-node chain, with the same picker, filters and latency
   probes as the Nodes tab. Candidates are graded for eligibility before you can pick
   them; what a chain does and does not buy you is under *Connecting* below.

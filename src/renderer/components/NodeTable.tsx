@@ -7,36 +7,55 @@ import { useNavigation } from '../contexts/NavigationContext'
 import NodeFilters from './NodeFilters'
 import ConnectionModal from './ConnectionModal'
 import Spinner from './Spinner'
+import CountryFlag from './CountryFlag'
+import { ChevronIcon, StarIcon } from './Icons'
+import {
+  NODE_COL,
+  ROW_HEIGHT,
+  NodeIdentityCell,
+  TypeCell,
+  PriceCell,
+  LatencyCell,
+  StatusCell,
+} from './NodeCells'
 import type { SentNode } from '../types'
-import { COUNTRY_CODES } from '../utils/country-codes'
-import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
-import { nodeStatusMeta } from '../utils/node-status'
-import { protocolMeta } from '../utils/protocols'
 
-function formatPrice(prices: { denom: string; value: string }[] | null | undefined): string {
-  if (!prices) return '—'
-  const p = prices.find((x) => x.denom === 'udvpn')
-  if (!p) return '—'
-  const val = parseInt(p.value, 10) / 1e6
-  if (val >= 1000) return val.toLocaleString('en', { maximumFractionDigits: 0 })
-  return val.toLocaleString('en', { maximumFractionDigits: 2 })
-}
+type SortKey = 'country' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'leases' | 'sessions' | 'peers' | 'latency' | 'status'
 
-type SortKey = 'country' | 'city' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'peers' | 'latency' | 'status'
-
+/**
+ * Column widths come from NODE_COL (NodeCells.tsx), shared with the Multi-hop table,
+ * so header and cell agree by construction.
+ *
+ * The sum is a hard constraint, not a preference: fixed columns
+ * 132+110+96+60+72+60+72+80 = 682, plus px-4 (32) + the bookmark gutter (28) +
+ * the identity column's 180px minimum = a 922px floor, against ~947px of content at
+ * the 960px minWidth (main/index.ts, an OUTER window size on Linux, less Chromium's
+ * ~11px thin scrollbar: global.css sets scrollbar-width before the 8px webkit rules,
+ * so the standard property is what applies). That leaves the identity column 205px at
+ * the minimum, enough for the moniker line and ~26 characters of address before the
+ * ellipsis; at 1920px it shows the whole address. Past the floor the header's
+ * background band and each row's border stop at the viewport edge while the cells
+ * spill past them. Re-do this arithmetic before adding a column.
+ *
+ * Price is one column with two sort keys (priceHr, priceGb), rendered as two buttons
+ * in the header: the entry is keyed priceHr so the active-sort lookup works for the
+ * first, and the header map special-cases it for the second.
+ *
+ * The second column is labelled Location but keyed 'country': it renders country over
+ * city and sorts by country. Keeping the key is what lets useNodes' shared default
+ * ('country') stay valid for the Map and Multi-hop tabs.
+ */
 const COLUMNS: { key: SortKey; label: string; width: string }[] = [
-  { key: 'country', label: 'Country', width: 'w-[160px]' },
-  { key: 'city', label: 'City', width: 'w-[120px]' },
-  { key: 'moniker', label: 'Moniker', width: 'flex-1 min-w-[140px]' },
-  { key: 'type', label: 'Type', width: 'w-[80px]' },
-  { key: 'priceGb', label: 'P2P/GB', width: 'w-[80px]' },
-  { key: 'priceHr', label: 'P2P/Hr', width: 'w-[80px]' },
-  { key: 'peers', label: 'Peers', width: 'w-[60px] justify-center' },
-  { key: 'latency', label: 'Latency', width: 'w-[70px] justify-center' },
-  { key: 'status', label: 'Status', width: 'w-[60px] justify-center' },
+  { key: 'moniker', label: 'Node', width: NODE_COL.identity },
+  { key: 'country', label: 'Location', width: NODE_COL.location },
+  { key: 'type', label: 'Type', width: NODE_COL.type },
+  { key: 'priceHr', label: 'Price', width: `${NODE_COL.price} justify-end` },
+  { key: 'leases', label: 'Leases', width: `${NODE_COL.leases} justify-center` },
+  { key: 'sessions', label: 'Sessions', width: `${NODE_COL.sessions} justify-center` },
+  { key: 'peers', label: 'Peers', width: `${NODE_COL.peers} justify-center` },
+  { key: 'latency', label: 'Latency', width: `${NODE_COL.latency} justify-center` },
+  { key: 'status', label: 'Status', width: `${NODE_COL.status} justify-center` },
 ]
-
-const CACHE_TTL = 10 * 60 * 1000
 
 export default function NodeTable() {
   const { status: connStatus } = useConnection()
@@ -63,8 +82,6 @@ export default function NodeTable() {
     loading,
     lastFetched,
     error,
-    countries,
-    cities,
     refresh,
     bookmarks,
     toggleBookmark,
@@ -85,20 +102,24 @@ export default function NodeTable() {
   const virtualizer = useVirtualizer({
     count: nodes.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 36,
+    estimateSize: () => ROW_HEIGHT,
     overscan: 20,
   })
+
+  function sortIndicator(key: SortKey) {
+    if (sortKey !== key) return null
+    return <ChevronIcon direction={sortDir === 'asc' ? 'up' : 'down'} className="w-3 h-3 text-accent" />
+  }
 
   return (
     <div className="h-full flex flex-col">
       <NodeFilters
         filter={filter}
         updateFilter={updateFilter}
-        countries={countries}
-        cities={cities}
         totalCount={totalCount}
         filteredCount={nodes.length}
         loading={loading}
+        lastFetched={lastFetched}
         onRefresh={refresh}
         batchProgress={batchProgress}
         onTestBatch={() => {
@@ -136,19 +157,36 @@ export default function NodeTable() {
       <div ref={parentRef} className="flex-1 overflow-auto">
         {/* Sticky header */}
         <div className="sticky top-0 z-10 flex items-center px-4 py-2 border-b border-border bg-bg-secondary text-text-secondary text-xs font-medium uppercase tracking-wide select-none">
-          <div className="w-[28px] shrink-0" />
-          {COLUMNS.map((col) => (
-            <button
-              key={col.key}
-              onClick={() => toggleSort(col.key)}
-              className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
-            >
-              {col.label}
-              {sortKey === col.key && (
-                <span className="text-accent">{sortDir === 'asc' ? '▲' : '▼'}</span>
-              )}
-            </button>
-          ))}
+          <div className={`${NODE_COL.bookmark} shrink-0`} />
+          {COLUMNS.map((col) =>
+            col.key === 'priceHr' ? (
+              // One column, two sort targets, in the order the cell stacks them.
+              <div key={col.key} className={`${col.width} flex items-center gap-1.5 shrink-0`} title="Price in P2P">
+                <span>{col.label}</span>
+                {(['priceHr', 'priceGb'] as const).map((key) => (
+                  <button
+                    key={key}
+                    onClick={() => toggleSort(key)}
+                    className={`normal-case hover:text-accent transition-colors flex items-center gap-0.5 ${
+                      sortKey === key ? 'text-text-primary' : ''
+                    }`}
+                  >
+                    {key === 'priceHr' ? '/hr' : '/GB'}
+                    {sortIndicator(key)}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <button
+                key={col.key}
+                onClick={() => toggleSort(col.key)}
+                className={`${col.width} text-left hover:text-accent transition-colors flex items-center gap-1 shrink-0`}
+              >
+                {col.label}
+                {sortIndicator(col.key)}
+              </button>
+            ),
+          )}
         </div>
 
         <div
@@ -161,18 +199,18 @@ export default function NodeTable() {
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const node = nodes[virtualRow.index]
             if (!node) return null
-            const code = COUNTRY_CODES[node.country] || ''
-            const nodeStatus = nodeStatusMeta(node)
             const isConnected = connectedAddress === node.address
 
             return (
               <div
                 key={node.address}
                 onClick={() => setSelectedNode(node)}
-                className={`absolute left-0 w-full flex items-center px-4 text-sm cursor-pointer border-b transition-colors ${
+                // The 2px left edge is a pseudo-element so the row's padding, and the
+                // width arithmetic above, stay untouched.
+                className={`absolute left-0 w-full flex items-center px-4 text-sm cursor-pointer border-b transition-colors before:absolute before:inset-y-0 before:left-0 before:w-0.5 ${
                   isConnected
-                    ? 'bg-success-subtle border-success hover:bg-success-subtle'
-                    : 'border-border hover:bg-bg-hover'
+                    ? 'bg-success-subtle border-success before:bg-success'
+                    : 'border-border hover:bg-bg-hover hover:before:bg-accent'
                 }`}
                 style={{
                   height: `${virtualRow.size}px`,
@@ -181,80 +219,44 @@ export default function NodeTable() {
               >
                 <button
                   onClick={(e) => { e.stopPropagation(); toggleBookmark(node.address) }}
-                  className={`w-[28px] shrink-0 text-center transition-colors ${
+                  className={`${NODE_COL.bookmark} shrink-0 flex justify-center transition-colors ${
                     bookmarks.has(node.address) ? 'text-warning' : 'text-text-tertiary hover:text-text-secondary'
                   }`}
                   title={bookmarks.has(node.address) ? 'Remove bookmark' : 'Bookmark node'}
+                  aria-label={bookmarks.has(node.address) ? 'Remove bookmark' : 'Bookmark node'}
                 >
-                  {bookmarks.has(node.address) ? '★' : '☆'}
+                  <StarIcon filled={bookmarks.has(node.address)} className="w-3.5 h-3.5" />
                 </button>
-                <div className="w-[160px] shrink-0 flex items-center gap-2 truncate">
-                  {code && (
-                    <span
-                      className={`fi fi-${code}`}
-                      style={{ fontSize: '12px', lineHeight: 1 }}
-                    />
-                  )}
-                  <span className="truncate">{node.country || '—'}</span>
-                  {isConnected && (
-                    <span className="status-dot status-dot-active shrink-0" />
-                  )}
+                <NodeIdentityCell node={node} onActivate={() => setSelectedNode(node)} />
+                {/* leading-tight keeps the two lines a pair; at 48px the row no longer
+                    depends on it to avoid clipping, but a third line still would. */}
+                <div className={`${NODE_COL.location} shrink-0 leading-tight`}>
+                  <div className="flex items-center gap-2">
+                    <CountryFlag country={node.country} />
+                    <span className="truncate">{node.country || '—'}</span>
+                  </div>
+                  {/* Always rendered, so every row is the same height. */}
+                  <div className="text-[10px] text-text-secondary truncate">{node.city || '—'}</div>
                 </div>
-                <div className="w-[120px] shrink-0 truncate text-text-secondary">
-                  {node.city || '—'}
+                <TypeCell node={node} />
+                <PriceCell node={node} />
+                {/* ?? '—' rather than bare interpolation: 0 is a real and common value that must
+                    render as 0, while an absent count must not render as a blank cell. */}
+                <div className={`${NODE_COL.leases} shrink-0 text-text-secondary text-center font-mono text-xs`}>
+                  {node.leases ?? '—'}
                 </div>
-                <div className="flex-1 min-w-[140px] truncate text-text-primary">
-                  {node.moniker || '—'}
+                <div className={`${NODE_COL.sessions} shrink-0 text-text-primary text-center font-mono text-xs`}>
+                  {node.sessions ?? '—'}
                 </div>
-                <div className="w-[80px] shrink-0 leading-tight">
-                  <span className={protocolMeta(node.type).color}>
-                    {protocolMeta(node.type).short}
-                  </span>
-                  {node.type === 2 && (() => {
-                    const badge = v2rayConnectionBadge(node.connection)
-                    const cleartext = isCleartextConnection(node.connection)
-                    return (
-                      <span
-                        className={`block text-[10px] truncate ${cleartext ? 'text-danger' : 'text-text-tertiary'}`}
-                        title="V2Ray protocol/security advertised by the node (unverified until you connect)"
-                      >
-                        {badge ?? 'unknown'}
-                      </span>
-                    )
-                  })()}
-                </div>
-                <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
-                  {formatPrice(node.gigabytePrices)}
-                </div>
-                <div className="w-[80px] shrink-0 text-text-secondary font-mono text-xs">
-                  {formatPrice(node.hourlyPrices)}
-                </div>
-                <div className="w-[60px] shrink-0 text-text-secondary text-center font-mono text-xs">
+                <div className={`${NODE_COL.peers} shrink-0 text-text-primary text-center font-mono text-xs`}>
                   {node.peers}
                 </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); testNode(node.address, node.api) }}
-                  disabled={testingNodes.has(node.address)}
-                  className="w-[70px] shrink-0 text-center font-mono text-xs transition-colors hover:text-accent disabled:pointer-events-none"
-                  title="Test node latency"
-                >
-                  {(() => {
-                    if (testingNodes.has(node.address)) return <span className="text-text-tertiary">...</span>
-                    const probe = testResults.get(node.address)
-                    if (!probe) return <span className="text-text-tertiary">⏱</span>
-                    const stale = Date.now() - probe.timestamp > CACHE_TTL
-                    if (probe.reachable && probe.latencyMs !== null) {
-                      return <span className={stale ? 'text-text-tertiary' : 'text-success'}>{probe.latencyMs}ms</span>
-                    }
-                    return <span className={stale ? 'text-text-tertiary' : 'text-danger'}>Fail</span>
-                  })()}
-                </button>
-                <div className="w-[60px] shrink-0 flex justify-center">
-                  <span
-                    className={`status-dot ${nodeStatus.dotClass}`}
-                    title={`${nodeStatus.label}: ${nodeStatus.detail}`}
-                  />
-                </div>
+                <LatencyCell
+                  probe={testResults.get(node.address)}
+                  testing={testingNodes.has(node.address)}
+                  onTest={() => testNode(node.address, node.api)}
+                />
+                <StatusCell node={node} connected={isConnected} />
               </div>
             )
           })}

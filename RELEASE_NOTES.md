@@ -43,6 +43,9 @@ arrives as a dismissible chip, so you can start there and narrow it down.
 
 ## Fixes in 1.6.0
 
+- Draft release notes for v1.6.0
+- Redesign Nodes and Multi-hop tabs: copy buttons, protocol marks, visible filters
+
 ## Known limitations
 
 - **A chain has a hard life of about two hours.** Measured on mainnet: exit hops report

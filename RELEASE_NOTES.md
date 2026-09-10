@@ -1,26 +1,61 @@
-# Katacomb VPN 1.5.2
+# Katacomb VPN 1.6.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-A small fix release. The IP display no longer reports "unreachable" through a node on
-the other side of the world, and the same fix covers the app's own chain and
-lookup calls made through a distant tunnel.
+The Nodes tab is redesigned with a modern dashboard experience: 48 px rows show protocol
+marks, stacked prices with units, full node addresses with copy-to-clipboard buttons, and
+a status pill that reads "Connected" on the active tunnel. The Multi-hop tab now shares
+the same cells and design. The toolbar fits one line at typical widths—search, protocol
+select, six visible filter chips, then count and refresh. A country picked on the Map tab
+arrives as a dismissible chip, so you can start there and narrow it down.
 
 ## Highlights
 
-- The IP display works through far-away nodes. Connected through a node with a long
-  round trip, the app's own IP lookup gave up before the reply could arrive, so the
-  dashboard showed "IP: unreachable" while browsing through the same tunnel worked. The
-  app now allows 2 seconds per connection attempt, which is enough for a two-hop chain
-  across the world. Any request the app makes to a host that has both IPv4 and IPv6
-  addresses, including most RPC endpoints, benefits from the same change.
+- **Nodes tab redesign.** Every row is an identity cell (moniker + full address with copy
+  button) over location, type (protocol mark + name + version), stacked prices, leases,
+  sessions, peers, latency probe button, and status pill. All six protocols show their
+  original monochrome glyphs, chosen for privacy over vendored logos (WireGuard's
+  trademark policy forbids logos in third-party graphics).
+- **Visible filter chips.** The six boolean filters—Active, Healthy, Residential,
+  Whitelisted, Hide duplicates, and Bookmarked—now toggle as icon chips in the toolbar
+  instead of hiding in a dropdown. Click any chip to filter instantly. The count
+  ("1,150 of 1,697 nodes") updates live and shows when the list was last refreshed.
+- **Copy buttons everywhere.** Node addresses appear in full in both the table and the
+  node modal, with copy buttons beside them. Clicking copies the address to the
+  clipboard and shows a green checkmark for 1.5 seconds. The copy does not open the
+  modal if clicked in the table.
+- **One-line toolbar.** At your typical window width the toolbar is a single row. Below
+  ~1440 px the count and refresh buttons wrap to a second line, right-aligned. The
+  search field now matches monikers, addresses, countries and cities.
+- **Multi-hop parity.** The Multi-hop table uses the same cells, widths and 48 px rows
+  as the Nodes tab, so both tabs read as one consistent interface. The Eligibility
+  column is unchanged.
+- **Modal improvements.** Address and Endpoint rows in the node connection modal now
+  have copy buttons. The protocol type shows its mark beside the label.
+- **Map handoff.** Click a country on the globe and the Nodes tab opens with that
+  country filtered as a dismissible chip. Pick it on the sidebar, same result. Click
+  the × to see all countries again.
+- **Keyboard navigation.** Tab through a row: moniker button (opens the modal on Enter),
+  bookmark toggle, address copy, and latency probe button. All four are keyboard-native,
+  no tab traps.
 
-## Fixes in 1.5.2
+## Known limitations
 
-- Correct CLAUDE.md on the renderer poll intervals and the shipped systemd unit
-- Give Node's per-address connection attempt 2 s instead of its default
+- **A chain has a hard life of about two hours.** Measured on mainnet: exit hops report
+  no usage to the chain, so the exit's idle deadline is pinned at purchase and never
+  moves, even while the entry still has quota. This is node-side behaviour, not a client
+  bug, but it is yours to plan around.
+- Chains can only be built from V2Ray and XRAY nodes. The other protocols have no
+  equivalent of the relay mechanism a chain needs.
+- Expect roughly 2 to 3 MB/s and a large latency increase on a chain. Chains are for
+  privacy, not speed.
+- Local-proxy mode tunnels only the apps you point at its SOCKS address. Everything else
+  leaks, by design, and the kill switch does not apply.
+- The TLS and Reality wrapping does not authenticate the node. There is nothing on chain
+  to verify a node's certificate against, so an attacker on your local network can answer
+  a handshake in a node's place.
 
 ## Known limitations
 
@@ -48,7 +83,7 @@ Pop!\_OS, Zorin).
 **Recommended: .deb**
 
 ```bash
-sudo apt install ./katacomb-vpn_1.5.2_amd64.deb
+sudo apt install ./katacomb-vpn_1.6.0_amd64.deb
 ```
 
 Installs a root daemon, so connect and disconnect never prompt for a password. It needs
@@ -57,8 +92,8 @@ one log out and log back in after the first install before that takes effect.
 **Alternative: AppImage**
 
 ```bash
-chmod +x katacomb-vpn-1.5.2.AppImage
-./katacomb-vpn-1.5.2.AppImage
+chmod +x katacomb-vpn-1.6.0.AppImage
+./katacomb-vpn-1.6.0.AppImage
 ```
 
 No install needed. Every privileged operation prompts for a password instead.

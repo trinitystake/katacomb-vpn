@@ -1,50 +1,46 @@
-# Katacomb VPN 1.6.0
+# Katacomb VPN 1.7.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-The Nodes tab is redesigned with a modern dashboard experience: 48 px rows show protocol
-marks, stacked prices with units, full node addresses with copy-to-clipboard buttons, and
-a status pill that reads "Connected" on the active tunnel. The Multi-hop tab now shares
-the same cells and design. The toolbar fits one line at typical widths—search, protocol
-select, six visible filter chips, then count and refresh. A country picked on the Map tab
-arrives as a dismissible chip, so you can start there and narrow it down.
+A wallet management release. Adding a wallet no longer means locking the one you are
+using, and the Wallets tab now groups wallets under the seed phrase they came from, so
+each seed's recovery phrase, subaccounts and removal are reachable in one place.
 
 ## Highlights
 
-- **Nodes tab redesign.** Every row is an identity cell (moniker + full address with copy
-  button) over location, type (protocol mark + name + version), stacked prices, leases,
-  sessions, peers, latency probe button, and status pill. All six protocols show their
-  original monochrome glyphs, chosen for privacy over vendored logos (WireGuard's
-  trademark policy forbids logos in third-party graphics).
-- **Visible filter chips.** The six boolean filters—Active, Healthy, Residential,
-  Whitelisted, Hide duplicates, and Bookmarked—now toggle as icon chips in the toolbar
-  instead of hiding in a dropdown. Click any chip to filter instantly. The count
-  ("1,150 of 1,697 nodes") updates live and shows when the list was last refreshed.
-- **Copy buttons everywhere.** Node addresses appear in full in both the table and the
-  node modal, with copy buttons beside them. Clicking copies the address to the
-  clipboard and shows a green checkmark for 1.5 seconds. The copy does not open the
-  modal if clicked in the table.
-- **One-line toolbar.** At your typical window width the toolbar is a single row. Below
-  ~1440 px the count and refresh buttons wrap to a second line, right-aligned. The
-  search field now matches monikers, addresses, countries and cities.
-- **Multi-hop parity.** The Multi-hop table uses the same cells, widths and 48 px rows
-  as the Nodes tab, so both tabs read as one consistent interface. The Eligibility
-  column is unchanged.
-- **Modal improvements.** Address and Endpoint rows in the node connection modal now
-  have copy buttons. The protocol type shows its mark beside the label.
-- **Map handoff.** Click a country on the globe and the Nodes tab opens with that
-  country filtered as a dismissible chip. Pick it on the sidebar, same result. Click
-  the × to see all countries again.
-- **Keyboard navigation.** Tab through a row: moniker button (opens the modal on Enter),
-  bookmark toggle, address copy, and latency probe button. All four are keyboard-native,
-  no tab traps.
+- **One Manage Wallets button.** The Wallet popover's Switch Wallet and Add Wallet are
+  now a single Manage Wallets entry, which opens Settings on the Wallets tab. Everything
+  wallet-shaped lives in one screen.
+- **Wallets grouped by seed.** Settings, Wallets nests each wallet under the seed it was
+  derived from, labelled Seed 1, Seed 2 and so on, with Derive Subaccount, Recovery
+  Phrase and Remove seed on each group's header. Those three used to sit in the tab
+  header and act only on the active wallet's seed, so reading another seed's phrase
+  meant switching to a wallet under it first, which reloads the app.
+- **Remove seed removes one seed.** It used to delete every stored wallet, whichever
+  seed they came from. It now removes just that group, lists those wallets by name and
+  address in the confirmation, and says so when the wallet in use is among them. In that
+  case the app moves to another stored wallet rather than leaving you with none.
+- **Add a wallet without locking first.** Importing or creating a second seed is offered
+  in Settings while a wallet is active. It previously required clicking Lock, which was
+  the only route to the import screen.
+- **Lock is gone.** It cleared the active wallet and dropped you on a full-screen picker
+  with no way back, while protecting nothing: any wallet reopened from that picker with
+  no passphrase, because the system keyring is already unlocked for your session.
+  Switching wallets and adding one both live in Manage Wallets instead.
+- **Straighter wording on removal.** Deleting a single wallet now says whether its seed
+  survives, which depends on whether another wallet still holds it. The Recovery Phrase
+  modal names every wallet those words unlock, so one phrase shown for two wallets reads
+  as expected rather than as a bug.
+- **Wallets that cannot be unlocked stand apart.** A seed encrypted under the app's
+  previous name cannot be decrypted on this machine. Those wallets now sit in their own
+  section, with the reason and the instruction to import the phrase again, instead of
+  looking like ordinary rows that refuse to open.
 
-## Fixes in 1.6.0
+## Fixes in 1.7.0
 
-- Draft release notes for v1.6.0
-- Redesign Nodes and Multi-hop tabs: copy buttons, protocol marks, visible filters
+<!-- regenerated by release.sh from v1.6.0..HEAD at cut time; leave the heading -->
 
 ## Known limitations
 

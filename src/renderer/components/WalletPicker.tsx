@@ -11,10 +11,11 @@ interface Props {
 }
 
 /**
- * Shown when seeds are stored but none is active — after Lock, or when the
- * active one couldn't be restored. Before this existed, that state rendered the
- * import screen, so the only visible way back in was to retype a seed the app
- * already had: the path that produced duplicate entries for one address.
+ * Shown when seeds are stored but none is active: the active one couldn't be
+ * restored, or everything was just deleted. Before this existed, that state
+ * rendered the import screen, so the only visible way back in was to retype a
+ * seed the app already had: the path that produced duplicate entries for one
+ * address.
  */
 export default function WalletPicker({ status, onChanged, onAddAnother }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null)

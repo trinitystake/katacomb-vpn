@@ -209,11 +209,11 @@ function AppInner() {
   const { mainTab, setMainTab, settingsTab, openSettings, closeSettings } = useNavigation()
   const [showBinarySetup, setShowBinarySetup] = useState(true)
   const [showAbout, setShowAbout] = useState(false)
-  // "Add another wallet" from the picker: show the import screen even though
-  // wallets are already stored.
+  // Show the import/create screen even though wallets are already stored:
+  // "Add another wallet" from the picker, or Add Wallet from Settings while one
+  // is active.
   const [addingWallet, setAddingWallet] = useState(false)
-  // Clear it once a wallet is live, so a later Lock lands on the picker rather
-  // than resuming the add-a-wallet flow the user already finished.
+  // A finished add makes the new wallet active, which is what ends the flow.
   useEffect(() => {
     if (wallet.address) setAddingWallet(false)
   }, [wallet.address])
@@ -278,36 +278,51 @@ function AppInner() {
     )
   }
 
-  // Three states, not two: seeds can be stored with none active (after Lock, or
-  // when the active one couldn't be restored). Showing the import screen there
-  // hid the stored wallets, and retyping a seed the app already had is what
-  // created duplicate entries for one address.
-  if (!wallet.address) {
-    const stored = wallet.store?.wallets ?? []
-    // A retained seed has no wallets but still belongs in the picker — it's the
-    // only screen that can derive from it.
-    const hasRetainedSeed = Boolean(wallet.store?.retainedSeedId)
-    if ((stored.length > 0 || hasRetainedSeed) && !addingWallet) {
-      return (
-        <>
-          <WalletPicker
-            status={wallet.store!}
-            onChanged={wallet.refreshIdentity}
-            onAddAnother={() => setAddingWallet(true)}
-          />
-          {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
-        </>
-      )
-    }
+  // Three states, not two: seeds can be stored with none active (the active one
+  // couldn't be restored, or everything was just deleted). Showing the import
+  // screen there hid the stored wallets, and retyping a seed the app already had
+  // is what created duplicate entries for one address.
+  const stored = wallet.store?.wallets ?? []
+  // A retained seed has no wallets but still belongs in the picker — it's the
+  // only screen that can derive from it.
+  const hasRetainedSeed = Boolean(wallet.store?.retainedSeedId)
+  if (!wallet.address && (stored.length > 0 || hasRetainedSeed) && !addingWallet) {
+    return (
+      <>
+        <WalletPicker
+          status={wallet.store!}
+          onChanged={wallet.refreshIdentity}
+          onAddAnother={() => setAddingWallet(true)}
+        />
+        {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+      </>
+    )
+  }
+  if (!wallet.address || addingWallet) {
+    // Adding from inside the running app: the import makes the new wallet
+    // active, and everything wallet-scoped (plans, provider, balance, sessions)
+    // is reset the way a Settings switch resets it, by reloading the window.
+    // From the setup screens nothing wallet-scoped has loaded yet, so a plain
+    // state refresh is enough there.
+    const switchingFromActive = wallet.address !== null
     return (
       <>
         <MnemonicInput
           onImport={async (mnemonic, name) => {
+            if (switchingFromActive) {
+              await window.api.walletImport(mnemonic, name)
+              window.location.reload()
+              return
+            }
             await wallet.importWallet(mnemonic, name)
           }}
           onBackToWallets={stored.length > 0 ? () => setAddingWallet(false) : undefined}
           onUseExisting={async (walletId) => {
             await window.api.walletSwitch(walletId)
+            if (switchingFromActive) {
+              window.location.reload()
+              return
+            }
             setAddingWallet(false)
             await wallet.refreshIdentity()
           }}
@@ -332,13 +347,7 @@ function AppInner() {
           <DisconnectButton />
         </div>
         <div className="flex items-center gap-3">
-          <WalletPanel
-            address={wallet.address}
-            name={wallet.name}
-            onLogout={wallet.logout}
-            chainFrozen={chainFrozen}
-            walletCount={wallet.store?.wallets.length ?? 0}
-          />
+          <WalletPanel address={wallet.address} name={wallet.name} chainFrozen={chainFrozen} />
           <button
             onClick={() => openSettings()}
             className="text-text-secondary hover:text-accent text-sm transition-colors"
@@ -420,6 +429,10 @@ function AppInner() {
             window.location.reload()
           }}
           onWalletsChanged={wallet.refreshIdentity}
+          onAddWallet={() => {
+            closeSettings()
+            setAddingWallet(true)
+          }}
           providerTabVisible={providerVisible}
         />
       )}

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import type { WalletEntry, AppSettings, RpcCandidateInfo, DerivationPreview } from '../types'
+import type { WalletStoreStatus, AppSettings, RpcCandidateInfo, DerivationPreview } from '../types'
 import Toggle from './Toggle'
 import Spinner from './Spinner'
 import { useSettings } from '../contexts/SettingsContext'
@@ -9,6 +9,7 @@ import { classifyRpc, rpcHealthLabel, rpcHostLabel, STALE_BLOCK_AGE_SEC } from '
 import { parseWalletExists } from '../../shared/wallet-errors'
 import { formatHdPath, DERIVE_PREVIEW_MAX_COUNT } from '../../shared/hd-path'
 import { parseSplitTunnelRoutes, MAX_SPLIT_TUNNEL_ROUTES } from '../../shared/split-tunnel'
+import { groupWalletsBySeed, type SeedGroup } from '../../shared/seed-groups'
 import { STATE_DOT } from './RpcStatus'
 
 interface Props {
@@ -19,6 +20,8 @@ interface Props {
   // Called after a wallet rename / derive succeeds, so the top-bar Wallet
   // popover can re-fetch the active wallet's display name.
   onWalletsChanged?: () => void
+  /** Closes Settings and opens the import/create screen for another seed. */
+  onAddWallet: () => void
   /**
    * Whether the Provider tab is actually showing right now.
    *
@@ -43,15 +46,17 @@ const PREVIEW_PAGE = 10
 const REBLUR_MS = 60_000
 const CLIPBOARD_CLEAR_MS = 30_000
 
-// What the derive / recovery-phrase modals act on: a stored wallet, or the
-// retained seed — which has an encrypted file but no index entry, hence no address.
-type SeedSource = { id: string; name: string; address?: string; accountIndex?: number }
+// A stored wallet as the store reports it, with its seed membership.
+type StoredWallet = WalletStoreStatus['wallets'][number]
+// What the derive / recovery-phrase / remove-seed modals act on: one seed and the
+// wallets stored under it. Any member's id serves as the seed source in main.
+type Group = SeedGroup<StoredWallet>
 
-export default function Settings({ initialTab, onClose, onWalletSwitch, onWalletsChanged, providerTabVisible }: Props) {
+export default function Settings({ initialTab, onClose, onWalletSwitch, onWalletsChanged, onAddWallet, providerTabVisible }: Props) {
   const { reload: reloadGlobalSettings } = useSettings()
   const rpcHealth = useRpcHealth()
   const [settings, setSettings] = useState<AppSettings | null>(null)
-  const [wallets, setWallets] = useState<WalletEntry[]>([])
+  const [wallets, setWallets] = useState<StoredWallet[]>([])
   const [rpcInput, setRpcInput] = useState('')
   const [saving, setSaving] = useState(false)
   const [editingName, setEditingName] = useState<string | null>(null)
@@ -70,10 +75,10 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   const [rpcsError, setRpcsError] = useState<string | null>(null)
   /** What the last Retest and reselect run concluded. Null until one runs. */
   const [reselectNote, setReselectNote] = useState<string | null>(null)
-  // Derive-subaccount modal state. `source` is the wallet whose mnemonic we'll
-  // reuse; the account index is typed, the address index is picked from the
-  // preview list (which shows the real address behind each path).
-  const [deriveSource, setDeriveSource] = useState<SeedSource | null>(null)
+  // Derive-subaccount modal state. `deriveGroup` is the seed whose mnemonic
+  // we'll reuse; the account index is typed, the address index is picked from
+  // the preview list (which shows the real address behind each path).
+  const [deriveGroup, setDeriveGroup] = useState<Group | null>(null)
   const [deriveName, setDeriveName] = useState('')
   const [deriveAccount, setDeriveAccount] = useState('0')
   const [deriveAddressIndex, setDeriveAddressIndex] = useState<number | null>(null)
@@ -85,7 +90,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   const [deriveLoading, setDeriveLoading] = useState(false)
   // Recovery-phrase modal. `phrase` holds the seed only while the modal is
   // open — closing clears it (see closePhraseModal).
-  const [phraseWallet, setPhraseWallet] = useState<SeedSource | null>(null)
+  const [phraseGroup, setPhraseGroup] = useState<Group | null>(null)
   const [phrase, setPhrase] = useState<string | null>(null)
   const [phraseRevealed, setPhraseRevealed] = useState(false)
   const [phraseLoading, setPhraseLoading] = useState(false)
@@ -95,26 +100,19 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   const copyClearTimer = useRef<number | null>(null)
   // Wallet deletion and seed removal, in-app rather than window.confirm(): the
   // last-wallet case is a three-way choice a native dialog can't express.
-  const [deleteTarget, setDeleteTarget] = useState<WalletEntry | null>(null)
-  const [removingSeed, setRemovingSeed] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<StoredWallet | null>(null)
+  const [removeSeedTarget, setRemoveSeedTarget] = useState<Group | null>(null)
   const [walletBusy, setWalletBusy] = useState(false)
   const [walletActionError, setWalletActionError] = useState('')
-  // Set when a seed outlived its wallets, so this tab can still derive from it.
-  const [retainedSeedId, setRetainedSeedId] = useState<string | null>(null)
   // Provider mode is stored per wallet, so the toggle needs to know which one is active.
   const [activeWalletId, setActiveWalletId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
-    const [s, w, store] = await Promise.all([
-      window.api.settingsGet(),
-      window.api.walletList(),
-      window.api.walletStoreStatus(),
-    ])
+    const [s, store] = await Promise.all([window.api.settingsGet(), window.api.walletStoreStatus()])
     setSettings(s)
     setRpcInput(s.rpcEndpoint)
     setSplitTunnelInput((s.splitTunnelRoutes || []).join('\n'))
-    setWallets(w)
-    setRetainedSeedId(store.retainedSeedId)
+    setWallets(store.wallets)
     setActiveWalletId(store.activeWalletId)
   }, [])
 
@@ -232,8 +230,8 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
     onWalletSwitch()
   }
 
-  // Only ever a non-active wallet, so the seed always survives in the remaining
-  // entries and there's nothing to ask about.
+  // Only ever a non-active wallet. Whether its seed survives depends on the
+  // rest of its group; the modal says which (see deleteNote).
   async function runDelete() {
     if (!deleteTarget) return
     setWalletBusy(true)
@@ -251,16 +249,24 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   }
 
   async function runRemoveSeed(keepSeed: boolean) {
+    if (!removeSeedTarget) return
     setWalletBusy(true)
     setWalletActionError('')
     try {
-      await window.api.walletDeleteAll(keepSeed)
-      setRemovingSeed(false)
-      onWalletSwitch()
+      const { activeWalletChanged } = await window.api.walletDeleteSeed(removeSeedTarget.members[0].id, keepSeed)
+      if (activeWalletChanged) {
+        // Main moved to another wallet, or none is left: reload the way a
+        // Switch does, so every wallet-scoped view starts over.
+        onWalletSwitch()
+        return
+      }
+      setRemoveSeedTarget(null)
+      await load()
+      onWalletsChanged?.()
     } catch (err) {
       setWalletActionError(err instanceof Error ? err.message : 'Failed to remove the seed')
-      setWalletBusy(false)
     }
+    setWalletBusy(false)
   }
 
   async function handleRename(walletId: string) {
@@ -272,12 +278,12 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
     onWalletsChanged?.()
   }
 
-  function openDeriveModal(source: SeedSource) {
-    // Start on the source's own account: "another address on this seed" is the
+  function openDeriveModal(group: Group) {
+    // Start on the seed's first account: "another address on this seed" is the
     // common action, and the preview list greys out whatever is already stored.
-    setDeriveSource(source)
+    setDeriveGroup(group)
     setDeriveName('')
-    setDeriveAccount(String(source.accountIndex ?? 0))
+    setDeriveAccount(String(group.members[0].accountIndex ?? 0))
     setDeriveAddressIndex(null)
     setPreviewRows([])
     setPreviewCount(PREVIEW_PAGE)
@@ -286,7 +292,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   }
 
   function closeDeriveModal() {
-    setDeriveSource(null)
+    setDeriveGroup(null)
     setDeriveName('')
     setDeriveAddressIndex(null)
     setPreviewRows([])
@@ -305,7 +311,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   // Debounced so holding the spinner doesn't queue a derivation per tick, and
   // `stale` drops a late response from a previous account index.
   useEffect(() => {
-    if (!deriveSource || accountIndex === null) {
+    if (!deriveGroup || accountIndex === null) {
       setPreviewRows([])
       return
     }
@@ -314,7 +320,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
     const timer = window.setTimeout(() => {
       window.api
         .walletDerivePreview({
-          sourceWalletId: deriveSource.id,
+          sourceWalletId: deriveGroup.members[0].id,
           accountIndex,
           startIndex: 0,
           count: previewCount,
@@ -337,7 +343,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
       stale = true
       window.clearTimeout(timer)
     }
-  }, [deriveSource, accountIndex, previewCount])
+  }, [deriveGroup, accountIndex, previewCount])
 
   // Land on the first free path, and move off one that turns out to be taken
   // (the account index changed under the selection).
@@ -349,7 +355,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   }, [previewRows, deriveAddressIndex])
 
   async function submitDerive() {
-    if (!deriveSource || accountIndex === null || deriveAddressIndex === null) return
+    if (!deriveGroup || accountIndex === null || deriveAddressIndex === null) return
     setDeriveError('')
     const name = deriveName.trim()
     if (!name) {
@@ -359,7 +365,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
     setDeriveLoading(true)
     try {
       await window.api.walletDeriveSubaccount({
-        sourceWalletId: deriveSource.id,
+        sourceWalletId: deriveGroup.members[0].id,
         accountIndex,
         addressIndex: deriveAddressIndex,
         name,
@@ -380,7 +386,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   function closePhraseModal() {
     if (reblurTimer.current !== null) window.clearTimeout(reblurTimer.current)
     reblurTimer.current = null
-    setPhraseWallet(null)
+    setPhraseGroup(null)
     setPhrase(null)
     setPhraseRevealed(false)
     setPhraseLoading(false)
@@ -396,11 +402,11 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   }, [])
 
   async function fetchPhrase() {
-    if (!phraseWallet) return
+    if (!phraseGroup) return
     setPhraseLoading(true)
     setPhraseError('')
     try {
-      const { mnemonic } = await window.api.walletRevealMnemonic(phraseWallet.id)
+      const { mnemonic } = await window.api.walletRevealMnemonic(phraseGroup.members[0].id)
       setPhrase(mnemonic)
     } catch (err) {
       setPhraseError(err instanceof Error ? err.message : 'Failed to read the recovery phrase')
@@ -433,16 +439,135 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   // wallet is off the default path — avoids noise for single-account users.
   const showHdPath = wallets.some((w) => (w.accountIndex ?? 0) > 0 || (w.addressIndex ?? 0) > 0)
 
+  // Wallets nested under the seed they were derived from. `locked` holds the
+  // ones whose seed cannot be decrypted, so their membership is unknown.
+  const { groups, locked } = useMemo(() => groupWalletsBySeed(wallets), [wallets])
+
   if (!settings) return null
 
   const rpcAuto = settings.rpcMode === 'auto'
 
-  // Every stored wallet is a subaccount of one seed, so "derive another" and
-  // "show the recovery phrase" are seed-level actions, not per-row ones — they
-  // operate on the active wallet, or on the retained seed when no wallets are left.
-  const activeWallet = wallets.find((w) => w.id === settings.activeWalletId)
-  const seedSource: SeedSource | null =
-    activeWallet ?? (retainedSeedId ? { id: retainedSeedId, name: 'your saved seed' } : null)
+  // What deleting one row does to its seed, which depends on the rest of its group.
+  const deleteNote = (w: StoredWallet): string => {
+    if (w.seedGroup === null) {
+      return 'This wallet cannot be unlocked, so nothing usable is removed. Import the same recovery phrase again to get it back.'
+    }
+    const group = groups.find((g) => g.key === w.seedGroup)
+    if (group && group.members.length > 1) {
+      return `Removes this wallet from the device. The seed stays with the other wallets of ${group.label}, so you can derive it again at the same path.`
+    }
+    return `This is the only wallet of ${group?.label ?? 'this seed'}, so its seed is removed from this device too. Funds stay on-chain, reachable only by importing your written-down phrase again.`
+  }
+
+  // Remove-seed modal facts. Keep seed rides the retained-seed model, which only
+  // holds a seed while ZERO wallets are stored, so it is offered only when this
+  // group's wallets are the last ones (rows that cannot be unlocked count too).
+  const removeSeedMembers = removeSeedTarget?.members ?? []
+  const removeSeedIsLast = removeSeedMembers.length === wallets.length
+  const removeSeedHitsActive = removeSeedMembers.some((w) => w.id === settings.activeWalletId)
+  const removeSeedSubject =
+    removeSeedMembers.length === 1
+      ? 'this wallet is'
+      : `all ${removeSeedMembers.length} wallets of ${removeSeedTarget?.label} are`
+
+  const renderWalletRow = (w: StoredWallet) => {
+    // By id, not by address: matching on address lit up every entry
+    // sharing one, which is exactly how the duplicate-wallet bug
+    // showed itself (two rows, both badged Active).
+    const isActive = w.id === settings.activeWalletId
+    const isEditing = editingName === w.id
+
+    return (
+      <div
+        key={w.id}
+        className={`border px-4 py-3 space-y-2 rounded-md ${
+          isActive
+            ? 'border-success bg-success-subtle'
+            : w.unlockable
+              ? 'border-border bg-bg-tertiary'
+              : 'border-warning bg-warning-subtle'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            {isEditing ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleRename(w.id)}
+                  className="bg-bg-primary border border-border text-text-primary text-sm px-2 py-1 w-40 rounded-sm focus:outline-none focus:border-border-focus"
+                  autoFocus
+                />
+                <button
+                  onClick={() => handleRename(w.id)}
+                  className="text-success text-xs hover:underline"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={() => setEditingName(null)}
+                  className="text-text-secondary text-xs hover:underline"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <>
+                <span className="text-text-primary text-sm font-semibold">{w.name}</span>
+                {showHdPath && (
+                  <span className="text-text-tertiary text-xs font-mono">
+                    {formatHdPath(w.accountIndex ?? 0, w.addressIndex ?? 0)}
+                  </span>
+                )}
+                <button
+                  onClick={() => { setEditingName(w.id); setNameInput(w.name) }}
+                  className="text-text-secondary text-xs hover:text-accent transition-colors"
+                >
+                  Rename
+                </button>
+              </>
+            )}
+            {isActive && (
+              <span className="text-success text-xs font-medium">Active</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {!isActive && w.unlockable && (
+              <button
+                onClick={() => handleSwitch(w.id)}
+                className="btn btn-primary text-xs px-3 py-1"
+              >
+                Switch
+              </button>
+            )}
+            {/* Delete removes ONE derived wallet and is never offered
+                for the active one — no count-based exception, so the
+                rule stays predictable. That leaves the last wallet
+                undeletable here by design: getting rid of everything
+                is "Remove seed", which is where the keep-the-seed
+                question belongs. */}
+            <button
+              onClick={() => { setWalletActionError(''); setDeleteTarget(w) }}
+              disabled={isActive}
+              title={
+                isActive
+                  ? 'Switch to another wallet before deleting this one, or use Remove seed on its group'
+                  : undefined
+              }
+              className="btn btn-danger text-xs px-3 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+        <div className="text-text-secondary text-xs font-mono break-all">
+          {w.address || 'Address will appear after switching to this wallet'}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
@@ -835,147 +960,77 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 <label className="text-text-secondary text-xs font-medium uppercase tracking-wide">
                   Stored Wallets ({wallets.length})
                 </label>
-                {seedSource && (
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={() => openDeriveModal(seedSource)}
-                      className="text-text-secondary text-xs hover:text-accent transition-colors"
-                      title="Derive a new wallet from this seed at a different account or address index"
-                    >
-                      Derive Subaccount
-                    </button>
-                    <button
-                      onClick={() => { closePhraseModal(); setPhraseWallet(seedSource) }}
-                      className="text-text-secondary text-xs hover:text-accent transition-colors"
-                      title="Show this seed's 12/24-word recovery phrase"
-                    >
-                      Recovery Phrase
-                    </button>
-                    <button
-                      onClick={() => { setWalletActionError(''); setRemovingSeed(true) }}
-                      className="text-danger text-xs hover:underline transition-colors"
-                      title="Delete the seed and every wallet derived from it"
-                    >
-                      Remove seed
-                    </button>
-                  </div>
-                )}
+                <button
+                  onClick={onAddWallet}
+                  className="text-accent text-xs hover:underline transition-colors"
+                  title="Import or create another seed phrase"
+                >
+                  Add Wallet
+                </button>
               </div>
 
-              {wallets.length === 0 && (
-                <p className="text-text-secondary text-sm">
-                  {retainedSeedId
-                    ? 'No wallets derived from the seed. Use Derive Subaccount to create one.'
-                    : 'No wallets stored. Import or create one from the main screen.'}
-                </p>
+              {/* One box per seed. The seed-level actions live on its header,
+                  so each seed's phrase, subaccounts and removal are reachable
+                  without switching to a wallet under it first. */}
+              {groups.map((group) => (
+                <div key={group.key} className="border border-border rounded-md">
+                  <div className="flex items-center justify-between gap-4 px-4 py-2 border-b border-border">
+                    <span className="text-text-secondary text-xs font-medium uppercase tracking-wide">
+                      {group.label} · {group.members.length} {group.members.length === 1 ? 'wallet' : 'wallets'}
+                    </span>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => openDeriveModal(group)}
+                        className="text-text-secondary text-xs hover:text-accent transition-colors"
+                        title="Derive a new wallet from this seed at a different account or address index"
+                      >
+                        Derive Subaccount
+                      </button>
+                      <button
+                        onClick={() => { closePhraseModal(); setPhraseGroup(group) }}
+                        className="text-text-secondary text-xs hover:text-accent transition-colors"
+                        title="Show this seed's 12/24-word recovery phrase"
+                      >
+                        Recovery Phrase
+                      </button>
+                      <button
+                        onClick={() => { setWalletActionError(''); setRemoveSeedTarget(group) }}
+                        className="text-danger text-xs hover:underline transition-colors"
+                        title="Delete this seed and every wallet derived from it"
+                      >
+                        Remove seed
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-2 space-y-2">{group.members.map(renderWalletRow)}</div>
+                </div>
+              ))}
+
+              {locked.length > 0 && (
+                <div className="border border-warning rounded-md">
+                  <div className="px-4 py-2 border-b border-warning space-y-1">
+                    <span className="text-warning text-xs font-medium uppercase tracking-wide block">
+                      Cannot be unlocked · {locked.length} {locked.length === 1 ? 'wallet' : 'wallets'}
+                    </span>
+                    <p className="text-text-secondary text-xs">
+                      Saved under the app's previous name, so {locked.length === 1 ? 'its seed' : 'their seeds'} can
+                      no longer be unlocked. Import the same recovery phrase again. Your funds are on-chain
+                      and unaffected.
+                    </p>
+                  </div>
+                  <div className="p-2 space-y-2">{locked.map(renderWalletRow)}</div>
+                </div>
               )}
 
-              <div className="space-y-2">
-                {wallets.map((w) => {
-                  // By id, not by address: matching on address lit up every entry
-                  // sharing one, which is exactly how the duplicate-wallet bug
-                  // showed itself (two rows, both badged Active).
-                  const isActive = w.id === settings.activeWalletId
-                  const isEditing = editingName === w.id
-
-                  return (
-                    <div
-                      key={w.id}
-                      className={`border px-4 py-3 space-y-2 rounded-md ${
-                        isActive ? 'border-success bg-success-subtle' : 'border-border bg-bg-tertiary'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-4">
-                        <div className="flex items-center gap-3">
-                          {isEditing ? (
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="text"
-                                value={nameInput}
-                                onChange={(e) => setNameInput(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleRename(w.id)}
-                                className="bg-bg-primary border border-border text-text-primary text-sm px-2 py-1 w-40 rounded-sm focus:outline-none focus:border-border-focus"
-                                autoFocus
-                              />
-                              <button
-                                onClick={() => handleRename(w.id)}
-                                className="text-success text-xs hover:underline"
-                              >
-                                Save
-                              </button>
-                              <button
-                                onClick={() => setEditingName(null)}
-                                className="text-text-secondary text-xs hover:underline"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <span className="text-text-primary text-sm font-semibold">{w.name}</span>
-                              {showHdPath && (
-                                <span className="text-text-tertiary text-xs font-mono">
-                                  {formatHdPath(w.accountIndex ?? 0, w.addressIndex ?? 0)}
-                                </span>
-                              )}
-                              <button
-                                onClick={() => { setEditingName(w.id); setNameInput(w.name) }}
-                                className="text-text-secondary text-xs hover:text-accent transition-colors"
-                              >
-                                Rename
-                              </button>
-                            </>
-                          )}
-                          {isActive && (
-                            <span className="text-success text-xs font-medium">Active</span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {!isActive && (
-                            <button
-                              onClick={() => handleSwitch(w.id)}
-                              className="btn btn-primary text-xs px-3 py-1"
-                            >
-                              Switch
-                            </button>
-                          )}
-                          {/* Delete removes ONE derived wallet and is never offered
-                              for the active one — no count-based exception, so the
-                              rule stays predictable. That leaves the last wallet
-                              undeletable here by design: getting rid of everything
-                              is "Remove seed", which is where the keep-the-seed
-                              question belongs. */}
-                          <button
-                            onClick={() => { setWalletActionError(''); setDeleteTarget(w) }}
-                            disabled={isActive}
-                            title={
-                              isActive
-                                ? 'Switch to another wallet before deleting this one, or use Remove seed to clear everything'
-                                : undefined
-                            }
-                            className="btn btn-danger text-xs px-3 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                      <div className="text-text-secondary text-xs font-mono break-all">
-                        {w.address || 'Address will appear after switching to this wallet'}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-
               <p className="text-text-tertiary text-xs">
-                To add a seed phrase, log out and import or create a new seed phrase. To derive an additional wallet from an existing seed, use Derive Subaccount. The seed is encrypted with your OS keyring.
+                Add Wallet imports or creates another seed phrase. Derive Subaccount adds another wallet to a seed already stored here. Seeds are encrypted with your OS keyring.
               </p>
             </div>
           )}
         </div>
       </div>
 
-      {deriveSource && (
+      {deriveGroup && (
         <div
           className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]"
           onClick={() => !deriveLoading && closeDeriveModal()}
@@ -987,7 +1042,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
             <div>
               <h3 className="text-text-primary text-base font-semibold">Derive Subaccount</h3>
               <p className="text-text-tertiary text-xs mt-1">
-                Creates a new wallet from the seed of <span className="text-text-secondary">{deriveSource.name}</span> at a different BIP-44 path. Same seed, different address.
+                Creates a new wallet from <span className="text-text-secondary">{deriveGroup.label}</span> ({deriveGroup.members.map((m) => m.name).join(', ')}) at a different BIP-44 path. Same seed, different address.
               </p>
             </div>
 
@@ -1091,7 +1146,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
         </div>
       )}
 
-      {phraseWallet && (
+      {phraseGroup && (
         <div
           className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]"
           onClick={() => !phraseLoading && closePhraseModal()}
@@ -1103,8 +1158,8 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
             <div>
               <h3 className="text-text-primary text-base font-semibold">Recovery Phrase</h3>
               <p className="text-text-tertiary text-xs mt-1">
-                <span className="text-text-secondary">{phraseWallet.name}</span>
-                {phraseWallet.address ? ` · ${phraseWallet.address}` : ''}
+                <span className="text-text-secondary">{phraseGroup.label}</span>: unlocks{' '}
+                {phraseGroup.members.map((m) => m.name).join(', ')}
               </p>
             </div>
 
@@ -1141,6 +1196,11 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
               </>
             ) : (
               <>
+                {phraseGroup.members.length > 1 && (
+                  <p className="text-text-secondary text-xs">
+                    These words unlock every wallet in {phraseGroup.label}. Only the derivation path differs.
+                  </p>
+                )}
                 <div className="relative">
                   <div
                     className={`grid grid-cols-3 gap-1.5 transition-[filter] ${
@@ -1204,10 +1264,7 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
               <p className="text-text-tertiary text-xs mt-1 font-mono break-all">{deleteTarget.address}</p>
             </div>
 
-            <p className="text-text-secondary text-xs">
-              Removes this wallet from the device. The seed stays, so you can derive it again at
-              the same path.
-            </p>
+            <p className="text-text-secondary text-xs">{deleteNote(deleteTarget)}</p>
 
             {walletActionError && <p className="text-danger text-xs">{walletActionError}</p>}
 
@@ -1232,71 +1289,98 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
         </div>
       )}
 
-      {removingSeed && (
+      {removeSeedTarget && (
         <div
           className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]"
-          onClick={() => !walletBusy && setRemovingSeed(false)}
+          onClick={() => !walletBusy && setRemoveSeedTarget(null)}
         >
           <div
             className="bg-bg-secondary border border-border w-full max-w-md mx-4 p-5 space-y-4 rounded-lg shadow-overlay"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-text-primary text-base font-semibold">Remove seed</h3>
+            <h3 className="text-text-primary text-base font-semibold">Remove {removeSeedTarget.label}</h3>
 
             <div className="border border-danger bg-danger-subtle rounded-md p-3 space-y-2">
               <p className="text-danger text-xs font-medium">
-                Either way, {wallets.length === 1 ? 'this wallet is' : `all ${wallets.length} wallets are`} removed
-                from this device.
+                {removeSeedIsLast
+                  ? `Either way, ${removeSeedSubject}`
+                  : removeSeedSubject.charAt(0).toUpperCase() + removeSeedSubject.slice(1)}{' '}
+                removed from this device.
               </p>
-              {wallets.length > 0 && (
-                <ul className="text-text-secondary text-xs space-y-1 list-disc pl-4">
-                  {wallets.map((w) => (
-                    <li key={w.id}>
-                      <span className="text-text-primary">{w.name}</span> · {w.address || 'address unknown'}
-                    </li>
-                  ))}
-                </ul>
+              <ul className="text-text-secondary text-xs space-y-1 list-disc pl-4">
+                {removeSeedMembers.map((w) => (
+                  <li key={w.id}>
+                    <span className="text-text-primary">{w.name}</span> · {w.address || 'address unknown'}
+                  </li>
+                ))}
+              </ul>
+              {removeSeedHitsActive && (
+                <p className="text-text-secondary text-xs">
+                  The wallet in use is among them. Afterwards the app reloads on another stored
+                  wallet, or on the wallet screen when none is left.
+                </p>
               )}
               <p className="text-text-secondary text-xs">App settings are kept.</p>
             </div>
 
-            <div className="space-y-2 text-xs">
-              <p className="text-text-secondary">
-                <span className="text-text-primary font-medium">Keep seed</span>: the recovery
-                phrase stays encrypted on this device, so you can derive new wallets without
-                retyping it.
-              </p>
-              <p className="text-text-secondary">
-                <span className="text-text-primary font-medium">Delete seed too</span>: the phrase
-                is removed as well. Funds stay on-chain, reachable only by importing your
-                written-down phrase again.
-              </p>
-            </div>
+            {removeSeedIsLast ? (
+              <div className="space-y-2 text-xs">
+                <p className="text-text-secondary">
+                  <span className="text-text-primary font-medium">Keep seed</span>: the recovery
+                  phrase stays encrypted on this device, so you can derive new wallets without
+                  retyping it.
+                </p>
+                <p className="text-text-secondary">
+                  <span className="text-text-primary font-medium">Delete seed too</span>: the phrase
+                  is removed as well. Funds stay on-chain, reachable only by importing your
+                  written-down phrase again.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2 text-xs">
+                <p className="text-text-secondary">
+                  The seed is removed from this device with them. Funds stay on-chain, reachable
+                  only by importing your written-down phrase again.
+                </p>
+                {locked.length > 0 && (
+                  <p className="text-text-secondary">
+                    To keep this seed on the device instead, first delete the wallets that cannot
+                    be unlocked.
+                  </p>
+                )}
+              </div>
+            )}
 
             {walletActionError && <p className="text-danger text-xs">{walletActionError}</p>}
 
             <div className="flex items-center justify-end gap-2 pt-1">
               <button
-                onClick={() => setRemovingSeed(false)}
+                onClick={() => setRemoveSeedTarget(null)}
                 disabled={walletBusy}
                 className="text-text-secondary hover:text-text-primary text-sm px-3 py-1.5 transition-colors disabled:opacity-50"
               >
                 Cancel
               </button>
-              <button
-                onClick={() => runRemoveSeed(true)}
-                disabled={walletBusy}
-                className="btn btn-primary text-sm px-3 py-1.5 disabled:opacity-50"
-              >
-                Keep seed
-              </button>
+              {removeSeedIsLast && (
+                <button
+                  onClick={() => runRemoveSeed(true)}
+                  disabled={walletBusy}
+                  className="btn btn-primary text-sm px-3 py-1.5 disabled:opacity-50"
+                >
+                  Keep seed
+                </button>
+              )}
               <button
                 onClick={() => runRemoveSeed(false)}
                 disabled={walletBusy}
                 className="btn btn-danger text-sm px-3 py-1.5 disabled:opacity-50 flex items-center gap-2"
               >
                 {walletBusy && <Spinner />}
-                Delete seed too
+                {removeSeedIsLast
+                  ? 'Delete seed too'
+                  : removeSeedMembers.length === 1
+                    ? 'Delete wallet'
+                    : `Delete ${removeSeedMembers.length} wallets`}
               </button>
             </div>
           </div>

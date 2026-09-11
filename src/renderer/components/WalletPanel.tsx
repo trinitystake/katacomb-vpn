@@ -6,18 +6,15 @@ import { useNavigation } from '../contexts/NavigationContext'
 interface Props {
   address: string | null
   name: string | null
-  /** Locks the wallet: clears it from memory, leaves the encrypted seed on disk. */
-  onLogout: () => void
   /**
    * The chain is unreachable because OUR tunnel is carrying the traffic, so the
    * balance is the cached one and refreshing it cannot work. Not the same as being
    * connected: proxy mode leaves routing alone, so the RPC endpoint stays reachable.
    */
   chainFrozen: boolean
-  walletCount: number
 }
 
-export default function WalletPanel({ address, name, onLogout, chainFrozen, walletCount }: Props) {
+export default function WalletPanel({ address, name, chainFrozen }: Props) {
   const { display: balance, refresh: refreshBalance } = useBalance()
   const { openSettings } = useNavigation()
   const [copied, setCopied] = useState(false)
@@ -135,25 +132,12 @@ export default function WalletPanel({ address, name, onLogout, chainFrozen, wall
             </div>
           </div>
 
-          {walletCount > 1 && (
-            <button
-              onClick={() => { setExpanded(false); openSettings('wallets') }}
-              className="text-text-secondary hover:text-accent text-sm transition-colors w-full text-center"
-              title="Switch to a different stored wallet"
-            >
-              Switch Wallet
-            </button>
-          )}
-
-          {/* "Lock", not "Logout": the seeds stay encrypted on this device and
-              come back from the wallet picker. Deleting is a separate, explicit
-              action in Settings → Wallets. */}
           <button
-            onClick={onLogout}
-            className="text-text-secondary hover:text-danger text-sm transition-colors w-full text-center"
-            title="Lock: your wallets stay stored on this device"
+            onClick={() => { setExpanded(false); openSettings('wallets') }}
+            className="text-text-secondary hover:text-accent text-sm transition-colors w-full text-center"
+            title="Switch, add or remove stored wallets"
           >
-            Lock
+            Manage Wallets
           </button>
         </div>
       )}

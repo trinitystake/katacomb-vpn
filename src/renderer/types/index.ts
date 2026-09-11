@@ -305,6 +305,12 @@ export interface WalletStoreStatus {
      * Such a wallet must be re-imported from its phrase, not just selected.
      */
     unlockable: boolean
+    /**
+     * Id of the first stored wallet holding the same seed phrase, so wallets
+     * derived from one seed can be grouped. Computed by main on every read and
+     * never persisted. Null when the seed cannot be decrypted.
+     */
+    seedGroup: string | null
   })[]
   activeWalletId: string | null
   /**
@@ -561,7 +567,6 @@ export interface ElectronAPI {
   walletGetAddress: () => Promise<string | null>
   /** null when the balance is unknown (RPC unreachable and nothing cached yet). */
   walletGetBalance: () => Promise<{ denom: string; amount: string }[] | null>
-  walletLogout: () => Promise<void>
   walletSessions: () => Promise<SessionInfo[]>
   walletEndSession: (sessionId: string) => Promise<void>
   walletList: () => Promise<WalletEntry[]>
@@ -573,8 +578,15 @@ export interface ElectronAPI {
   walletSwitch: (walletId: string) => Promise<{ address: string | null }>
   /** `keepSeed` applies only to the last wallet — see WalletStoreStatus.retainedSeedId. */
   walletDelete: (walletId: string, keepSeed?: boolean) => Promise<void>
-  /** `keepSeed` retains the active wallet's encrypted seed — see WalletStoreStatus.retainedSeedId. */
-  walletDeleteAll: (keepSeed?: boolean) => Promise<void>
+  /** Deletes every stored wallet and any retained seed: the picker's "start fresh". */
+  walletDeleteAll: () => Promise<void>
+  /**
+   * Deletes every wallet sharing `walletId`'s seed. `keepSeed` is accepted only
+   * when those are the last wallets stored — see WalletStoreStatus.retainedSeedId.
+   * `activeWalletChanged` means main moved to another wallet (or none is left),
+   * so the caller must reload the way a switch does.
+   */
+  walletDeleteSeed: (walletId: string, keepSeed?: boolean) => Promise<{ activeWalletChanged: boolean }>
   walletStoreStatus: () => Promise<WalletStoreStatus>
   walletRename: (walletId: string, newName: string) => Promise<void>
   walletDeriveSubaccount: (params: { sourceWalletId: string; accountIndex: number; addressIndex: number; name: string }) => Promise<{ address: string }>

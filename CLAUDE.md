@@ -63,6 +63,13 @@ Strict Electron security isolation with three process boundaries:
 
 - `wallet.ts`: BIP-39 mnemonic import, `DirectSecp256k1HdWallet` derivation with `sent` prefix, `safeStorage` encryption (OS keyring via libsecret on Linux), balance/session queries via `SentinelClient`.
 - `settings.ts`: Multi-wallet store (`wallets/` dir with encrypted `.enc` files + `wallets-index.json`), app settings (`settings.json`), old single-wallet migration. Wallet entries have `id` (UUID), `name`, `address`.
+  **There is no seed id on disk**: every entry holds its own encrypted copy of the phrase
+  (a derived subaccount re-encrypts the same words), so which wallets share a seed is
+  computed by decrypt-and-compare on every `WALLET_STORE_STATUS` read (`assignSeedGroups`
+  in `shared/seed-groups.ts`, pure + unit-tested) and never persisted. The Settings
+  Wallets tab nests wallets under those groups and `WALLET_DELETE_SEED` removes one
+  group; its `keepSeed` is only valid when that group is the last thing stored, because
+  `retainedSeedId` can only hold a seed while zero wallets exist.
 - `chain-service.ts`: `SigningSentinelClient` for on-chain tx (node subscription via `nodeStartSession`), session ID extraction from tx events, cryptographic handshake with nodes (WireGuard/V2Ray branching). Session configs saved to disk for reconnect.
 - `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled binaries (v2ray, tun2socks) verified via SHA-256 before use, with system PATH fallback.
 - `ipc-handlers.ts`: all IPC channels (registered via a `handle()` wrapper that rejects calls from any frame that isn't our own renderer), pre-connect balance validation, node list fetch from `api.sentnodes.com/v2/nodes` via `net.fetch`, auto-reconnect + a WireGuard liveness monitor. Caches balance/sessions/nodes when VPN is active (RPC unreachable through tunnel).

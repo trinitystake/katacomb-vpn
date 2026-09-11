@@ -74,7 +74,8 @@ import { assertValidProviderDetails } from '../shared/provider-details'
 import { getProvider, listProviders } from './provider-service'
 import { getCachedProviders } from './provider-cache'
 import { getCachedPlans } from './plan-cache'
-import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, canUnlockWallet, getWalletMnemonic, clearRetainedSeed, setWalletProviderMode, type AppSettings } from './settings'
+import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, getWalletMnemonic, clearRetainedSeed, setWalletProviderMode, type AppSettings } from './settings'
+import { assignSeedGroups } from '../shared/seed-groups'
 import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
 import { normalizeNodes, parseNodesPage, type NodesPage } from './node-normalize'
 import {
@@ -2512,10 +2513,6 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  handle(IPC.WALLET_LOGOUT, async () => {
-    logout()
-  })
-
   handle(IPC.WALLET_SESSIONS, async () => {
     // While a tunnel is up the chain is often unreachable through it, so the
     // cache is the answer. An EMPTY cache is not an answer, though: it renders
@@ -2634,35 +2631,68 @@ export function registerIpcHandlers(): void {
     deleteWalletEntry(walletId, { keepSeed: keepSeed === true })
   })
 
-  handle(IPC.WALLET_DELETE_ALL, async (_event, keepSeed?: boolean) => {
-    // "Start fresh" from the wallet picker, and "Remove seed" from Settings. One
+  handle(IPC.WALLET_DELETE_ALL, async () => {
+    // "Delete all wallets and start fresh" from the wallet picker. One
     // round-trip rather than N invokes from the renderer, so a destructive op
     // can't be left half-done by a mid-loop failure in the caller. App settings
-    // are deliberately untouched.
-    const wallets = listWallets()
-    // `keepSeed` keeps the phrase behind the ACTIVE wallet — the one the user is
-    // looking at. deleteWalletEntry only retains when it's deleting the final
-    // entry, so that one has to go last.
-    const activeId = loadSettings().activeWalletId
-    const retainId = keepSeed === true
-      ? (wallets.find((w) => w.id === activeId)?.id ?? wallets[0]?.id ?? null)
-      : null
+    // are deliberately untouched. Removing ONE seed is WALLET_DELETE_SEED.
+    for (const wallet of listWallets()) deleteWalletEntry(wallet.id)
+    clearRetainedSeed()
+    logout()
+  })
 
-    for (const wallet of wallets) {
+  // Removes ONE seed: every wallet whose file holds the same phrase as
+  // `walletId`. Membership is recomputed here rather than taken from the
+  // renderer, so a stale list cannot delete the wrong wallets. `keepSeed` rides
+  // the retained-seed model, which only holds a seed while ZERO wallets are
+  // stored, so it is accepted only when this seed's wallets are the last ones.
+  handle(IPC.WALLET_DELETE_SEED, async (_event, walletId: string, keepSeed?: boolean) => {
+    assertString(walletId, 'walletId')
+    const wallets = assignSeedGroups(listWallets(), getWalletMnemonic)
+    const target = wallets.find((w) => w.id === walletId)
+    if (!target) throw new Error('Wallet not found')
+    if (target.seedGroup === null) {
+      throw new Error('This wallet cannot be unlocked, so its seed is unknown. Delete it on its own.')
+    }
+    const members = wallets.filter((w) => w.seedGroup === target.seedGroup)
+    const remaining = wallets.filter((w) => w.seedGroup !== target.seedGroup)
+    if (keepSeed === true && remaining.length > 0) {
+      throw new Error('The seed can only be kept when no other wallets are stored.')
+    }
+    const activeId = loadSettings().activeWalletId
+    const activeInGroup = members.some((w) => w.id === activeId)
+    // deleteWalletEntry only retains when it deletes the final entry, so the
+    // kept one goes last.
+    const retainId = keepSeed === true ? (members.find((w) => w.id === activeId) ?? members[0]).id : null
+    for (const wallet of members) {
       if (wallet.id !== retainId) deleteWalletEntry(wallet.id)
     }
     if (retainId) deleteWalletEntry(retainId, { keepSeed: true })
-    if (keepSeed !== true) clearRetainedSeed()
-    logout()
+    // deleteWalletEntry repoints activeWalletId on disk but not the wallet in
+    // memory, and mid-loop it may point at a member deleted a step later, so
+    // the successor comes from `remaining`, fixed before anything was deleted.
+    if (activeInGroup) {
+      const next = remaining.find((w) => w.unlockable)
+      if (next) {
+        await switchWallet(next.id)
+        lastPlanOverview = null
+        lastProviderOverview = null
+      } else {
+        logout()
+      }
+    }
+    return { activeWalletChanged: activeInGroup }
   })
 
   // What's on disk, regardless of whether a wallet is currently active — the
   // wallet picker's source of truth. `unlockable` is false for a seed encrypted
   // under the app's previous name (safeStorage keys its entry by app name), so
   // the picker can say so instead of offering a switch that will fail.
+  // `seedGroup` is computed by decrypt-and-compare on every call and never
+  // persisted: there is no seed id on disk, each entry holds its own copy.
   handle(IPC.WALLET_STORE_STATUS, async () => {
     return {
-      wallets: listWallets().map((w) => ({ ...w, unlockable: canUnlockWallet(w.id) })),
+      wallets: assignSeedGroups(listWallets(), getWalletMnemonic),
       activeWalletId: loadSettings().activeWalletId,
       retainedSeedId: loadSettings().retainedSeedId,
     }

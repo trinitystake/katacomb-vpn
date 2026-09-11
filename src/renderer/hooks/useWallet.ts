@@ -41,17 +41,9 @@ export function useWallet() {
     return result.address
   }
 
-  async function logout() {
-    await window.api.walletLogout()
-    // The seeds stay on disk — reload so the picker can offer them back rather
-    // than dropping the user on the import screen.
-    await load()
-  }
-
   return {
     ...info,
     importWallet,
-    logout,
     /** Re-read after a change made elsewhere (renaming, switching, deleting). */
     refreshIdentity: load,
   }

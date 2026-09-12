@@ -366,7 +366,7 @@ export async function subscribeToNode(params: {
     // The height is at most a couple of seconds stale against a ~110s window.
     const timeoutHeight = BigInt(height + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn', timeoutHeight),
+      client.signAndBroadcast(address, [msg], 'auto', '', timeoutHeight),
       SESSION_TX_TIMEOUT_MESSAGE,
     )
 
@@ -418,7 +418,7 @@ export async function endSession(params: {
 
     try {
       const tx = await broadcastOrTimeout(
-        client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: end session'),
+        client.signAndBroadcast(address, [msg], 'auto'),
         END_SESSION_TX_TIMEOUT_MESSAGE,
       )
 

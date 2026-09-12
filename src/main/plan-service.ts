@@ -377,7 +377,7 @@ export async function cancelSubscription(params: {
     })
     const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: cancel subscription', timeoutHeight),
+      client.signAndBroadcast(address, [msg], 'auto', '', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
     assertTxSucceeded(tx, 'Transaction')
@@ -411,7 +411,7 @@ export async function renewSubscription(params: {
     })
     const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: renew subscription', timeoutHeight),
+      client.signAndBroadcast(address, [msg], 'auto', '', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
     assertTxSucceeded(tx, 'Transaction')
@@ -441,7 +441,7 @@ export async function updateSubscriptionPolicy(params: {
     })
     const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: update renewal policy', timeoutHeight),
+      client.signAndBroadcast(address, [msg], 'auto', '', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
     assertTxSucceeded(tx, 'Transaction')
@@ -555,7 +555,7 @@ export async function startSessionWithExistingSubscription(params: {
     })
     const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: subscription start session', timeoutHeight),
+      client.signAndBroadcast(address, [msg], 'auto', '', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
 
@@ -605,7 +605,7 @@ export async function subscribeToPlan(params: {
     })
     const timeoutHeight = BigInt((await client.getHeight()) + TX_TIMEOUT_HEIGHT_OFFSET)
     const tx = await broadcastOrTimeout(
-      client.signAndBroadcast(address, [msg], 'auto', 'katacomb-vpn: plan start session', timeoutHeight),
+      client.signAndBroadcast(address, [msg], 'auto', '', timeoutHeight),
       TX_TIMEOUT_MESSAGE,
     )
 

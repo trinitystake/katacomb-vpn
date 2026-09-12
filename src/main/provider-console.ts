@@ -552,7 +552,6 @@ async function broadcast(params: {
   wallet: DirectSecp256k1HdWallet
   accountAddress: string
   msg: EncodeObject
-  memo: string
 }): Promise<void> {
   return withProviderWriteLock(async () => {
     const base = await resolveRpcBase(getRpcEndpoint())
@@ -577,7 +576,7 @@ async function broadcast(params: {
       const height = await withTimeout(client.getHeight(), QUERY_TIMEOUT_MS, 'chain height')
       const timeoutHeight = BigInt(height + TX_TIMEOUT_HEIGHT_OFFSET)
       const tx = await broadcastOrTimeout(
-        client.signAndBroadcast(params.accountAddress, [params.msg], 'auto', params.memo, timeoutHeight),
+        client.signAndBroadcast(params.accountAddress, [params.msg], 'auto', '', timeoutHeight),
         TX_TIMEOUT_MESSAGE,
       )
       assertTxSucceeded(tx, 'Transaction')
@@ -601,7 +600,6 @@ export async function registerProvider(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildRegisterProviderMsg(params.accountAddress, params.details),
-    memo: 'katacomb-vpn: register provider',
   })
 }
 
@@ -614,7 +612,6 @@ export async function updateProviderDetails(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildProviderDetailsMsg(toProviderAddress(params.accountAddress), params.details),
-    memo: 'katacomb-vpn: update provider details',
   })
 }
 
@@ -627,7 +624,6 @@ export async function setProviderStatus(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildProviderStatusMsg(toProviderAddress(params.accountAddress), params.active),
-    memo: `katacomb-vpn: ${params.active ? 'activate' : 'deactivate'} provider`,
   })
 }
 
@@ -641,7 +637,6 @@ export async function createPlan(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildCreatePlanMsg(toProviderAddress(params.accountAddress), params.input),
-    memo: 'katacomb-vpn: create plan',
   })
 }
 
@@ -655,7 +650,6 @@ export async function setPlanStatus(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildPlanStatusMsg(toProviderAddress(params.accountAddress), params.planId, params.active),
-    memo: `katacomb-vpn: ${params.active ? 'activate' : 'deactivate'} plan`,
   })
 }
 
@@ -675,7 +669,6 @@ export async function updatePlanDetails(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildUpdatePlanDetailsMsg(toProviderAddress(params.accountAddress), params.planId, params.private),
-    memo: `katacomb-vpn: make plan ${params.private ? 'private' : 'public'}`,
   })
 }
 
@@ -694,7 +687,6 @@ export async function updateLease(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildUpdateLeaseMsg(toProviderAddress(params.accountAddress), params.leaseId, params.renewalPricePolicy),
-    memo: 'katacomb-vpn: update lease renewal policy',
   })
 }
 
@@ -722,7 +714,6 @@ export async function renewLease(params: {
       hours: params.hours,
       hourlyQuoteValue: params.hourlyQuoteValue,
     }),
-    memo: 'katacomb-vpn: renew lease',
   })
 }
 
@@ -753,7 +744,6 @@ export async function startLease(params: {
       hourlyQuoteValue: params.hourlyQuoteValue,
       renewalPricePolicy: params.renewalPricePolicy,
     }),
-    memo: 'katacomb-vpn: start lease',
   })
 }
 
@@ -767,7 +757,6 @@ export async function endLease(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildEndLeaseMsg(toProviderAddress(params.accountAddress), params.leaseId),
-    memo: 'katacomb-vpn: end lease',
   })
 }
 
@@ -781,7 +770,6 @@ export async function linkNode(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildLinkNodeMsg(toProviderAddress(params.accountAddress), params.planId, params.nodeAddress),
-    memo: 'katacomb-vpn: link node to plan',
   })
 }
 
@@ -795,6 +783,5 @@ export async function unlinkNode(params: {
     wallet: params.wallet,
     accountAddress: params.accountAddress,
     msg: buildUnlinkNodeMsg(toProviderAddress(params.accountAddress), params.planId, params.nodeAddress),
-    memo: 'katacomb-vpn: unlink node from plan',
   })
 }

@@ -64,6 +64,9 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
   chosen account index.
 - Seeds are encrypted at rest with Electron `safeStorage` (the OS keyring, libsecret on
   Linux). If the keyring is unavailable, secrets are **not** written in plaintext instead.
+- The active wallet is locked while a session is running: nothing on disk records which
+  wallet paid for one, so switching mid-session would leave it uncancellable. Renaming,
+  deriving a subaccount and reading a recovery phrase stay available.
 
 **Selling bandwidth**: the other side of the network
 
@@ -255,6 +258,9 @@ root, and a single `PostUp = …` line in a WireGuard config is a root shell. So
   renderer are rejected.
 - Split-tunnel routes are sanitized: a node cannot hand back `0.0.0.0/1` and quietly
   exclude your traffic from the tunnel.
+- Transactions carry **no memo**. A memo is public and permanent, and one naming this
+  client would label every purchase and cancel an account ever made. Nothing here reads
+  one back, so none is sent.
 
 **What multi-hop does and does not do.** It protects against *one* dishonest node: with
 two hops, neither end holds both your identity and your destinations. Both hops are

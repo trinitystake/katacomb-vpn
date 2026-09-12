@@ -1,46 +1,48 @@
-# Katacomb VPN 1.7.0
+# Katacomb VPN 1.8.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-A wallet management release. Adding a wallet no longer means locking the one you are
-using, and the Wallets tab now groups wallets under the seed phrase they came from, so
-each seed's recovery phrase, subaccounts and removal are reachable in one place.
+A correctness and privacy release. Transactions no longer carry a memo naming this app,
+and the wallet that paid for a session can no longer be switched, replaced or deleted
+while that session is running.
 
 ## Highlights
 
-- **One Manage Wallets button.** The Wallet popover's Switch Wallet and Add Wallet are
-  now a single Manage Wallets entry, which opens Settings on the Wallets tab. Everything
-  wallet-shaped lives in one screen.
-- **Wallets grouped by seed.** Settings, Wallets nests each wallet under the seed it was
-  derived from, labelled Seed 1, Seed 2 and so on, with Derive Subaccount, Recovery
-  Phrase and Remove seed on each group's header. Those three used to sit in the tab
-  header and act only on the active wallet's seed, so reading another seed's phrase
-  meant switching to a wallet under it first, which reloads the app.
-- **Remove seed removes one seed.** It used to delete every stored wallet, whichever
-  seed they came from. It now removes just that group, lists those wallets by name and
-  address in the confirmation, and says so when the wallet in use is among them. In that
-  case the app moves to another stored wallet rather than leaving you with none.
-- **Add a wallet without locking first.** Importing or creating a second seed is offered
-  in Settings while a wallet is active. It previously required clicking Lock, which was
-  the only route to the import screen.
-- **Lock is gone.** It cleared the active wallet and dropped you on a full-screen picker
-  with no way back, while protecting nothing: any wallet reopened from that picker with
-  no passphrase, because the system keyring is already unlocked for your session.
-  Switching wallets and adding one both live in Manage Wallets instead.
-- **Straighter wording on removal.** Deleting a single wallet now says whether its seed
-  survives, which depends on whether another wallet still holds it. The Recovery Phrase
-  modal names every wallet those words unlock, so one phrase shown for two wallets reads
-  as expected rather than as a bug.
-- **Wallets that cannot be unlocked stand apart.** A seed encrypted under the app's
-  previous name cannot be decrypted on this machine. Those wallets now sit in their own
-  section, with the reason and the instruction to import the phrase again, instead of
-  looking like ordinary rows that refuse to open.
+- **Transactions carry no memo.** Every purchase, cancel, renewal and provider action
+  used to write "katacomb-vpn" into a public field of the transaction, kept forever on
+  chain and readable by anyone. It labelled each of those actions as having come from
+  this client and tied one account's activity together. Nothing in the app ever read a
+  memo back, so none is sent now.
+- **The wallet in use is locked for the length of a session.** Switching, adding or
+  deleting a wallet is refused while you are connected, with a banner on Settings,
+  Wallets saying why. Nothing on disk records which wallet a session belongs to, so
+  changing it left the session uncancellable: ending it signed with the wrong account,
+  the chain rejected that, and the deposit stayed locked until the session expired on its
+  own. Your balance and session list also kept showing the previous wallet's figures
+  under the new address for the rest of the connection. Renaming a wallet, deriving a
+  subaccount and reading a recovery phrase still work, because none of them changes which
+  wallet signs.
+- **One paid session at a time, in local-proxy mode too.** Buying a plan session was
+  refused only when your routing was redirected. In local-proxy mode, and during an
+  automatic reconnect, a second purchase went through and then failed to connect, leaving
+  a paid session that nothing was watching for expiry.
+- **The session carrying your connection cannot be ended by accident.** Ending it, or
+  cancelling the subscription behind it, is refused while it is in use. The Sessions tab
+  already disconnected first, but not during an automatic reconnect, where the cancel
+  landed on a session that was about to come back.
+- **A form opened before you connect stops accepting.** Provider and subscription forms
+  left open when a tunnel comes up now grey out their confirm button, instead of taking
+  the click and failing on the way to the chain.
+- **Endpoint testing pauses while connected.** Settings, Network no longer probes every
+  public RPC through the tunnel. Those measurements described the tunnel rather than the
+  endpoint, and the app already refused to act on them. It now says which of the two
+  reasons applies, the VPN or the kill switch, and resumes when you disconnect.
 
-## Fixes in 1.7.0
+## Fixes in 1.8.0
 
-- Rework wallet management: Manage Wallets, seed-grouped Wallets tab
+<!-- regenerated by release.sh from v1.7.0..HEAD at cut time; leave the heading -->
 
 ## Known limitations
 

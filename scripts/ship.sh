@@ -6,7 +6,7 @@
 #
 # Runs the release end to end: notes, cut, install, test, publish. Run it again
 # whenever it stops. It works out where you are every time, so re-running after a
-# logout, a failure, or a coffee break always continues from the right place.
+# reboot, a failure, or a coffee break always continues from the right place.
 #
 # It orchestrates the other three scripts and does nothing itself. If something
 # here disagrees with release.sh, release.sh is right.
@@ -24,6 +24,12 @@
 # confidently wrong about the one thing it exists to know. Derivation cannot
 # drift, and it makes "run it again" the answer to every failure, which is the
 # only instruction worth giving someone whose release just stopped.
+#
+# The same rule decides whether a reboot is needed before the test. The session
+# either has the katacomb-vpn group or it does not, and only one that has it can
+# reach the daemon, so the script looks (`id -nG`) and stops for a reboot when it
+# must. There used to be a "one pass or split" question here that asked the user
+# to predict that answer: the one phase boundary remembered rather than derived.
 #
 # WHAT IS DELIBERATELY NOT AUTOMATED.
 #
@@ -60,12 +66,9 @@ usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 VERSION=""
 DRY_RUN=0
-MODE=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run)  DRY_RUN=1 ;;
-    --single)   MODE='single' ;;
-    --split)    MODE='split' ;;
     -h|--help)  usage; exit 0 ;;
     -*)         die "unknown option: $arg" ;;
     *)          [ -z "$VERSION" ] || die "version given twice: $VERSION and $arg"
@@ -234,8 +237,25 @@ fi
 
 # --- 3. cut -----------------------------------------------------------------
 phase 3/7 "cut the release"
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+CUT_DONE=0
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && CUT_DONE=1
+if [ "$CUT_DONE" = 1 ]; then
   skip "$TAG already cut"
+elif [ "$DRY_RUN" = 1 ]; then
+  if [ "$NOTES_READY" = 1 ]; then
+    # Run it, rather than print that we would: release.sh's own --dry-run builds
+    # nothing and its preflight is real (branch, tree, tag, node, gpg key, the
+    # notes tripwires), which is what a rehearsal is for. The same call phase 7
+    # makes for the publish preflight.
+    printf '  (running release.sh --dry-run)\n'
+    "$SCRIPT_DIR/release.sh" "$VERSION" --dry-run ||
+      die "the cut preflight would fail (above)"
+  else
+    # That preflight stops on notes that are not written yet, and phase 2 has just
+    # said they would be written, so there is nothing to rehearse until they are.
+    printf '  would run: %s\n' "$SCRIPT_DIR/release.sh $VERSION"
+    info "its preflight is not rehearsed until the notes are written"
+  fi
 else
   info "building and signing, this takes a few minutes"
   run_phase "cutting the release" "$SCRIPT_DIR/release.sh" "$VERSION"
@@ -249,7 +269,7 @@ phase 4/7 "packaging verification"
 # the fallback a rehearsal (where phase 2 never really runs) has no previous tag to
 # compare with, so it reports every release as a packaging change and asks a question
 # it did not need to ask.
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+if [ "$CUT_DONE" = 1 ]; then
   RANGE_END="$TAG"
   PREV_TAG="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
 else
@@ -289,6 +309,25 @@ EOF
   fi
 fi
 
+# A rehearsal can only go as far as the cut. Install, test and publish all need
+# what it produces (the deb, the tag, the version bump), so before the cut there
+# is nothing further a dry run can check, only phases it would describe, and the
+# first thing it would run into is the missing-deb STOP that phase 5 keeps for a
+# real run, with advice ("re-cut") that is wrong here. After the cut a dry run
+# carries on: phase 7 runs the publish preflight for real, which is worth having.
+if [ "$DRY_RUN" = 1 ] && [ "$CUT_DONE" = 0 ]; then
+  cat <<EOF
+
+${bold}Dry run finished.${reset} Nothing was changed, built or published.
+  Install, test and publish (5 to 7) all need the build and the tag the cut
+  produces, so a rehearsal stops here. To do it for real:
+
+      ./scripts/ship.sh $VERSION
+
+EOF
+  exit 0
+fi
+
 # --- 5. install -------------------------------------------------------------
 phase 5/7 "install this build"
 INSTALLED="$(dpkg-query -W -f='${Version}' "$DEB_PACKAGE" 2>/dev/null || true)"
@@ -318,46 +357,10 @@ fi
 
 if [ "$NEED_INSTALL" = 0 ]; then
   skip "$DEB_PACKAGE $VERSION already installed, and it is this build"
-  INSTALL_DONE=1
 else
-  INSTALL_DONE=0
   [ -f "dist/$DEB_NAME" ] || die "dist/$DEB_NAME is missing, so there is nothing to install.
         Re-cut: ./scripts/release.sh $VERSION"
   info "$INSTALL_REASON"
-
-  # The mode question, asked once and only where it changes anything: right before
-  # the install that invalidates a pre-existing login.
-  if [ -z "$MODE" ]; then
-    cat <<EOF
-
-  How do you want to finish?
-
-    1) one pass    install, test in the app, publish, without logging out
-    2) split       install, then log out and back in, then run this again
-EOF
-    if [ "$PACKAGING_CHANGED" = 1 ]; then
-      cat <<EOF
-
-  Worth knowing for this release: packaging changed, so the portability run
-  removed the katacomb-vpn group and the reinstall recreated it. Your current
-  login still carries the OLD membership, so the app cannot reach the daemon
-  and will fall back to asking for a password. In one-pass mode that shows up
-  as a password prompt during the test below, which is a "no" answer.
-EOF
-    fi
-    if [ "$DRY_RUN" = 1 ]; then
-      info "would ask: one pass or split"
-      MODE='single'
-    else
-      printf '\n  Choose [1/2]: '
-      read -r reply
-      case "$reply" in
-        1) MODE='single' ;;
-        2) MODE='split' ;;
-        *) die "expected 1 or 2, got '$reply'" ;;
-      esac
-    fi
-  fi
 
   # --reinstall only when the version is unchanged: apt does nothing at all for an
   # equal version otherwise, which is exactly how the wrong build gets tested.
@@ -371,28 +374,37 @@ fi
 # --- 6. group + the test ----------------------------------------------------
 phase 6/7 "confirm the build works"
 
-# Only meaningful in split mode: it is the whole point of logging out, and in
-# one-pass mode the user has explicitly chosen to skip it. A stale group is not
-# silently fine either way, which is why the test below is not optional.
-if [ "$MODE" = split ] && [ "$INSTALL_DONE" = 0 ]; then
-  cat <<EOF
-
-  Installed. Now log out and back in, so your session picks up the
-  katacomb-vpn group, then run this again:
-
-      ./scripts/ship.sh $VERSION
-
-EOF
-  exit 0
-fi
-
+# The group is the test's one precondition: without it the app cannot open the
+# daemon socket, falls back to pkexec, and connect asks for a password, so the
+# question below could only be answered "no". A session lacks it after the first
+# install on a machine, and after the portability run (its postrm deletes the
+# group, the reinstall recreates it, and a login from before that carries the
+# old membership). `id -nG` names the session's GIDs against the current
+# /etc/group and the kernel checks the socket by GID, so a name that still
+# resolves is a membership that still works, and one that does not is not.
+# A reboot rather than a logout: release.sh explains how a logout can silently
+# fail to start a new session and look identical to one that worked.
 if id -nG | tr ' ' '\n' | grep -qx "$DEB_PACKAGE"; then
   ok "in the $DEB_PACKAGE group"
-elif [ "$MODE" = single ]; then
-  info "not in the $DEB_PACKAGE group in this session; connect may ask for a password"
+elif [ "$DRY_RUN" = 1 ]; then
+  info "would stop here: this login lacks the $DEB_PACKAGE group, so a real run asks
+        for a reboot at this point and continues when run again"
 else
-  info "not in the $DEB_PACKAGE group yet. If connect asks for a password, log out
-        and back in, then run this again."
+  cat <<EOF
+  ....  this login does not have the $DEB_PACKAGE group, so the app cannot reach the
+        daemon and connect would ask for a password. Reboot, not a logout, then run
+        this again:
+
+      ./scripts/ship.sh $VERSION
+EOF
+  [ "$PACKAGING_CHANGED" = 0 ] || cat <<EOF
+
+        Expected for this release: packaging changed, so the portability run deleted
+        the group and the reinstall recreated it. A login from before that carries
+        the old membership.
+EOF
+  echo
+  exit 0
 fi
 
 cat <<EOF
@@ -404,7 +416,8 @@ EOF
 if [ "$DRY_RUN" = 1 ]; then
   info "would ask whether connect and disconnect both worked"
 else
-  printf '  Did both work? [y/N] '
+  # This answer is the publish decision: phase 7 passes --yes, so nothing asks again.
+  printf '  Did both work? Answering y publishes %s to GitHub. [y/N] ' "$TAG"
   read -r reply
   case "$reply" in
     y|Y|yes|YES) ok "build confirmed working" ;;
@@ -423,7 +436,11 @@ if [ "$DRY_RUN" = 1 ]; then
   "$SCRIPT_DIR/publish-release.sh" "$VERSION" --dry-run ||
     die "the publish preflight would fail (above)"
 else
-  run_phase "publishing" "$SCRIPT_DIR/publish-release.sh" "$VERSION"
+  # --yes: the "cannot be undone, continue?" that script asks when run on its own
+  # was answered by the test question seconds ago, and the run took every other
+  # prompt up front for the same reason. Its preflight still runs, and still
+  # stops on any failure.
+  run_phase "publishing" "$SCRIPT_DIR/publish-release.sh" "$VERSION" --yes
 fi
 
 if [ "$DRY_RUN" = 1 ]; then

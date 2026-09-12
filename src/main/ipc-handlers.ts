@@ -1084,12 +1084,22 @@ function sendReconnecting(attempt: number, maxAttempts: number): void {
  * tracked session (applySession) and brought a second tunnel up over the first,
  * leaving the old session active on chain with nothing watching its quota.
  * The renderer greys these actions out; this is the trust-boundary backstop.
+ *
+ * It also guards every change to the ACTIVE WALLET (switch, import, delete, remove
+ * seed): a single-hop session's saved config carries no walletId, so "owner" means
+ * whichever wallet is active, and a mid-session switch makes the cancel and the
+ * reconnect handshake sign with the wrong key (x/session rejects the cancel and the
+ * deposit is stranded until expiry). `action` only changes the second sentence.
  */
-function assertNotConnected(): void {
-  if (reconnectAttempt > 0 || getConnectionStatus().connected) {
+function connectionIsLive(): boolean {
+  return reconnectAttempt > 0 || getConnectionStatus().connected
+}
+
+function assertNotConnected(action = 'starting a new connection'): void {
+  if (connectionIsLive()) {
     const name = activeNodeInfo?.moniker || activeNodeInfo?.address
     throw new Error(
-      `Already connected${name ? ` to ${name}` : ''}. Disconnect the current session before starting a new connection.`,
+      `Already connected${name ? ` to ${name}` : ''}. Disconnect the current session before ${action}.`,
     )
   }
 }
@@ -2480,6 +2490,9 @@ export function registerIpcHandlers(): void {
     if (words.length !== 12 && words.length !== 24) {
       throw new Error('Mnemonic must be 12 or 24 words')
     }
+    // An import becomes the active wallet (importWallet), which is frozen while a
+    // session is live.
+    assertNotConnected('adding a wallet')
     let cleanName: string | undefined
     if (name !== undefined && name !== null) {
       if (typeof name !== 'string') throw new Error('Invalid name')
@@ -2573,6 +2586,13 @@ export function registerIpcHandlers(): void {
     if (isVpnActive()) {
       throw new Error('Disconnect the VPN before ending a session. The chain is unreachable through the tunnel.')
     }
+    // isVpnActive() is false in local-proxy mode and mid-reconnect, where the chain
+    // is reachable but the session is live all the same. Cancelling THAT session
+    // pulls the tunnel out from under the watchdog, and the reconnect ladder would
+    // resurrect a session the chain has closed. Other sessions stay endable there.
+    if ((sessionId === activeSessionId || sessionId === activeExitSessionId) && connectionIsLive()) {
+      throw new Error('This session is carrying your connection. Disconnect first to end it.')
+    }
     // A per-hop-wallet chain's exit session belongs to a SECOND account, and
     // x/session only accepts a cancel signed by the session's own account — so
     // "End both" on such a chain has to switch signer for the second hop or the
@@ -2615,12 +2635,18 @@ export function registerIpcHandlers(): void {
 
   handle(IPC.WALLET_SWITCH, async (_event, walletId: string) => {
     assertString(walletId, 'walletId')
+    assertNotConnected('switching wallets')
     const address = await switchWallet(walletId)
     // The plan overview's chain half is wallet-scoped: a stale answer must
     // never show the previous wallet's subscriptions. Same for the provider
     // overview (it is address-tagged as well, so this is belt and braces).
+    // The balance and session caches are neither address-tagged nor cleared
+    // anywhere else, and a failed read after the switch would otherwise hand
+    // back the previous wallet's figures under the new address.
     lastPlanOverview = null
     lastProviderOverview = null
+    lastKnownBalance = null
+    lastKnownSessions = []
     return { address }
   })
 
@@ -2628,6 +2654,9 @@ export function registerIpcHandlers(): void {
   // disk so new wallets can be derived from it without retyping the phrase.
   handle(IPC.WALLET_DELETE, async (_event, walletId: string, keepSeed?: boolean) => {
     assertString(walletId, 'walletId')
+    // Even a non-active wallet: a per-hop-wallet chain's exit session is owned by
+    // a second stored wallet, which "End both" loads by id to sign its cancel.
+    assertNotConnected('deleting a wallet')
     deleteWalletEntry(walletId, { keepSeed: keepSeed === true })
   })
 
@@ -2636,6 +2665,7 @@ export function registerIpcHandlers(): void {
     // round-trip rather than N invokes from the renderer, so a destructive op
     // can't be left half-done by a mid-loop failure in the caller. App settings
     // are deliberately untouched. Removing ONE seed is WALLET_DELETE_SEED.
+    assertNotConnected('deleting wallets')
     for (const wallet of listWallets()) deleteWalletEntry(wallet.id)
     clearRetainedSeed()
     logout()
@@ -2648,6 +2678,7 @@ export function registerIpcHandlers(): void {
   // stored, so it is accepted only when this seed's wallets are the last ones.
   handle(IPC.WALLET_DELETE_SEED, async (_event, walletId: string, keepSeed?: boolean) => {
     assertString(walletId, 'walletId')
+    assertNotConnected('removing a seed')
     const wallets = assignSeedGroups(listWallets(), getWalletMnemonic)
     const target = wallets.find((w) => w.id === walletId)
     if (!target) throw new Error('Wallet not found')
@@ -2677,6 +2708,8 @@ export function registerIpcHandlers(): void {
         await switchWallet(next.id)
         lastPlanOverview = null
         lastProviderOverview = null
+        lastKnownBalance = null
+        lastKnownSessions = []
       } else {
         logout()
       }
@@ -2757,8 +2790,11 @@ export function registerIpcHandlers(): void {
   handle(IPC.SETTINGS_SET, async (_event, settings: Record<string, unknown>) => {
     if (typeof settings !== 'object' || settings === null) throw new Error('Invalid settings')
     // Only allow known setting keys
+    // Not activeWalletId: only wallet.ts writes it (switchWallet / importWallet /
+    // logout), which is what keeps the in-memory keys in step with disk. A raw
+    // write here desynced the two and bypassed assertNotConnected.
     const allowed = new Set([
-      'rpcEndpoint', 'rpcMode', 'activeWalletId', 'killSwitch', 'lanSharing', 'dnsResolver', 'autoReconnect',
+      'rpcEndpoint', 'rpcMode', 'killSwitch', 'lanSharing', 'dnsResolver', 'autoReconnect',
       'bookmarkedNodes', 'splitTunnelRoutes',
     ])
     const filtered: Record<string, unknown> = {}
@@ -2771,9 +2807,6 @@ export function registerIpcHandlers(): void {
     }
     if (filtered.rpcMode !== undefined && filtered.rpcMode !== 'auto' && filtered.rpcMode !== 'manual') {
       throw new Error('Invalid rpcMode')
-    }
-    if (filtered.activeWalletId !== undefined && filtered.activeWalletId !== null) {
-      assertString(filtered.activeWalletId, 'activeWalletId')
     }
     if (filtered.killSwitch !== undefined && typeof filtered.killSwitch !== 'boolean') {
       throw new Error('Invalid killSwitch: expected boolean')
@@ -3813,11 +3846,13 @@ export function registerIpcHandlers(): void {
     const address = getAddress()
     const privKey = getPrivKey()
     if (!wallet || !address || !privKey) throw new Error('Wallet not loaded')
-    // The purchase needs the chain, which is unreachable through our own tunnel —
-    // fail fast instead of burning the RPC timeout (the renderer gates too).
-    if (isVpnActive()) {
-      throw new Error('Disconnect the VPN before starting a new session. The chain is unreachable through the tunnel.')
-    }
+    // Broader than the isVpnActive() check the plan mutations use: a new session
+    // must also be refused in local-proxy mode and mid-reconnect, where routing is
+    // untouched but a session is live all the same (see assertNotConnected). This
+    // path pays, handshakes and applySession()s before the renderer's follow-up
+    // CONNECTION_CONNECT is refused, so without it a proxy-mode purchase left a
+    // paid session that nothing watched.
+    assertNotConnected()
 
     // Phase A — the pre-payment checks, the shared RPC connection and the
     // handshake endpoint (read-only), all in parallel. Any failure aborts with
@@ -4313,6 +4348,14 @@ export function registerIpcHandlers(): void {
     // fast instead of hanging to the RPC timeout (same rule as WALLET_END_SESSION).
     if (isVpnActive()) {
       throw new Error('Disconnect the VPN before managing subscriptions. The chain is unreachable through the tunnel.')
+    }
+    // Same gap as WALLET_END_SESSION: in local-proxy mode and mid-reconnect the
+    // chain is reachable, but cancelling the subscription behind the live session
+    // ends that session. The lookup mirrors CONNECTION_STATUS's subscriptionId.
+    const backingLive = (lastKnownSessions as SessionInfo[]).some((s) =>
+      (s?.id === activeSessionId || s?.id === activeExitSessionId) && s.subscriptionId === params.subscriptionId)
+    if (backingLive && connectionIsLive()) {
+      throw new Error('This subscription is backing your current session. Disconnect first to cancel it.')
     }
     // One connection for the funds check and the tx.
     const flow = await openChainFlow(wallet)

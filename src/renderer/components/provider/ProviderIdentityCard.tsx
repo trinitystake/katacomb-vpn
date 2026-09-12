@@ -169,7 +169,7 @@ export default function ProviderIdentityCard({ provider, plans, leases, stale, f
         </div>
       )}
       {editing && (
-        <ProviderDetailsModal provider={provider} onClose={() => setEditing(false)} onSaved={onChanged} />
+        <ProviderDetailsModal provider={provider} readOnly={stale} onClose={() => setEditing(false)} onSaved={onChanged} />
       )}
       {confirmDialog}
     </div>

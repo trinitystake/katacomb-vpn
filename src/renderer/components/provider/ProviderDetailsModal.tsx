@@ -15,8 +15,10 @@ import ProviderDetailsFields from './ProviderDetailsFields'
  * is why this one starts from what the chain already holds and sends all four
  * back.
  */
-export default function ProviderDetailsModal({ provider, onClose, onSaved }: {
+export default function ProviderDetailsModal({ provider, readOnly, onClose, onSaved }: {
   provider: MyProvider
+  /** The console went read-only (tunnel up, or the chain read failed) after this modal opened. */
+  readOnly: boolean
   onClose: () => void
   onSaved: () => Promise<void>
 }) {
@@ -87,6 +89,8 @@ export default function ProviderDetailsModal({ provider, onClose, onSaved }: {
           </div>
         )}
 
+        {readOnly && <p className="text-text-tertiary text-xs">Disconnect the VPN to save changes.</p>}
+
         <div className="flex gap-2">
           <button type="button" onClick={onClose} disabled={busy} className="btn btn-secondary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed">
             Cancel
@@ -94,9 +98,9 @@ export default function ProviderDetailsModal({ provider, onClose, onSaved }: {
           <button
             type="button"
             onClick={handleSave}
-            disabled={busy || Boolean(problem) || unchanged}
+            disabled={busy || Boolean(problem) || unchanged || readOnly}
             className="btn btn-primary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
-            title={unchanged ? 'Nothing has changed yet' : undefined}
+            title={readOnly ? 'Disconnect the VPN to save changes' : unchanged ? 'Nothing has changed yet' : undefined}
           >
             {busy && <Spinner size="sm" />}
             {busy ? 'Saving…' : 'Save to chain'}

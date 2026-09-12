@@ -422,6 +422,7 @@ function AppInner() {
       {settingsTab && (
         <Settings
           initialTab={settingsTab}
+          connected={isConnected}
           onClose={closeSettings}
           onWalletSwitch={() => {
             closeSettings()

@@ -9,6 +9,12 @@ interface Props {
   subscription: SubscriptionSummary
   /** The subscription's plan row when it is a plan subscription and the catalog knows it. */
   plan: PlanInfo | null
+  /**
+   * A session is live or the chain is out of reach: main refuses every action
+   * here, so they are greyed out rather than left for a modal opened earlier
+   * to submit into a refusal.
+   */
+  locked: boolean
   onClose: () => void
 }
 
@@ -25,7 +31,7 @@ type Confirming = 'cancel' | 'renew' | null
  * confirm()/alert() dialogs the old tab used for on-chain money. Every IPC
  * call is caught; a rejection shows here instead of vanishing.
  */
-export default function SubscriptionActionModal({ subscription, plan, onClose }: Props) {
+export default function SubscriptionActionModal({ subscription, plan, locked, onClose }: Props) {
   const { refreshOverview } = usePlansContext()
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -113,7 +119,7 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
             <select
               value={policy}
               onChange={(e) => setPolicy(parseInt(e.target.value, 10))}
-              disabled={busy !== null}
+              disabled={busy !== null || locked}
               className="bg-bg-tertiary border border-border text-text-primary text-sm px-2 py-1 rounded-sm focus:outline-none focus:border-border-focus"
             >
               {Object.entries(POLICY_LABELS).map(([v, label]) => (
@@ -126,7 +132,7 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
                 () => window.api.subscriptionUpdatePolicy(subscription.id, policy),
                 'Renewal policy updated.',
               )}
-              disabled={busy !== null || policy === subscription.renewalPricePolicy}
+              disabled={busy !== null || locked || policy === subscription.renewalPricePolicy}
               className="btn btn-secondary text-xs px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {busy === 'policy' ? <Spinner /> : 'Save'}
@@ -151,7 +157,7 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
                     () => window.api.subscriptionRenew(subscription.id, subscription.planId, 'udvpn'),
                     'Renewed. The new period starts when the current one ends.',
                   )}
-                  disabled={busy !== null}
+                  disabled={busy !== null || locked}
                   className="btn btn-primary flex-1 disabled:opacity-40"
                 >
                   {busy === 'renew' ? <Spinner /> : 'Renew and pay'}
@@ -164,7 +170,7 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
           ) : (
             <button
               onClick={() => { setDone(null); setConfirming('renew') }}
-              disabled={busy !== null || subscription.status !== 1}
+              disabled={busy !== null || locked || subscription.status !== 1}
               className="btn btn-secondary w-full text-sm disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Renew now{price?.amount ? ` (${price.amount} ${price.denomLabel})` : ''}
@@ -186,7 +192,7 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
                   () => window.api.subscriptionCancel(subscription.id),
                   null,
                 )}
-                disabled={busy !== null}
+                disabled={busy !== null || locked}
                 className="btn btn-danger flex-1 disabled:opacity-40"
               >
                 {busy === 'cancel' ? <Spinner /> : 'Cancel subscription'}
@@ -199,11 +205,17 @@ export default function SubscriptionActionModal({ subscription, plan, onClose }:
         ) : (
           <button
             onClick={() => { setDone(null); setConfirming('cancel') }}
-            disabled={busy !== null || subscription.status !== 1}
+            disabled={busy !== null || locked || subscription.status !== 1}
             className="btn btn-danger w-full text-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Cancel subscription
           </button>
+        )}
+
+        {locked && subscription.status === 1 && (
+          <p className="text-text-tertiary text-xs">
+            Disconnect the VPN to manage this subscription.
+          </p>
         )}
 
         {subscription.status !== 1 && (

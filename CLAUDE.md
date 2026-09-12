@@ -194,7 +194,7 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   session or brings up a tunnel calls `assertNotConnected()` (ipc-handlers.ts):
   `CONNECTION_SUBSCRIBE`, `CONNECTION_SUBSCRIBE_CHAIN`, `CONNECTION_RECONNECT`,
   `CONNECTION_CONNECT` (inside the lock, so a queued connect sees the one before it),
-  `PLAN_START_SESSION_FROM_SUB`, `PLAN_SMART_CONNECT`. It refuses while
+  `PLAN_SUBSCRIBE`, `PLAN_START_SESSION_FROM_SUB`, `PLAN_SMART_CONNECT`. It refuses while
   `getConnectionStatus().connected` OR `reconnectAttempt > 0` — deliberately broader
   than `isVpnActive()`, because local-proxy mode has a live paid session with routing
   untouched, and the reconnect window has a tunnel about to be resurrected. Without
@@ -209,6 +209,24 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   stay a warn-with-override, never a hard block — the detection false-positives on
   Tailscale, and IPsec/XFRM VPNs are invisible to it (reading xfrm policy needs
   CAP_NET_ADMIN), so it can inform but must not gate.
+- **The active wallet is frozen while a session is live.** `WALLET_SWITCH`, `WALLET_IMPORT`
+  (an import becomes active), `WALLET_DELETE`, `WALLET_DELETE_ALL` and `WALLET_DELETE_SEED`
+  call `assertNotConnected('switching wallets')` and friends, and `activeWalletId` is not a
+  `SETTINGS_SET` key: only `wallet.ts` writes it, which is what keeps the in-memory keys in
+  step with disk. A single-hop session's saved config carries no `walletId` (only multihop's
+  `finalizeChain` records one), so "owner" means "whichever wallet is active", and a
+  mid-session switch makes `WALLET_END_SESSION` and the reconnect handshake sign with the
+  wrong key: x/session rejects the cancel and the deposit is stranded until expiry, while
+  `lastKnownSessions`/`lastKnownBalance` (now cleared on switch) showed the old wallet's data
+  under the new address. The Settings Wallets tab greys Switch / Add Wallet / Delete / Remove
+  seed out behind a banner; the handlers are the enforcement. Rename, Derive Subaccount and
+  Recovery Phrase are deliberately not gated: none changes who signs. The same predicate
+  (`connectionIsLive()`, true in local-proxy mode and the reconnect window where
+  `isVpnActive()` is false) refuses ending the live session and cancelling the subscription
+  behind it, which the Sessions tab's disconnect-first step does not cover mid-reconnect. The
+  provider and subscription forms take their opener's read-only gate as a prop so a form
+  opened before a connect greys out with it, and Settings > Network pauses its RPC probes
+  (tab open and Retest) while the RPC state is `suspended`/`blocked`.
 - **Bound every wait.** RPC connects go through `withTimeout`; session-creating broadcasts
   go through `broadcastOrTimeout` and set a `timeoutHeight`. `provider-service.ts` is the
   reference for the timeout pattern. (`node-tester.ts`'s `nodeFetch` timeout does NOT

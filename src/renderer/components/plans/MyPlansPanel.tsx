@@ -139,10 +139,12 @@ export default function MyPlansPanel({ onBrowse }: { onBrowse: () => void }) {
               */}
               <button
                 onClick={() => setManageTarget(row)}
-                disabled={overview.stale || sub.status !== 1}
+                disabled={overview.stale || tunnelUp || sub.status !== 1}
                 title={sub.status !== 1
                   ? 'This subscription is no longer active, so there is nothing left to manage'
-                  : 'Renewal policy, renew now, or cancel'}
+                  : tunnelUp
+                    ? 'Disconnect the VPN to manage subscriptions'
+                    : 'Renewal policy, renew now, or cancel'}
                 className="btn btn-secondary text-xs px-3 py-1 ml-auto disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Manage
@@ -180,6 +182,7 @@ export default function MyPlansPanel({ onBrowse }: { onBrowse: () => void }) {
         <SubscriptionActionModal
           subscription={manageTarget.subscription}
           plan={manageTarget.plan}
+          locked={overview.stale || tunnelUp}
           onClose={() => setManageTarget(null)}
         />
       )}

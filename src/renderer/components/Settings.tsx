@@ -7,6 +7,7 @@ import type { SettingsTab } from '../contexts/NavigationContext'
 import { useRpcHealth } from '../hooks/useRpcHealth'
 import { classifyRpc, rpcHealthLabel, rpcHostLabel, STALE_BLOCK_AGE_SEC } from '../../shared/rpc-health'
 import { parseWalletExists } from '../../shared/wallet-errors'
+import { displayConnectError } from '../utils/connect-errors'
 import { formatHdPath, DERIVE_PREVIEW_MAX_COUNT } from '../../shared/hd-path'
 import { parseSplitTunnelRoutes, MAX_SPLIT_TUNNEL_ROUTES } from '../../shared/split-tunnel'
 import { groupWalletsBySeed, type SeedGroup } from '../../shared/seed-groups'
@@ -15,6 +16,13 @@ import { STATE_DOT } from './RpcStatus'
 interface Props {
   /** Which tab to land on — 'network' when something sent the user here to fix the RPC. */
   initialTab: SettingsTab
+  /**
+   * A session is live, in any mode: tunnel, local proxy, or the reconnect window.
+   * Main refuses every change to the active wallet then (assertNotConnected), so
+   * the Wallets tab greys those actions out behind a banner. Broader than
+   * WalletPanel's chainFrozen, which is false in proxy mode.
+   */
+  connected: boolean
   onClose: () => void
   onWalletSwitch: () => void
   // Called after a wallet rename / derive succeeds, so the top-bar Wallet
@@ -52,7 +60,7 @@ type StoredWallet = WalletStoreStatus['wallets'][number]
 // wallets stored under it. Any member's id serves as the seed source in main.
 type Group = SeedGroup<StoredWallet>
 
-export default function Settings({ initialTab, onClose, onWalletSwitch, onWalletsChanged, onAddWallet, providerTabVisible }: Props) {
+export default function Settings({ initialTab, connected, onClose, onWalletSwitch, onWalletsChanged, onAddWallet, providerTabVisible }: Props) {
   const { reload: reloadGlobalSettings } = useSettings()
   const rpcHealth = useRpcHealth()
   const [settings, setSettings] = useState<AppSettings | null>(null)
@@ -104,6 +112,10 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   const [removeSeedTarget, setRemoveSeedTarget] = useState<Group | null>(null)
   const [walletBusy, setWalletBusy] = useState(false)
   const [walletActionError, setWalletActionError] = useState('')
+  // Switch has no modal of its own, so its refusal renders above the list. Not
+  // walletActionError: that one is cleared only by the Delete / Remove-seed
+  // openers and would leak a stale modal error onto the tab.
+  const [switchError, setSwitchError] = useState('')
   // Provider mode is stored per wallet, so the toggle needs to know which one is active.
   const [activeWalletId, setActiveWalletId] = useState<string | null>(null)
 
@@ -162,9 +174,19 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
     }
   }, [reloadGlobalSettings])
 
+  // Not while our own tunnel or kill switch stops the traffic: the probes would
+  // ride the tunnel (or all fail), main refuses to select on them anyway, and the
+  // list would be graded on numbers that mean nothing once disconnected. Not on
+  // 'unknown', which is only the state before the first health push.
+  const chainUnreachable = rpcHealth.state === 'suspended' || rpcHealth.state === 'blocked'
   useEffect(() => {
-    if (tab === 'network') void loadRpcs()
-  }, [tab, loadRpcs])
+    if (tab !== 'network') return
+    if (chainUnreachable) {
+      setRpcsLoading(false)
+      return
+    }
+    void loadRpcs()
+  }, [tab, loadRpcs, chainUnreachable])
 
   // Healthy first, then fastest — the order the user would sort them in anyway.
   const sortedRpcs = useMemo(() => {
@@ -226,8 +248,13 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
   }
 
   async function handleSwitch(walletId: string) {
-    await window.api.walletSwitch(walletId)
-    onWalletSwitch()
+    setSwitchError('')
+    try {
+      await window.api.walletSwitch(walletId)
+      onWalletSwitch()
+    } catch (err) {
+      setSwitchError(displayConnectError(err instanceof Error ? err.message : 'Failed to switch wallet'))
+    }
   }
 
   // Only ever a non-active wallet. Whether its seed survives depends on the
@@ -537,7 +564,9 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
             {!isActive && w.unlockable && (
               <button
                 onClick={() => handleSwitch(w.id)}
-                className="btn btn-primary text-xs px-3 py-1"
+                disabled={connected}
+                title={connected ? 'Disconnect first to switch wallets' : undefined}
+                className="btn btn-primary text-xs px-3 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Switch
               </button>
@@ -550,11 +579,13 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                 question belongs. */}
             <button
               onClick={() => { setWalletActionError(''); setDeleteTarget(w) }}
-              disabled={isActive}
+              disabled={isActive || connected}
               title={
-                isActive
-                  ? 'Switch to another wallet before deleting this one, or use Remove seed on its group'
-                  : undefined
+                connected
+                  ? 'Disconnect first to delete a wallet'
+                  : isActive
+                    ? 'Switch to another wallet before deleting this one, or use Remove seed on its group'
+                    : undefined
               }
               className="btn btn-danger text-xs px-3 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -871,17 +902,22 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
 
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  {/* While the tunnel is up these probes travel through it, so
-                      they say nothing about the latency you would get once
-                      disconnected — which is the only time the app uses them.
-                      Behind an armed kill switch they all fail, which would read
-                      as every endpoint being down rather than as our own firewall. */}
+                  {/* While the tunnel is up these probes would travel through it, so
+                      they would say nothing about the latency you get once
+                      disconnected, which is the only time the app uses them; behind
+                      an armed kill switch they all fail, which would read as every
+                      endpoint being down. So they are paused instead (chainUnreachable)
+                      and the note says which of the two it is. */}
                   <span className="text-text-secondary text-xs">
-                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>, fastest first
-                    {rpcHealth.state === 'suspended' ? ' (timed through the VPN tunnel)' : ''}
-                    {rpcHealth.state === 'blocked' ? ' (all unreachable while the kill switch is on)' : ''}:
+                    Public endpoints from <a href="https://sentnodes.com/public-rpc" target="_blank" rel="noreferrer" className="hover:text-accent transition-colors">sentnodes.com</a>, fastest first:
                   </span>
-                  {rpcsLoading ? (
+                  {chainUnreachable ? (
+                    <span className="text-text-tertiary text-xs">
+                      {rpcHealth.state === 'blocked'
+                        ? 'Endpoint testing is paused while the kill switch is blocking traffic'
+                        : 'Endpoint testing is paused while the VPN is connected'}
+                    </span>
+                  ) : rpcsLoading ? (
                     <span className="text-text-tertiary text-xs flex items-center gap-1">
                       <Spinner /> Testing
                     </span>
@@ -956,18 +992,30 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
 
           {tab === 'wallets' && (
             <div className="space-y-4">
+              {/* Same banner shape as the connect modals. Main refuses every change
+                  to the active wallet while a session is live (assertNotConnected);
+                  this is the half that explains instead of erroring. Rename, Derive
+                  Subaccount and Recovery Phrase never change the active wallet, so
+                  they stay usable. */}
+              {connected && (
+                <div className="bg-warning-subtle border border-warning p-3 rounded-md text-sm text-warning">
+                  You are connected. Disconnect first to switch, add or remove wallets.
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <label className="text-text-secondary text-xs font-medium uppercase tracking-wide">
                   Stored Wallets ({wallets.length})
                 </label>
                 <button
                   onClick={onAddWallet}
-                  className="text-accent text-xs hover:underline transition-colors"
-                  title="Import or create another seed phrase"
+                  disabled={connected}
+                  className="text-accent text-xs hover:underline transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
+                  title={connected ? 'Disconnect first to add a wallet' : 'Import or create another seed phrase'}
                 >
                   Add Wallet
                 </button>
               </div>
+              {switchError && <p className="text-danger text-xs">{switchError}</p>}
 
               {/* One box per seed. The seed-level actions live on its header,
                   so each seed's phrase, subaccounts and removal are reachable
@@ -995,8 +1043,9 @@ export default function Settings({ initialTab, onClose, onWalletSwitch, onWallet
                       </button>
                       <button
                         onClick={() => { setWalletActionError(''); setRemoveSeedTarget(group) }}
-                        className="text-danger text-xs hover:underline transition-colors"
-                        title="Delete this seed and every wallet derived from it"
+                        disabled={connected}
+                        className="text-danger text-xs hover:underline transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
+                        title={connected ? 'Disconnect first to remove a seed' : 'Delete this seed and every wallet derived from it'}
                       >
                         Remove seed
                       </button>

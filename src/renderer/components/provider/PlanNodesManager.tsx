@@ -214,6 +214,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
           planId={plan.id}
           price={price}
           economics={economics}
+          readOnly={readOnly}
           onClose={() => setLeasingNode(null)}
           onDone={() => {
             setLeasingNode(null)
@@ -227,6 +228,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
         <LeaseManageModal
           lease={managingLease}
           node={nodeIndex.get(managingLease.nodeAddress)}
+          readOnly={readOnly}
           onClose={() => setManagingLease(null)}
           onDone={() => {
             setManagingLease(null)
@@ -409,11 +411,13 @@ function NodePicker({ nodes, nodesLoading, nodesError, excluded, price, disabled
  * is the only step that moves funds — `leaseQuote` computes the total in the main
  * process from the node's own on-chain hourly price, never from anything typed here.
  */
-function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
+function LeaseModal({ node, planId, price, economics, readOnly, onClose, onDone }: {
   node: SentNode
   planId: string
   price: TokenPrice | null
   economics: ProviderEconomics | null
+  /** The console went read-only (tunnel up, or the chain read failed) after this modal opened. */
+  readOnly: boolean
   onClose: () => void
   onDone: () => void
 }) {
@@ -621,12 +625,13 @@ function LeaseModal({ node, planId, price, economics, onClose, onDone }: {
           <button
             type="button"
             onClick={handleConfirm}
-            disabled={busy || !quote || !withinBounds}
+            disabled={busy || !quote || !withinBounds || readOnly}
             className="btn btn-primary text-xs py-2 flex-1 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy ? '…' : quote ? `Lease for ${formatUdvpn(quote.totalUdvpn)}` : 'Pricing…'}
           </button>
         </div>
+        {readOnly && <p className="text-text-tertiary text-xs">Disconnect the VPN to lease this node.</p>}
         {confirmDialog}
       </div>
     </div>

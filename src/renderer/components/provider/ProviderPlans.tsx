@@ -189,6 +189,7 @@ export default function ProviderPlans({
           <CreatePlanForm
             price={price}
             economics={economics}
+            readOnly={readOnly}
             requestConfirm={requestConfirm}
             onCreated={() => {
               setCreating(false)
@@ -470,9 +471,11 @@ function PlanRow({
  * Create a plan. It lands INACTIVE on chain — activation is a separate tx, offered
  * on the row once it appears — so nothing here needs to track a half-created plan.
  */
-function CreatePlanForm({ price: tokenPrice, economics, requestConfirm, onCreated }: {
+function CreatePlanForm({ price: tokenPrice, economics, readOnly, requestConfirm, onCreated }: {
   price: TokenPrice | null
   economics: ProviderEconomics | null
+  /** The console went read-only (tunnel up, or the chain read failed) after this form opened. */
+  readOnly: boolean
   requestConfirm: (options: ConfirmOptions) => Promise<boolean>
   onCreated: () => void
 }) {
@@ -546,10 +549,11 @@ function CreatePlanForm({ price: tokenPrice, economics, requestConfirm, onCreate
       </p>
       {valid && breakEven && <BreakEvenHint {...breakEven} />}
       {error && <p className="text-danger text-xs">{displayConnectError(error)}</p>}
+      {readOnly && <p className="text-text-tertiary text-xs">Disconnect the VPN to create this plan.</p>}
       <button
         type="button"
         onClick={handleCreate}
-        disabled={!valid || busy}
+        disabled={!valid || busy || readOnly}
         className="btn btn-primary text-xs py-1.5 w-full disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {busy ? 'Creating…' : 'Create plan'}

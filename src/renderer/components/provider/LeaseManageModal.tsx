@@ -15,9 +15,11 @@ import Spinner from '../Spinner'
  * one fact that decides which is available, namely whether the renewal policy
  * still lets the chain renew at the node's current price.
  */
-export default function LeaseManageModal({ lease, node, onClose, onDone }: {
+export default function LeaseManageModal({ lease, node, readOnly, onClose, onDone }: {
   lease: LeaseSummary
   node: SentNode | undefined
+  /** The console went read-only (tunnel up, or the chain read failed) after this modal opened. */
+  readOnly: boolean
   onClose: () => void
   onDone: () => void
 }) {
@@ -156,7 +158,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
           <button
             type="button"
             onClick={handlePolicy}
-            disabled={anyBusy || policy === lease.renewalPricePolicy}
+            disabled={anyBusy || readOnly || policy === lease.renewalPricePolicy}
             className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {busy === 'policy' ? 'Saving…' : 'Change policy'}
@@ -178,7 +180,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
             <button
               type="button"
               onClick={handleRenew}
-              disabled={anyBusy || Boolean(refusal) || !validHours || !quote}
+              disabled={anyBusy || readOnly || Boolean(refusal) || !validHours || !quote}
               className="btn btn-primary text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed"
               title={refusal ?? undefined}
             >
@@ -195,6 +197,8 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
           </p>
         </div>
 
+        {readOnly && <p className="text-text-tertiary text-xs">Disconnect the VPN to change this lease.</p>}
+
         {(error || quoteError) && (
           <div className="bg-danger-subtle border border-danger rounded-sm px-3 py-2">
             <p className="text-danger text-xs">{displayConnectError(error ?? quoteError ?? '')}</p>
@@ -205,7 +209,7 @@ export default function LeaseManageModal({ lease, node, onClose, onDone }: {
           <button
             type="button"
             onClick={handleEnd}
-            disabled={anyBusy}
+            disabled={anyBusy || readOnly}
             className="btn btn-danger text-xs py-1.5 px-3 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {busy === 'end' && <Spinner size="sm" />}

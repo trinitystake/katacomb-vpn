@@ -1,0 +1,1 @@
+wg-quick up /tmp/cfg/sntl0.conf

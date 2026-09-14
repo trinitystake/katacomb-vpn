@@ -325,23 +325,26 @@ function ensurePolkitSetup(): void {
     ? join(__dirname, '../../resources/linux/privileged')
     : join(process.resourcesPath, 'linux/privileged')
 
-  const helperSrc = join(resourceDir, 'katacomb-vpn-helper.sh')
+  const helperSrc = join(resourceDir, 'katacomb-vpn-helper')
   const policySrc = join(resourceDir, 'com.katacomb.vpn.policy')
 
   if (!existsSync(helperSrc) || !existsSync(policySrc)) return
 
   // Check if already installed and up-to-date
   const needsInstall = !existsSync(HELPER_PATH) || !existsSync(POLICY_PATH)
+  // Byte comparison: the helper is a binary now, and a UTF-8 round-trip is lossy
+  // on one. The build is reproducible (scripts/build-daemon.sh), so an unchanged
+  // tree compares equal and this dialog does not come back on every dev launch.
   const needsUpdate = !needsInstall && (
-    readFileSync(helperSrc, 'utf-8') !== readFileSync(HELPER_PATH, 'utf-8') ||
-    readFileSync(policySrc, 'utf-8') !== readFileSync(POLICY_PATH, 'utf-8')
+    !readFileSync(helperSrc).equals(readFileSync(HELPER_PATH)) ||
+    !readFileSync(policySrc).equals(readFileSync(POLICY_PATH))
   )
 
   if (!needsInstall && !needsUpdate) return
 
   const dialogMessage = needsInstall
     ? 'Katacomb VPN needs to install a system helper so you don\'t have to enter your password every time you connect or disconnect.\n\nThis is a one-time setup that requires admin authentication.'
-    : 'The VPN helper script has been updated and needs to be reinstalled.\n\nThis requires admin authentication.'
+    : 'The VPN helper has been updated and needs to be reinstalled.\n\nThis requires admin authentication.'
 
   const result = dialog.showMessageBoxSync({
     type: 'question',
@@ -367,16 +370,21 @@ function ensurePolkitSetup(): void {
   let staging: string | null = null
   try {
     staging = mkdtempSync(join(tmpdir(), 'katacomb-helper-'))
-    const stagedHelper = join(staging, 'katacomb-vpn-helper.sh')
+    const stagedHelper = join(staging, 'katacomb-vpn-helper')
     const stagedPolicy = join(staging, 'com.katacomb.vpn.policy')
     copyFileSync(helperSrc, stagedHelper)
     copyFileSync(policySrc, stagedPolicy)
 
-    // Use execFileSync to avoid shell interpolation of paths
+    // Use execFileSync to avoid shell interpolation of paths. The helper goes
+    // in through a temp name + mv: a running daemon executes from $3, and `cp`
+    // onto a running executable fails with ETXTBSY (the deb's postinstall does
+    // the same for the same reason); mv also means a concurrent pkexec never
+    // sees a half-written exec.path.
     const script = [
-      `cp -- "$1" "$3"`,
-      `chmod 755 "$3"`,
-      `chown root:root "$3"`,
+      `cp -- "$1" "$3.new"`,
+      `chmod 755 "$3.new"`,
+      `chown root:root "$3.new"`,
+      `mv -f "$3.new" "$3"`,
       `cp -- "$2" "$4"`,
       `chmod 644 "$4"`,
       `chown root:root "$4"`,

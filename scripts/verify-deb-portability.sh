@@ -41,7 +41,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEB="$(ls -t "$REPO_ROOT"/dist/katacomb-vpn_*_amd64.deb 2>/dev/null | head -1)"
+DEB_VERSION="$([ -n "$DEB" ] && dpkg-deb -f "$DEB" Version 2>/dev/null || true)"
 APPIMAGE="$(ls -t "$REPO_ROOT"/dist/katacomb-vpn-*.AppImage 2>/dev/null | head -1)"
+HELPER_SRC="$REPO_ROOT/resources/linux/privileged/katacomb-vpn-helper"
 SYSCTL=kernel.apparmor_restrict_unprivileged_userns
 
 # Only the deb phases need the deb; the appimage phase checks its own artifact.
@@ -228,15 +230,19 @@ phase1() {
   check "[ -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]" "polkit policy installed"
   check "systemctl is-active --quiet katacomb-vpn-daemon"     "katacomb-vpn-daemon active"
   check "systemctl is-enabled --quiet katacomb-vpn-daemon"    "katacomb-vpn-daemon enabled at boot"
-  check "[ -L /opt/katacomb-vpn ]"                            "/opt/katacomb-vpn space-free symlink"
+  check "[ ! -e /opt/katacomb-vpn ]"                          "/opt/katacomb-vpn symlink absent (dropped in 1.9.0; a stale one is removed on upgrade)"
   # A deb shipping resources/linux/ with NO binaries in it passed every check
   # above (2026-09-02): electron-builder only WARNS on a missing extraResources
-  # source. Assert the layout the two resolvers (vpn-manager, daemon-core) read.
+  # source. Assert the layout the two resolvers (vpn-manager, the helper's ops) read.
   check "[ -x '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]"  "tun2socks bundled + executable"
   check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
-  check "! grep -q 'linux/v2ray' '/opt/Katacomb VPN/resources/daemon/index.js'" "daemon bundle has no stale path literal"
+  check "[ ! -e '/opt/Katacomb VPN/resources/daemon' ]"      "no Electron-run daemon bundle shipped (the helper is the daemon since 1.9.0)"
+  check "[ \"\$(/usr/local/bin/katacomb-vpn-helper --version)\" = \"$DEB_VERSION\" ]" "helper --version matches the deb ($DEB_VERSION)"
+  check "file /usr/local/bin/katacomb-vpn-helper | grep -q 'statically linked'" "helper is statically linked"
+  check "grep -q '^ExecStart=/usr/local/bin/katacomb-vpn-helper daemon$' /etc/systemd/system/katacomb-vpn-daemon.service" "unit runs the helper in daemon mode"
+  check "journalctl -u katacomb-vpn-daemon -b --no-pager 2>/dev/null | grep -q 'listening on /run/katacomb-vpn/daemon.sock (protocol v1)'" "daemon logged its listening line"
   check "getent group katacomb-vpn | grep -q '${SUDO_USER:-neo}'" \
                                                               "user ${SUDO_USER:-neo} is in group katacomb-vpn"
   info  "helper perms: $(stat -c '%a %U:%G' /usr/local/bin/katacomb-vpn-helper 2>&1)"
@@ -297,8 +303,14 @@ EOM
 phase3() {
   need_root
   head_ "Upgrade path (postrm-then-postinst ordering — both scripts changed)"
+  # RuntimeDirectoryPreserve=restart: the state files must outlive the unit restart
+  # the postinst runs on every upgrade (without it tun-down lost its pid and routes).
+  touch /run/katacomb-vpn/verify-marker
   apt install -y --reinstall "$DEB" || { echo "reinstall FAILED"; exit 1; }
   check "systemctl is-active --quiet katacomb-vpn-daemon" "daemon still active after reinstall (not orphaned)"
+  check "[ -e /run/katacomb-vpn/verify-marker ]"          "state files under /run/katacomb-vpn survive the upgrade's daemon restart"
+  rm -f /run/katacomb-vpn/verify-marker
+  check "[ \"\$(/usr/local/bin/katacomb-vpn-helper --version)\" = \"$DEB_VERSION\" ]" "helper replaced in place (ETXTBSY-safe install): --version is $DEB_VERSION"
   check "[ -f /etc/apparmor.d/katacomb-vpn ]"             "AppArmor profile re-installed, not left removed"
   check "[ -x /usr/local/bin/katacomb-vpn-helper ]"       "helper still present"
   check "[ -e /usr/bin/katacomb-vpn ]"                    "launcher still present"
@@ -384,13 +396,13 @@ EOM
   read -r _
   local mnt; mnt="$(appimage_mount)"
   if [ -n "$mnt" ]; then
-    check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper.sh' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
+    check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
   else
     info "AppImage not running — FUSE read check skipped"
   fi
   check "[ -x /usr/local/bin/katacomb-vpn-helper ]"                                                          "helper installed by the AppImage's Install click"
   check "[ \"\$(stat -c '%a %U:%G' /usr/local/bin/katacomb-vpn-helper)\" = '755 root:root' ]"                  "helper is 755 root:root"
-  check "cmp -s '$REPO_ROOT/resources/linux/privileged/katacomb-vpn-helper.sh' /usr/local/bin/katacomb-vpn-helper" "helper byte-identical to resources/linux/privileged/"
+  check "cmp -s '$HELPER_SRC' /usr/local/bin/katacomb-vpn-helper"                                             "helper byte-identical to resources/linux/privileged/"
   check "cmp -s '$REPO_ROOT/resources/linux/privileged/com.katacomb.vpn.policy' /usr/share/polkit-1/actions/com.katacomb.vpn.policy" "policy byte-identical to resources/linux/privileged/"
   check "! ls -d /tmp/katacomb-helper-* >/dev/null 2>&1"                                                      "mkdtemp staging dir cleaned up"
   # Self-revert so the deb phases start from the clean slate they assert.
@@ -437,12 +449,16 @@ fullcycle() {
   check "[ -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]" "polkit policy installed"
   check "systemctl is-active --quiet katacomb-vpn-daemon"           "daemon active"
   check "systemctl is-enabled --quiet katacomb-vpn-daemon"          "daemon enabled at boot"
-  check "[ -L /opt/katacomb-vpn ]"                                  "/opt symlink created"
+  check "[ ! -e /opt/katacomb-vpn ]"                                "/opt/katacomb-vpn symlink absent (dropped in 1.9.0)"
   check "[ -x '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]"  "tun2socks bundled + executable"
   check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
-  check "! grep -q 'linux/v2ray' '/opt/Katacomb VPN/resources/daemon/index.js'" "daemon bundle has no stale path literal"
+  check "[ ! -e '/opt/Katacomb VPN/resources/daemon' ]"            "no Electron-run daemon bundle shipped"
+  check "[ \"\$(/usr/local/bin/katacomb-vpn-helper --version)\" = \"$DEB_VERSION\" ]" "helper --version matches the deb ($DEB_VERSION)"
+  check "file /usr/local/bin/katacomb-vpn-helper | grep -q 'statically linked'" "helper is statically linked"
+  check "grep -q '^ExecStart=/usr/local/bin/katacomb-vpn-helper daemon$' /etc/systemd/system/katacomb-vpn-daemon.service" "unit runs the helper in daemon mode"
+  check "journalctl -u katacomb-vpn-daemon -b --no-pager 2>/dev/null | grep -q 'listening on /run/katacomb-vpn/daemon.sock (protocol v1)'" "daemon logged its listening line"
   check "getent group katacomb-vpn | grep -q '$GUI_USER'"           "$GUI_USER added to katacomb-vpn group"
   check "dpkg-deb -I '$DEB' | grep -q 'License: GPL-3.0-or-later'"  "deb declares a real License"
 
@@ -475,8 +491,12 @@ fullcycle() {
   check "[ -f /etc/apparmor.d/katacomb-vpn ]" "profile restored"
 
   head_ "4. Upgrade path (reinstall over itself)"
+  touch /run/katacomb-vpn/verify-marker
   if apt-get install -y --reinstall "$DEB" >"$log/reinstall.log" 2>&1; then ok "reinstall succeeds"; else no "reinstall FAILED"; tail -20 "$log/reinstall.log"; fi
   check "systemctl is-active --quiet katacomb-vpn-daemon" "daemon still active (not orphaned)"
+  check "[ -e /run/katacomb-vpn/verify-marker ]"          "state files under /run/katacomb-vpn survive the upgrade's daemon restart"
+  rm -f /run/katacomb-vpn/verify-marker
+  check "[ \"\$(/usr/local/bin/katacomb-vpn-helper --version)\" = \"$DEB_VERSION\" ]" "helper replaced in place (ETXTBSY-safe install)"
   check "[ -f /etc/apparmor.d/katacomb-vpn ]"             "profile re-installed, not left removed"
   check "[ -x /usr/local/bin/katacomb-vpn-helper ]"       "helper still present"
 
@@ -535,13 +555,13 @@ fullcycle() {
   # in CLAUDE.md "Packaging" before touching ensurePolkitSetup.
   local mnt; mnt="$(appimage_mount)"
   if [ -n "$mnt" ]; then
-    check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper.sh' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
+    check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
   else
     no "AppImage mount not found under /tmp while the app was running"
   fi
   check "[ -x /usr/local/bin/katacomb-vpn-helper ]"                                                          "helper installed by the AppImage"
   check "[ \"\$(stat -c '%a %U:%G' /usr/local/bin/katacomb-vpn-helper)\" = '755 root:root' ]"                  "helper is 755 root:root"
-  check "cmp -s '$REPO_ROOT/resources/linux/privileged/katacomb-vpn-helper.sh' /usr/local/bin/katacomb-vpn-helper" "helper byte-identical to resources/linux/privileged/"
+  check "cmp -s '$HELPER_SRC' /usr/local/bin/katacomb-vpn-helper"                                             "helper byte-identical to resources/linux/privileged/"
   check "[ -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]"                                         "polkit policy installed by the AppImage"
   check "[ \"\$(stat -c '%a %U:%G' /usr/share/polkit-1/actions/com.katacomb.vpn.policy)\" = '644 root:root' ]" "policy is 644 root:root"
   check "cmp -s '$REPO_ROOT/resources/linux/privileged/com.katacomb.vpn.policy' /usr/share/polkit-1/actions/com.katacomb.vpn.policy" "policy byte-identical to resources/linux/privileged/"

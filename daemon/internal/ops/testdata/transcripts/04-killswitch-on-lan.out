@@ -1,0 +1,4 @@
+argv: killswitch-on sntl0 203.0.113.7 lan-sharing
+exit: 0
+stdout: 
+stderr: 

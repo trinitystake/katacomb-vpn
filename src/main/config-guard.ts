@@ -190,8 +190,8 @@ const MAX_BYPASS_ROUTES = 64
 /**
  * Trailing sentinel appended to the helper's `killswitch-on` argv to request the
  * local-network ACCEPT rules. A sentinel rather than a fourth positional arg
- * because the DNS arg before it is optional. **The bash helper hardcodes this
- * same literal** (LAN_SHARING_ARG) — change both together.
+ * because the DNS arg before it is optional. **The Go helper hardcodes this
+ * same literal** (daemon/internal/guard LanSharingArg) — change both together.
  */
 export const LAN_SHARING_ARG = 'lan-sharing'
 
@@ -560,9 +560,10 @@ const OVPN_REQUIRED = ['client', 'dev', 'proto', 'remote']
 /**
  * Throw if an OpenVPN config string contains any directive outside the allow-list,
  * an allow-listed directive with a malformed value, an unknown inline block, a
- * repeated directive, or a missing essential. Mirrored in bash by
- * validate_openvpn_config in the polkit helper (last line of defense if the
- * daemon is bypassed or the helper is invoked directly).
+ * repeated directive, or a missing essential. Mirrored on the root side by
+ * daemon/internal/guard (AssertOpenVpnConfig), the last line of defense when
+ * the helper is driven by something other than this app; the shared corpus
+ * under daemon/internal/guard/testdata/ pins both to the same accept/reject set.
  */
 export function assertSafeOpenVpnConfig(config: string): void {
   let openBlock: string | null = null

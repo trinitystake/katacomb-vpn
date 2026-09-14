@@ -1,0 +1,4 @@
+argv: dns-set 9.9.9.9
+exit: 0
+stdout: 
+stderr: 

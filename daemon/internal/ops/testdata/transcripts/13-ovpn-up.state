@@ -1,0 +1,11 @@
+/run/katacomb-vpn/ mode=700
+/var/lib/katacomb-vpn/ mode=700
+/run/katacomb-vpn/openvpn.log mode=600
+  TCP/UDP: Preserving recently used remote address: [AF_INET]203.0.113.10:1194
+  TUN/TAP device sntl-ovpn opened
+  Initialization Sequence Completed
+/run/katacomb-vpn/openvpn.pid mode=644
+  4242
+/etc/resolv.conf mode=644
+  nameserver 10.0.0.53
+  search example.test

@@ -1,12 +1,13 @@
-// Shared contract between the user-space app (daemon-client.ts) and the root
-// daemon (daemon.ts). Pure constants/types — no Node or Electron imports — so
-// it bundles into both the daemon (plain Node) and the main process.
+// Contract between the user-space app (daemon-client.ts) and the root daemon,
+// which is the Go helper in `daemon` mode (daemon/internal/protocol mirrors these
+// shapes byte for byte). Pure constants/types — no Node or Electron imports.
 
 export const DAEMON_DIR = '/run/katacomb-vpn'
 export const DAEMON_SOCKET_PATH = `${DAEMON_DIR}/daemon.sock`
 
-// Bump only on a breaking protocol change. The app checks this on first connect
-// so an old daemon (still running after an upgrade) is detected.
+// Bump only on a breaking protocol change. Nothing calls protocol_version today:
+// an old daemon left running after an upgrade is detected by its `unknown op`
+// reply to a newer op (vpn-manager matches that string), not by this number.
 export const DAEMON_PROTOCOL_VERSION = 1
 
 export type DaemonOp =

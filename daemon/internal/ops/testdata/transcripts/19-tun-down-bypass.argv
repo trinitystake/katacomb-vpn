@@ -1,0 +1,6 @@
+ip route del 0.0.0.0/1 dev sntl-tun
+ip route del 128.0.0.0/1 dev sntl-tun
+ip link delete sntl-tun
+ip route del 203.0.113.7/32
+ip route del 10.0.0.0/8
+ip route del 192.168.0.0/16

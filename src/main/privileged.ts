@@ -1,11 +1,15 @@
 // Single entry point for every privileged VPN operation. Routes to the root
 // daemon over the Unix socket when it's installed (deb → no password), and falls
-// back to the per-op `pkexec` helper otherwise (AppImage / `npm run dev`).
+// back to the per-op `pkexec` helper otherwise (AppImage / `npm run dev`). Both
+// are the SAME static Go binary (daemon/): `katacomb-vpn-helper daemon` behind
+// the socket, `katacomb-vpn-helper <verb> …` under pkexec.
 //
 // Callers keep using the helper's verb+args vocabulary (e.g. `['up', file]`);
 // this module maps those to the daemon's JSON ops. For `up` we read the (app's
 // own, 0600) config file and send its CONTENT — the daemon writes its own
-// root-owned copy, so no user-controlled path ever reaches root.
+// root-owned copy, so no user-controlled path ever reaches root. The one-shot
+// takes the path instead, opens it O_NOFOLLOW, checks it is a regular file owned
+// by the invoking user, and reads it once before validating.
 
 import { execFile } from 'child_process'
 import { existsSync, readFileSync } from 'fs'

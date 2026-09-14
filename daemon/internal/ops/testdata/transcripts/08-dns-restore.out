@@ -1,0 +1,4 @@
+argv: dns-restore
+exit: 0
+stdout: 
+stderr: 

@@ -11,7 +11,9 @@ npm run preview      # Preview production build
 npm run dist         # Build + package for Linux (AppImage + deb)
 npm run dist:deb     # Build + package deb only
 npm run dist:appimage # Build + package AppImage only
-npm test             # Run unit tests (Node's built-in TS test runner, zero deps)
+npm test             # Node unit tests (built-in TS test runner, zero deps) + `go test ./...` in daemon/
+npm run test:daemon  # The Go tests alone
+npm run build:daemon # Build the privileged helper (daemon/ → resources/linux/privileged/katacomb-vpn-helper)
 npm run typecheck    # tsc --noEmit on both projects (must pass clean)
 ```
 
@@ -20,7 +22,10 @@ no extra dependency — Node 22+ strips TS types and runs the tests directly). C
 the pure security/IO helpers (`config-guard.ts`, `fs-utils.ts`). Test files are
 excluded from the build tsconfigs and import the module-under-test with a `.ts`
 extension (required by the native runner). No linter is configured; `tsc` is
-`strict` with `noUnusedLocals`/`noUnusedParameters` on.
+`strict` with `noUnusedLocals`/`noUnusedParameters` on. The privileged helper is a
+Go module in `daemon/` (toolchain pinned by `daemon/go.mod`; `scripts/build-daemon.sh`
+refuses any other version and `go vet`s before it builds); `npm run dev`, `build` and
+`dist` all build it, and `npm test` runs its tests after the node suite.
 
 ## Architecture
 
@@ -102,36 +107,103 @@ Strict Electron security isolation with three process boundaries:
 
 ### Privilege Escalation
 
-VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses a polkit helper.
-`resources/linux/` is laid out by role: `bin/` (vendored binaries beside their licence
-texts), `privileged/` (what postinstall copies onto the system), `packaging/` (the deb
-maintainer scripts, deliberately NOT shipped inside the package):
-- `resources/linux/privileged/katacomb-vpn-helper.sh` — installed to `/usr/local/bin/katacomb-vpn-helper`
-- `resources/linux/privileged/com.katacomb.vpn.policy` — polkit policy for cached auth
-- `resources/linux/privileged/katacomb-vpn-daemon.service` — systemd unit for the root daemon
-- `resources/linux/packaging/postinstall.sh` — deb postinstall that deploys the helper + policy
-- Helper commands: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface>`, `tun-down`, `killswitch-on <iface> <host> [dns]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
+VPN operations require root. Instead of raw `pkexec wg-quick`, the app uses ONE
+privileged program, **`katacomb-vpn-helper`**: a static Go binary built from `daemon/`
+by `scripts/build-daemon.sh` into `resources/linux/privileged/` (gitignored; built on
+every `npm run build`/`dist`/`dev`). `resources/linux/` is laid out by role: `bin/`
+(vendored binaries beside their licence texts), `privileged/` (what postinstall copies
+onto the system), `packaging/` (the deb maintainer scripts, deliberately NOT shipped
+inside the package):
+- `resources/linux/privileged/katacomb-vpn-helper` — installed to `/usr/local/bin/katacomb-vpn-helper`
+- `resources/linux/privileged/com.katacomb.vpn.policy` — polkit policy for cached auth (pins that path)
+- `resources/linux/privileged/katacomb-vpn-daemon.service` — systemd unit, `ExecStart=/usr/local/bin/katacomb-vpn-helper daemon`
+- `resources/linux/packaging/postinstall.sh` — deb postinstall that deploys the helper + policy + unit
+- One binary, three entry modes: `katacomb-vpn-helper daemon` (systemd; serves protocol
+  v1 on the socket), `katacomb-vpn-helper <verb> <args…>` (the pkexec one-shot, the argv
+  contract below), `katacomb-vpn-helper --version`. An unknown verb prints the usage
+  line and exits 1.
+- Helper verbs: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface> [bypass]`, `tun-down`, `killswitch-on <iface> <host> [dns] [lan-sharing]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard/AmneziaWG interface: `sntl0`. tun2socks: `sntl-tun`. OpenVPN: `sntl-ovpn`.
 
 ### Privileged daemon (deb) vs. pkexec fallback (AppImage/dev)
 
-The `.deb` installs a **persistent root daemon** (systemd `katacomb-vpn-daemon`,
-run via `ELECTRON_RUN_AS_NODE` on the bundled Electron) so connect/disconnect
-**never prompt for a password**. The GUI (as the user) sends JSON ops over a Unix
-socket at `/run/katacomb-vpn/daemon.sock`, owned `root:katacomb-vpn` **mode 0660**
-— members of the group the postinst creates, not every local user
-(`secureSocketPermissions`; the 0666 world-accessible fallback is dev-only, for when
-the group doesn't exist). Group membership only applies to **new login sessions**, so
-a fresh `.deb` install needs one log-out/log-in before the password-free path works —
-until then the GUI can't open the socket and silently falls back to `pkexec`. The
-AppImage and `npm run dev` have no daemon, so they fall back to the per-op `pkexec`
-helper (one cached prompt).
+The `.deb` installs a **persistent root daemon** (systemd `katacomb-vpn-daemon`, which
+is `katacomb-vpn-helper daemon`) so connect/disconnect **never prompt for a password**.
+The GUI (as the user) sends JSON ops over a Unix socket at
+`/run/katacomb-vpn/daemon.sock`, owned `root:katacomb-vpn` **mode 0660** — members of
+the group the postinst creates, not every local user (the 0666 world-accessible
+fallback is dev-only, for when `getent group katacomb-vpn` finds nothing). Group
+membership only applies to **new login sessions**, so a fresh `.deb` install needs one
+log-out/log-in before the password-free path works — until then the GUI can't open the
+socket and silently falls back to `pkexec`. The AppImage and `npm run dev` have no
+daemon, so they fall back to the per-op `pkexec` one-shot (one cached prompt);
+`npm run dev` builds the helper (`predev`) and the existing "VPN Helper Setup" dialog
+installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemon`.
 
-- `daemon-core.ts`: socket server + op dispatch — **all validation lives here**,
-  since the socket is unauthenticated it's the trust boundary. `daemon.ts`: the
-  `ELECTRON_RUN_AS_NODE` entry, bundled standalone by `scripts/build-daemon.mjs`
-  (esbuild) → `out/daemon/index.js`, shipped **outside the asar** to
-  `resources/daemon/index.js`. The daemon must NOT import `electron`.
+- **`daemon/` is the whole root side**: one Go module, no dependencies.
+  `internal/ops` implements the twelve verbs natively and is **THE trust boundary** —
+  both doors (the unauthenticated socket, the polkit-authenticated argv) end in the same
+  `ops` call and every argument is validated there again, whatever the client checked.
+  `internal/guard` is the root-side port of `config-guard.ts`'s allow-lists; the two are
+  pinned to the same accept/reject sets by ONE fixture corpus
+  (`daemon/internal/guard/testdata/corpus/`, read by `guard_test.go` and by
+  `src/main/config-guard-corpus.test.ts`) — change a rule on one side and the other
+  side's test goes red. `internal/protocol` + `internal/server` are daemon mode
+  (newline-delimited JSON, 256 KiB cap, one mutex for state-changing ops with `status`
+  exempt, 60 s per op); `internal/oneshot` is the argv contract. `daemon-protocol.ts`
+  and `daemon-client.ts` are unchanged: the JSON shapes, op names and every `fail()`
+  string are byte-compatible, and `unknown op: <op>` is what `vpn-manager` matches to
+  detect a stale daemon after an upgrade (nothing calls `protocol_version`).
+- **The exact command lines are pinned by golden transcripts**
+  (`daemon/internal/ops/testdata/transcripts/`), captured from the ORIGINAL bash helper
+  by `scripts/capture-helper-transcripts.sh` in a `debian:bookworm` container with every
+  tool shimmed, and replayed by `transcript_test.go` against a recording Env that answers
+  the queries the same way. Kill-switch rule order, tun2socks routes, openvpn's argv
+  after `--config`, `cleanup_wg_rules`' scoping, every state file's bytes: a diff there
+  is a bug or one of the deviations below. Regenerate only by hand, like the wire corpus
+  `node-handshake.test.ts` keeps; the script reads the bash helper back from git history.
+- **Deliberate deviations from the bash helper**, each small and each tested: daemon
+  mode refuses euid ≠ 0; the socket is bound under `umask 077`; `null` / non-object /
+  non-numeric-id requests get `{"id":0,"ok":false,"error":"invalid request"}` instead of
+  killing the daemon (any group member could bounce it with `null\n`); the pid-less
+  `tun-down` fallback is a `/proc` scan that signals only a process whose argv carries
+  `tun://sntl-tun` as a WHOLE entry AND whose executable hashes to the tun2socks pin
+  (never `pkill -f`); **one validation layer for both modes** — the DNS allow-list and
+  the SHA pins apply to the pkexec one-shot too, so an admin-authenticated user cannot
+  make root run an arbitrary binary or point every lookup at their resolver;
+  **one-shot configs are read ONCE**, via `O_NOFOLLOW` + `fstat` (regular file, owned by
+  `PKEXEC_UID` when set, ≤ 256 KiB), and the tool is handed the root-owned
+  `/run/katacomb-vpn/{sntl0,openvpn}.conf` copy, never the caller's path (the bash
+  helper validated the caller's path and let wg-quick re-open it — a TOCTOU, and with a
+  validator that echoed the line, a symlink to `/etc/shadow` was a root file-read
+  oracle); **guard errors carry a line number and a reason word, never content**;
+  children get a FIXED `PATH=/usr/sbin:/usr/bin:/sbin:/bin` (the verified bindir first
+  for `awg-up`); every state-changing verb takes `flock(/run/katacomb-vpn/.lock)` in
+  BOTH modes (the daemon's mutex cannot see postrm's one-shot teardown or a pkexec
+  fallback racing it); a timeout SIGTERMs the child and detached children are reaped by
+  a goroutine; `status` and the link polls read `/sys/class/net/<iface>` instead of
+  exec'ing `ip link show`. `down` still tears down EVERY wireguard-type link and
+  `bypassRoutes` are still silently filtered and uncapped: ported as-is, flagged.
+- **The unit keeps `/run/katacomb-vpn` across restarts** (`RuntimeDirectoryPreserve=restart`).
+  postinstall runs `systemctl restart` on every upgrade, and without it every upgrade
+  wiped `tun.state`/`openvpn.pid`, so the next `tun-down` found no pid and no remote
+  host and left the `/32` and bypass routes behind. `KillMode` is untouched: an upgrade
+  while connected still SIGTERMs the daemon's detached children (tun2socks,
+  `openvpn --daemon`, `amneziawg-go`), so only kernel WireGuard survives one —
+  pre-existing, and a separate decision.
+- **Install the helper through a temp name + `mv -f`** (postinstall and
+  `ensurePolkitSetup`'s pkexec script): the daemon now runs FROM
+  `/usr/local/bin/katacomb-vpn-helper`, and `cp` onto a running executable fails with
+  `ETXTBSY`, which would abort every upgrade's postinst and leave the old daemon running.
+  `ensurePolkitSetup` compares bundled and installed helper with `Buffer.equals` (it is a
+  binary), which only stays quiet across dev rebuilds because `build-daemon.sh` builds
+  reproducibly (`-trimpath -buildid=`, no VCS stamp): building the same tree twice gives
+  the same bytes.
+- **`scripts/build-daemon.sh` fails loudly**: it asserts `go version` equals go.mod's
+  `toolchain`, runs `go vet` + `go mod verify`, and asserts the output is statically
+  linked (`CGO_ENABLED=0`) — because electron-builder only WARNS on a missing
+  extraResources source, and a silently absent helper would ship as a deb whose unit
+  points at nothing. CI sets Go up from `daemon/go.mod` and runs it before `npm test`.
 - `daemon-client.ts` (`isDaemonAvailable`/`daemonRequest`) + `privileged.ts`
   (`runPrivileged` routes to the daemon if its socket exists, else `pkexec`).
   The privileged call tree (`vpn-manager`, `kill-switch`, `ipc-handlers`) is
@@ -142,12 +214,14 @@ helper (one cached prompt).
   ticks over a bare `sleep 2`). Live symptom, 2026-08-16: Disconnect froze the
   entire app, then reported the kill switch could not be turned off, leaving no
   internet and no way to retry. Never make a privileged call synchronous.
-- Packaging: `postinstall.sh` installs+enables the unit and a space-free
-  `/opt/katacomb-vpn` → `/opt/Katacomb VPN` symlink (the unit ExecStart uses it
-  + the `katacomb-vpn` binary name). `postrm.sh` tears down any tunnel then
-  removes everything. **If you change the package `name`, fix the unit ExecStart
-  binary.** Verify packaging by building + extracting the deb (`dpkg-deb -x`),
-  not just by reading config.
+- Packaging: `postinstall.sh` installs the helper, policy and unit, then enables and
+  restarts the unit. The `/opt/katacomb-vpn` symlink only ever gave the old Electron-run
+  daemon a space-free `ExecStart`; it is gone since 1.9.0, the postinst removes a stale
+  one on upgrade, and `postrm.sh` keeps its `rm -f` one more release. `postrm.sh` tears
+  down any tunnel through the helper's one-shot verbs, then removes everything. Verify
+  packaging by building + extracting the deb (`dpkg-deb -x`), not just by reading
+  config, and with `scripts/verify-deb-containers.sh` (the five supported images:
+  install, `ldd`, launch, `--version`, static, the daemon over its socket, the usage line).
 
 ### Node-trust invariant (critical — do not regress)
 
@@ -552,7 +626,7 @@ The connect path spends real on-chain funds, so these are enforced and must hold
 - **The tunnel never outlives the app, and NOTHING outside the app will end it.** A crash
   leaves everything running by construction: WG/AWG/OpenVPN interfaces are kernel-resident
   and root-created, tun2socks is spawned detached by the helper, and the daemon has no
-  notion of whether a GUI is alive (`daemon-core`'s socket close carries no meaning, since
+  notion of whether a GUI is alive (the daemon's socket close carries no meaning, since
   `daemon-client` opens one connection per request by design, and the unit has no
   `ExecStop`). Teardown is therefore the app's job on both exit paths:
   - **Quit** runs `cleanupOnQuit` → `performDisconnect()`, NOT a lighter copy of it. The
@@ -922,10 +996,10 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   inside `debian:bullseye` (glibc 2.31), then asserts the resulting floor so a
   toolchain bump can't regress it silently.
 - Helper verbs `awg-up <config> <bindir>` / `awg-down`; daemon ops `amneziawg_up` /
-  `amneziawg_down` (additive — no protocol-version bump); `validate_awg_config` is
-  the bash mirror of `assertSafeAmneziaWgConfig` (allow-list = WG keys + jc/jmin/
-  jmax/s1-s4/h1-h4/i1-i5; PostUp/PreUp still rejected — awg-quick executes them as
-  root identically).
+  `amneziawg_down` (additive — no protocol-version bump); `guard.AssertAmneziaWgConfig`
+  in `daemon/` is the root-side mirror of `assertSafeAmneziaWgConfig` (allow-list = WG
+  keys + jc/jmin/jmax/s1-s4/h1-h4/i1-i5; PostUp/PreUp still rejected — awg-quick
+  executes them as root identically), pinned to it by the shared corpus.
 - **The tunnel reuses iface `sntl0`** (awg-quick derives it from the config
   filename) so kill switch, `/proc/net/dev` traffic stats, the WG liveness monitor
   and daemon status work unchanged — BUT a userspace AWG `sntl0` is `type tun`, not
@@ -955,8 +1029,8 @@ pins, so one implementation covers the whole network:
 - **The security boundary is the directive allow-list**, not a blocklist:
   `up`/`down`/`route-up`/`ipchange`/`client-connect`/`tls-verify`/
   `auth-user-pass-verify`/`learn-address`/`plugin`/`script-security` all run code as
-  root and are rejected by omission (`assertSafeOpenVpnConfig`, mirrored in bash by
-  `validate_openvpn_config`). It also **requires** `client` + all four PKI blocks and
+  root and are rejected by omission (`assertSafeOpenVpnConfig`, mirrored on the root
+  side by `guard.AssertOpenVpnConfig`). It also **requires** `client` + all four PKI blocks and
   rejects a repeated `remote` (the kill switch only whitelists the first).
   Operational flags are deliberately NOT allowed in the file — the helper passes
   `--script-security 0 --dev sntl-ovpn --daemon --writepid --log --connect-*` on the
@@ -969,7 +1043,7 @@ pins, so one implementation covers the whole network:
 - **Own interface `sntl-ovpn`** (not sntl0): a userspace AWG sntl0 is already
   `type tun`, so a third tun there would make adoption/teardown ambiguous
   (`awg-down` ≠ `ovpn-down`). Costs only `traffic-stats`' third fallback,
-  `daemon-core.checkStatus`'s `ovpnUp`, the `detectOtherVpn` exclusion and the
+  `ops.Status`'s `ovpnUp` (daemon/), the `detectOtherVpn` exclusion and the
   `vpnIface` ternary — all two-way, no new discriminator.
 - **openvpn stays resident** (wg-quick/awg-quick exit), so `ovpn-up` daemonizes it and
   then **waits for proof**: `sntl-ovpn` present AND "Initialization Sequence Completed"
@@ -1442,8 +1516,8 @@ ONE `extraResources` entry for `resources/linux/` (copyDir preserves the `bin/` 
 `privileged/` subfolders). That entry excludes `packaging/` on purpose: fpm embeds a
 macro-EXPANDED copy of postinstall/postrm in the control archive, and the copy the glob
 used to leave at `/opt/.../resources/linux/` was root-owned, +x and macro-UNexpanded, so
-running it by hand would set `APP_DIR` to `/opt/` and repoint the `/opt/katacomb-vpn`
-symlink the systemd unit depends on. Nothing reads it.
+running it by hand would set `APP_DIR` to `/opt/` and install the helper and unit from
+the wrong place. Nothing reads it.
 
 **Every custom key in `electron-builder.yml` REPLACES its default, never merges.**
 This cost three of the four defects in the portability audit: `deb.depends` dropped

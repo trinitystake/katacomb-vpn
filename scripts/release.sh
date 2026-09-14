@@ -528,7 +528,8 @@ ok "signing key $SIGNING_KEY present"
 
 # Does this release need the packaging verification? The rule (CLAUDE.md) is
 # "after touching electron-builder.yml, either maintainer script, or the systemd
-# unit", and resources/linux/ holds the latter three. Decided here rather than
+# unit", and resources/linux/ holds the latter three; daemon/ is the privileged
+# helper itself, which the deb installs and the unit runs. Decided here rather than
 # left to memory, because the cost of forgetting is the whole reason that script
 # exists: the AppArmor defect shipped while the config read perfectly, and only
 # installing and launching the package could have caught it. Informational, not a
@@ -538,10 +539,10 @@ PACKAGING_CHANGED=0
 if [ -z "$PREV_TAG" ]; then
   PACKAGING_CHANGED=1
   info "no previous release tag, so treat all packaging as changed"
-elif [ -n "$(git diff --name-only "$PREV_TAG"..HEAD -- electron-builder.yml resources/linux/)" ]; then
+elif [ -n "$(git diff --name-only "$PREV_TAG"..HEAD -- electron-builder.yml resources/linux/ daemon/ scripts/build-daemon.sh)" ]; then
   PACKAGING_CHANGED=1
   info "packaging changed since $PREV_TAG, verify-deb-portability.sh is REQUIRED:"
-  git diff --stat "$PREV_TAG"..HEAD -- electron-builder.yml resources/linux/ \
+  git diff --stat "$PREV_TAG"..HEAD -- electron-builder.yml resources/linux/ daemon/ scripts/build-daemon.sh \
     | sed 's/^/          /'
 else
   ok "packaging unchanged since $PREV_TAG, verify-deb-portability.sh can be skipped"

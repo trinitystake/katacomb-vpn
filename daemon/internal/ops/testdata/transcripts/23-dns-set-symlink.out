@@ -1,0 +1,4 @@
+argv: dns-set 8.8.8.8
+exit: 0
+stdout: 
+stderr: 

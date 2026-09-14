@@ -279,7 +279,7 @@ fi
 PACKAGING_CHANGED=0
 if [ -z "$PREV_TAG" ]; then
   PACKAGING_CHANGED=1
-elif [ -n "$(git diff --name-only "$PREV_TAG".."$RANGE_END" -- electron-builder.yml resources/linux/ 2>/dev/null)" ]; then
+elif [ -n "$(git diff --name-only "$PREV_TAG".."$RANGE_END" -- electron-builder.yml resources/linux/ daemon/ scripts/build-daemon.sh 2>/dev/null)" ]; then
   PACKAGING_CHANGED=1
 fi
 if [ "$PACKAGING_CHANGED" = 0 ]; then

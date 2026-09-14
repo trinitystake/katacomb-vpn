@@ -246,8 +246,10 @@ root, and a single `PostUp = …` line in a WireGuard config is a root shell. So
   first: **allow-lists**, not blocklists. Anything not explicitly permitted is rejected,
   including every OpenVPN directive that can run a script (`up`, `down`, `route-up`,
   `plugin`, `tls-verify`, …).
-- The privileged helper re-validates in bash, independently, because its socket is the
-  real trust boundary.
+- The privileged helper re-validates on the root side, independently, because its
+  socket is the real trust boundary: [daemon/internal/guard](daemon/internal/guard) is a
+  Go port of the same allow-lists, and one shared fixture corpus keeps the two accepting
+  and rejecting exactly the same inputs.
 - Binary blobs from a node (certificates, keys, TLS pins) are decoded and re-armored by
   us, so no node byte can become a config directive. A malformed one throws before the
   handshake completes, which means the session is refunded.
@@ -313,7 +315,7 @@ Notable modules:
 | [chain-service.ts](src/main/chain-service.ts) | On-chain sessions, node handshakes per protocol |
 | [vpn-manager.ts](src/main/vpn-manager.ts) | Tunnel lifecycle for all six protocols |
 | [config-guard.ts](src/main/config-guard.ts) | Validators for untrusted node data |
-| [daemon-core.ts](src/main/daemon-core.ts) | Root daemon: socket server, op dispatch, validation |
+| [daemon/](daemon/) | The privileged helper (Go): root daemon behind the socket, and the `pkexec` one-shot |
 | [privileged.ts](src/main/privileged.ts) | Routes privileged ops to the daemon, else `pkexec` |
 | [ipc-handlers.ts](src/main/ipc-handlers.ts) | Every IPC channel; connect orchestration, refunds, reconnect |
 | [kill-switch.ts](src/main/kill-switch.ts) | iptables kill switch |
@@ -325,8 +327,9 @@ Per-protocol config builders are pure, Electron-free and unit-tested:
 [xray-config.ts](src/main/xray-config.ts),
 [hysteria-config.ts](src/main/hysteria-config.ts).
 
-Privileged surface: [resources/linux/privileged/](resources/linux/privileged/) holds the
-polkit helper script, its policy and the systemd unit;
+Privileged surface: [daemon/](daemon/) is the helper's source (one static binary, built
+by `scripts/build-daemon.sh` into [resources/linux/privileged/](resources/linux/privileged/)
+beside its polkit policy and systemd unit);
 [resources/linux/packaging/](resources/linux/packaging/) holds the deb install/remove hooks.
 
 ## Development notes
@@ -335,7 +338,12 @@ polkit helper script, its policy and the systemd unit;
   `npm run typecheck` is the gate. CI runs typecheck, tests and `npm audit`.
 - **Tests** use Node's native `--test` against `src/**/*.test.ts`. They import the
   module under test with a `.ts` extension (the native runner requires it) and cover the
-  pure security/IO/decision helpers. No Vitest, no Jest, no extra dependency.
+  pure security/IO/decision helpers. No Vitest, no Jest, no extra dependency. `npm test`
+  then runs `go test ./...` for the helper.
+- **The privileged helper is Go.** `daemon/go.mod` pins the toolchain; `npm run dev`,
+  `build` and `dist` build it, and the build script refuses any other Go version. Its
+  command lines are pinned to the original bash helper's by golden transcripts, and its
+  validators to the app's by a shared corpus.
 - **Bundling.** `electron.vite.config.ts` must bundle the whole CosmJS/dVPN SDK tree
   (`DEPS_TO_BUNDLE`), because those packages have ESM-only transitive deps and the main
   process loads as CJS. Adding a `@cosmjs/*` dependency without listing it there fails at

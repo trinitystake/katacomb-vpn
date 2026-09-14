@@ -1,0 +1,4 @@
+argv: killswitch-on sntl0 0.0.0.0
+exit: 1
+stdout: 
+stderr: Error: killswitch remote host 0.0.0.0 whitelists nothing

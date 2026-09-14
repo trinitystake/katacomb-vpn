@@ -1,0 +1,4 @@
+argv: ovpn-up /tmp/cfg/openvpn.conf
+exit: 1
+stdout: 
+stderr: Error: OpenVPN did not come up: UDP link remote: [AF_INET]203.0.113.10:1194 TLS Error: TLS key negotiation failed to occur within 10 seconds (check your network connectivity) TLS Error: TLS handshake failed SIGUSR1[soft,tls-error] received, process restarting Restart pause, 1 second(s) 

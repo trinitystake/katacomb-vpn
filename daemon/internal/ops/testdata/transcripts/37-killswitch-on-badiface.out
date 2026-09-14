@@ -1,0 +1,4 @@
+argv: killswitch-on sntl0;reboot 203.0.113.7
+exit: 1
+stdout: 
+stderr: Error: invalid interface name: sntl0;reboot

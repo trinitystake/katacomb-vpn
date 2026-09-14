@@ -1,0 +1,4 @@
+argv: ovpn-up /tmp/cfg/openvpn.conf
+exit: 0
+stdout: 
+stderr: 

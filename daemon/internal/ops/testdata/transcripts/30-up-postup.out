@@ -1,0 +1,4 @@
+argv: up /tmp/cfg/sntl0.conf
+exit: 1
+stdout: 
+stderr: Error: WireGuard [Interface] key 'postup' is not allowed

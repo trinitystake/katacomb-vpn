@@ -1,0 +1,9 @@
+/run/katacomb-vpn/ mode=700
+/var/lib/katacomb-vpn/ mode=700
+/run/katacomb-vpn/killswitch.state mode=600
+  sntl0 203.0.113.7 1.1.1.1
+/var/lib/katacomb-vpn/resolv.conf.bak mode=644
+  nameserver 10.0.0.53
+  search example.test
+/etc/resolv.conf mode=644
+  nameserver 9.9.9.9

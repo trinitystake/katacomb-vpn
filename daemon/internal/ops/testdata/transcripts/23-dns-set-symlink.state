@@ -1,0 +1,13 @@
+/run/katacomb-vpn/ mode=700
+/var/lib/katacomb-vpn/ mode=700
+/run/katacomb-vpn/openvpn.log mode=600
+  TCP/UDP: Preserving recently used remote address: [AF_INET]203.0.113.10:1194
+  UDP link local: (not bound)
+  UDP link remote: [AF_INET]203.0.113.10:1194
+  TLS Error: TLS key negotiation failed to occur within 10 seconds (check your network connectivity)
+  TLS Error: TLS handshake failed
+  SIGUSR1[soft,tls-error] received, process restarting
+  Restart pause, 1 second(s)
+/var/lib/katacomb-vpn/resolv.conf.bak -> /run/systemd/resolve/stub-resolv.conf
+/etc/resolv.conf mode=644
+  nameserver 8.8.8.8

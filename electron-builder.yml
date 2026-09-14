@@ -5,9 +5,6 @@ directories:
   buildResources: build
 files:
   - out/**/*
-  # The daemon ships unbundled via extraResources (run by Electron-as-node from a
-  # real filesystem path); keep it out of the asar to avoid a confusing duplicate.
-  - "!out/daemon/**"
   # electron-vite already inlines every runtime dependency into out/, so the
   # production node_modules tree (~120 MB) is dead weight in the asar. The only
   # remaining externals are ws's optional native deps, which gracefully no-op.
@@ -18,22 +15,21 @@ electronLanguages:
 extraResources:
   # Everything under resources/linux/ ships to <resourcesPath>/linux/ with its
   # subdirectory layout intact (copyDir preserves structure): bin/ holds the
-  # vendored binaries beside their licence texts, privileged/ holds the helper,
-  # polkit policy and systemd unit that postinstall copies onto the system.
+  # vendored binaries beside their licence texts, privileged/ holds the helper
+  # (the static Go binary scripts/build-daemon.sh produces; `npm run build` fails
+  # loudly if it is missing, because electron-builder would only warn), the
+  # polkit policy and the systemd unit that postinstall copies onto the system.
   # packaging/ is excluded on purpose. It is fpm's INPUT, not runtime data:
   # afterInstall/afterRemove below are resolved from projectDir and embedded in
   # the deb control archive macro-EXPANDED, so the copy this glob would otherwise
   # leave at /opt/.../resources/linux/ is root-owned, +x and macro-UNexpanded.
-  # Run by hand it sets APP_DIR to /opt/ and repoints the /opt/katacomb-vpn
-  # symlink the systemd unit's ExecStart depends on. Nothing reads it.
+  # Run by hand it would set APP_DIR to /opt/ and install the helper and unit
+  # from the wrong place. Nothing reads it.
   - from: resources/linux/
     to: linux/
     filter:
       - "**/*"
       - "!packaging/"
-  # Standalone root-daemon bundle → /opt/Katacomb VPN/resources/daemon/index.js
-  - from: out/daemon/index.js
-    to: daemon/index.js
   # The app is GPL-3.0-or-later and ships GPL-2.0 binaries (awg/awg-quick), so the
   # licence text and the source offer must accompany the binaries, not just the repo.
   - from: LICENSE

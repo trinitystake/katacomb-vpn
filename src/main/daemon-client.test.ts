@@ -13,8 +13,9 @@ import { createRequire } from 'node:module'
 // be a security hole). daemonRequest encodes that distinction via the error type.
 //
 // daemon-client uses extensionless relative imports (for tsc/bundler), which Node's
-// native ESM test loader can't resolve — so bundle it (esbuild → CJS) and load it,
-// the same approach as daemon-core.test.ts.
+// native ESM test loader can't resolve — so bundle it (esbuild → CJS) and load it.
+// The daemon side of this contract is Go (daemon/internal/server); its own tests
+// drive a real socket with the same request lines.
 let daemonRequest: (op: string, args: unknown, socketPath?: string) => Promise<unknown>
 let DaemonUnreachableError: new (m: string) => Error
 

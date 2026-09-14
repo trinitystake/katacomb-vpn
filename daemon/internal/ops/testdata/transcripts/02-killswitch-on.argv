@@ -1,0 +1,21 @@
+iptables -w 5 -D OUTPUT -j KATACOMB_KILLSWITCH
+iptables -w 5 -F KATACOMB_KILLSWITCH
+iptables -w 5 -X KATACOMB_KILLSWITCH
+iptables -w 5 -N KATACOMB_KILLSWITCH
+iptables -w 5 -A KATACOMB_KILLSWITCH -o lo -j ACCEPT
+iptables -w 5 -A KATACOMB_KILLSWITCH -o sntl0 -j ACCEPT
+iptables -w 5 -A KATACOMB_KILLSWITCH -d 203.0.113.7/32 -j ACCEPT
+iptables -w 5 -A KATACOMB_KILLSWITCH -p udp --dport 67:68 -j ACCEPT
+iptables -w 5 -A KATACOMB_KILLSWITCH -o sntl0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -w 5 -A KATACOMB_KILLSWITCH -j DROP
+iptables -w 5 -A OUTPUT -j KATACOMB_KILLSWITCH
+ip6tables -S
+ip6tables -w 5 -D OUTPUT -j KATACOMB_KILLSWITCH6
+ip6tables -w 5 -F KATACOMB_KILLSWITCH6
+ip6tables -w 5 -X KATACOMB_KILLSWITCH6
+ip6tables -w 5 -N KATACOMB_KILLSWITCH6
+ip6tables -w 5 -A KATACOMB_KILLSWITCH6 -o lo -j ACCEPT
+ip6tables -w 5 -A KATACOMB_KILLSWITCH6 -o sntl0 -j ACCEPT
+ip6tables -w 5 -A KATACOMB_KILLSWITCH6 -o sntl0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+ip6tables -w 5 -A KATACOMB_KILLSWITCH6 -j DROP
+ip6tables -w 5 -A OUTPUT -j KATACOMB_KILLSWITCH6

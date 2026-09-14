@@ -62,6 +62,10 @@ if [ "$1" != "upgrade" ]; then
   fi
 
   rm -f /etc/systemd/system/katacomb-vpn-daemon.service
+  # The /opt/katacomb-vpn symlink was dropped in 1.9.0 (the helper is a static
+  # binary in /usr/local/bin and the unit no longer needs it). Kept here one more
+  # release so a 1.8.x install that is removed without ever being upgraded leaves
+  # nothing behind.
   rm -f /opt/katacomb-vpn
   rm -f "$HELPER"
   rm -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy

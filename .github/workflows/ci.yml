@@ -19,8 +19,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The privileged helper is a Go module (daemon/). The toolchain is pinned by
+      # its go.mod; scripts/build-daemon.sh refuses any other version, so what CI
+      # builds is what the maintainer builds.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+
       - name: Typecheck
         run: npm run typecheck
+
+      # go vet + go mod verify + a static, reproducible build, failing loudly on
+      # any of them (electron-builder would only warn on the missing file).
+      - name: Build the privileged helper
+        run: npm run build:daemon
 
       - name: Unit tests
         run: npm test

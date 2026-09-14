@@ -1,7 +1,8 @@
 #!/bin/bash
-# Post-install for the Katacomb VPN .deb. Installs the polkit helper + policy
-# (fallback path) AND the persistent root daemon (so connect/disconnect never
-# prompt for a password — Mullvad-style).
+# Post-install for the Katacomb VPN .deb. Installs the privileged helper (one
+# static Go binary: the pkexec one-shot AND, as `katacomb-vpn-helper daemon`, the
+# persistent root daemon, so connect/disconnect never prompt for a password —
+# Mullvad-style), its polkit policy and its systemd unit.
 #
 # IMPORTANT — this file REPLACES electron-builder's own after-install template;
 # it is not merged with it. FpmTarget's getResource() returns our path *instead
@@ -76,7 +77,7 @@ fi
 # Katacomb VPN specifics
 # ============================================================================
 
-HELPER_SRC="$APP_DIR/resources/linux/privileged/katacomb-vpn-helper.sh"
+HELPER_SRC="$APP_DIR/resources/linux/privileged/katacomb-vpn-helper"
 POLICY_SRC="$APP_DIR/resources/linux/privileged/com.katacomb.vpn.policy"
 UNIT_SRC="$APP_DIR/resources/linux/privileged/katacomb-vpn-daemon.service"
 
@@ -95,12 +96,23 @@ rm -f /usr/local/bin/sentinel-vpn-helper \
       /etc/systemd/system/sentinel-dvpn-daemon.service \
       /opt/sentinel-dvpn
 groupdel sentinel-dvpn 2>/dev/null || true
+# The /opt/katacomb-vpn symlink only ever gave the old Electron-based daemon a
+# space-free ExecStart; since 1.9.0 the helper is a static binary in
+# /usr/local/bin and the unit points there. The old package's postrm does
+# nothing on upgrade, so the new postinst is what removes it.
+rm -f /opt/katacomb-vpn
 
 # --- Privileged helper + polkit policy (used by the daemon and the fallback) ---
+# Installed through a temp name + mv. The daemon now RUNS from $HELPER_DEST, and
+# `cp` onto a running executable fails with ETXTBSY, which would abort every
+# upgrade's postinst and leave the old daemon running. mv replaces the directory
+# entry atomically, so a concurrent pkexec never sees a half-written exec.path
+# either; the running daemon keeps its old inode until the unit restart below.
 if [ -f "$HELPER_SRC" ]; then
-  cp "$HELPER_SRC" "$HELPER_DEST"
-  chmod 755 "$HELPER_DEST"
-  chown root:root "$HELPER_DEST"
+  cp "$HELPER_SRC" "$HELPER_DEST.new"
+  chmod 755 "$HELPER_DEST.new"
+  chown root:root "$HELPER_DEST.new"
+  mv -f "$HELPER_DEST.new" "$HELPER_DEST"
 fi
 
 if [ -f "$POLICY_SRC" ]; then
@@ -143,9 +155,6 @@ else
 fi
 
 # --- Persistent root daemon ---
-# Space-free symlink so the systemd unit's ExecStart needs no quoting.
-ln -sfn "$APP_DIR" /opt/katacomb-vpn
-
 if [ -f "$UNIT_SRC" ] && command -v systemctl >/dev/null 2>&1; then
   cp "$UNIT_SRC" "$UNIT_DEST"
   chmod 644 "$UNIT_DEST"

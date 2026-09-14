@@ -3,6 +3,7 @@
 //	katacomb-vpn-helper daemon          systemd ExecStart; serves protocol v1 on the socket
 //	katacomb-vpn-helper <verb> <args…>  pkexec one-shot; the argv contract the bash helper had
 //	katacomb-vpn-helper --version       the package version it was built for
+//	katacomb-vpn-helper _tun2socks …    hidden: the embedded tun2socks engine, self-exec'd by tun-up
 //
 // Both entry modes end in the same internal/ops package, which is the trust
 // boundary: the socket is unauthenticated (any member of the katacomb-vpn group)
@@ -17,6 +18,7 @@ import (
 	"katacomb.vpn/daemon/internal/oneshot"
 	"katacomb.vpn/daemon/internal/ops"
 	"katacomb.vpn/daemon/internal/server"
+	"katacomb.vpn/daemon/internal/tun2socks"
 )
 
 func main() {
@@ -26,6 +28,8 @@ func main() {
 		fmt.Println(version)
 	case len(args) == 1 && args[0] == "daemon":
 		os.Exit(server.Run(ops.RealEnv()))
+	case len(args) >= 1 && args[0] == "_tun2socks":
+		os.Exit(tun2socks.Run(args[1:], os.Stderr))
 	default:
 		os.Exit(oneshot.Run(args, ops.RealEnv(), os.Stdout, os.Stderr))
 	}

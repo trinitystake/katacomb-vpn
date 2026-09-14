@@ -16,7 +16,6 @@ import (
 // Unlike the TypeScript table, an UNKNOWN name fails closed here: root has no
 // business running a binary nobody pinned.
 var pins = map[string]string{
-	"tun2socks":    "42ce074a9a225825ef5e3f21b3657af7ed25187f7cd4e6d11e0646d5d166eb04",
 	"amneziawg-go": "0462bc5fb229e90096ed4c5f46cff2c829e1b12d93b282c82fcd4aa955e44d7f",
 	"awg":          "b069282e01b1cbaa3814be16e763af65cdb61fc4b613470216a59e8a26fa8188",
 	"awg-quick":    "f4bb0f5d63665ade87f0cb9f2185c43515cff09868637eb311f98f65a318722c",

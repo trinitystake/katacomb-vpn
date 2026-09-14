@@ -2,13 +2,14 @@ import { createHash } from 'crypto'
 import { readFileSync } from 'fs'
 
 // SHA-256 hashes of the bundled binaries (vendored in-repo under
-// resources/linux/bin/ and shipped in the package). Shared by the user-space
-// app (vpn-manager) and the root daemon, which both refuse to execute a binary
+// resources/linux/bin/ and shipped in the package). The user-space app
+// (vpn-manager) checks them before it runs or forwards a binary; the root helper
+// carries its own copy of the root-run ones (daemon/internal/ops/pins.go, whose
+// test parses THIS file so the two cannot drift) and refuses to execute a binary
 // whose hash doesn't match. Update these whenever the vendored binaries are
-// replaced. Node builtins only — importable by the standalone daemon (no Electron deps).
+// replaced. tun2socks is not here any more: the engine is compiled into the helper.
 const BUNDLED_HASHES: Record<string, string> = {
   v2ray: '751f52a3d9324c993953b7ebb6aab79e77115542a8ca1ef83078cb215c03dea8',
-  tun2socks: '42ce074a9a225825ef5e3f21b3657af7ed25187f7cd4e6d11e0646d5d166eb04',
   // Xray-core v26.3.27 (official XTLS/Xray-core Xray-linux-64.zip release, zip
   // SHA2-256 23cd9af9…f7c8ae verified against the published .dgst).
   xray: '8255dd939c34cf966cc91517b6324dd3c8d0bcf49ffac8beca049a38c46845ed',

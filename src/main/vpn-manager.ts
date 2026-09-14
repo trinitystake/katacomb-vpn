@@ -78,10 +78,6 @@ function resolveHysteria2Binary(): string {
   return resolveBundled('hysteria')
 }
 
-function resolveTun2Socks(): string {
-  return resolveBundled('tun2socks')
-}
-
 /**
  * Resolve the bundled AmneziaWG trio's directory. Unlike the child-proxy
  * binaries there is NO system-PATH fallback: awg-quick/awg/amneziawg-go run as
@@ -172,7 +168,6 @@ export function protocolRuntimeError(protocol: 'wireguard' | 'amneziawg' | 'v2ra
     }
     const bin = protocol === 'v2ray' ? 'v2ray' : protocol === 'xray' ? 'xray' : 'hysteria'
     if (!isBinaryAvailable(bin)) return `The ${bin} binary is missing from this build. Reinstall the app.`
-    if (!isBinaryAvailable('tun2socks')) return 'The tun2socks binary is missing from this build. Reinstall the app.'
     return null
   } catch (err) {
     // resolveBundled throws on a failed integrity check, resolveAmneziaWgBinDir
@@ -400,18 +395,16 @@ function getDefaultRoute(): { gateway: string; iface: string } | null {
 }
 
 /**
- * Bring up tun2socks TUN interface — routes all traffic through the SOCKS proxy.
+ * Bring up the tun2socks TUN interface — routes all traffic through the SOCKS proxy.
  *
- * Uses the polkit helper to spawn tun2socks + set up routing in a single privileged call.
- * The helper daemonizes tun2socks (nohup + detached stdio) so execSync returns immediately.
- * Polkit caches the auth so subsequent connects don't prompt for a password.
+ * One privileged call (`tun-up`) spawns the engine and sets up routing. The engine
+ * is compiled into the privileged helper and self-exec'd detached from
+ * /usr/local/bin, which is what makes this work on the AppImage: root cannot read
+ * the FUSE mount the app runs from, so a binary path handed over from there used
+ * to fail at spawn. The verb keeps its `<bin>` slot for a stable argv contract;
+ * the helper ignores it, and this app passes `-`.
  */
 async function bringUpTun(): Promise<void> {
-  const tun2socksBin = resolveTun2Socks()
-  if (tun2socksBin === 'tun2socks' && !binaryExists('tun2socks')) {
-    throw new Error('tun2socks binary not found. The bundled binary is missing.')
-  }
-
   const defaultRoute = getDefaultRoute()
   if (!defaultRoute) {
     throw new Error('Cannot determine default gateway. Is your network connected?')
@@ -427,7 +420,7 @@ async function bringUpTun(): Promise<void> {
   const settings = loadSettings()
   const bypassRoutes = sanitizeBypassRoutes(settings.splitTunnelRoutes).join(',')
 
-  const args = ['tun-up', tun2socksBin, SOCKS_ADDR, remoteHost, defaultRoute.gateway, defaultRoute.iface]
+  const args = ['tun-up', '-', SOCKS_ADDR, remoteHost, defaultRoute.gateway, defaultRoute.iface]
   if (bypassRoutes) args.push(bypassRoutes)
 
   try {

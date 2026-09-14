@@ -52,9 +52,12 @@ func newRec(t *testing.T) *rec {
 		},
 		Spawn: func(argv []string, _ ops.RunOpt) (int, error) {
 			r.cmds = append(r.cmds, argv)
-			link("sntl-tun")
+			if len(argv) > 1 && argv[1] == "_tun2socks" {
+				link("sntl-tun")
+			}
 			return 555, nil
 		},
+		Executable: func() (string, error) { return filepath.Join(root, "usr/local/bin/katacomb-vpn-helper"), nil },
 		Kill:     func(int, syscall.Signal) error { return syscall.ESRCH },
 		Sleep:    func(time.Duration) {},
 		Root:     root,
@@ -182,7 +185,7 @@ func TestWireguardDownRemovesTheRootOwnedConfig(t *testing.T) {
 	}
 }
 
-func TestTunUpDropsDefaultRouteBypassAndUsesThePinnedBinary(t *testing.T) {
+func TestTunUpDropsDefaultRouteBypassAndSelfExecsTheEngine(t *testing.T) {
 	r := newRec(t)
 	res := call(t, r, "tun_up", mustJSON(map[string]any{
 		"socksAddr": "127.0.0.1:1080", "remoteHost": "203.0.113.7", "gateway": "192.168.1.1", "iface": "eth0",
@@ -192,8 +195,8 @@ func TestTunUpDropsDefaultRouteBypassAndUsesThePinnedBinary(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("rejected: %s", res.Error)
 	}
-	if !r.has(filepath.Join(r.root, "pinned", "tun2socks") + " -device tun://sntl-tun") {
-		t.Fatalf("must spawn the pinned binary, got %v", r.lines())
+	if !r.has(filepath.Join(r.root, "usr/local/bin/katacomb-vpn-helper") + " _tun2socks -device tun://sntl-tun -proxy socks5://127.0.0.1:1080 -mtu 1400 -loglevel silent") {
+		t.Fatalf("must self-exec the embedded engine, got %v", r.lines())
 	}
 	if r.has("/tmp/evil") {
 		t.Fatal("client path used")

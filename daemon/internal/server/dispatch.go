@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"path/filepath"
 
 	"katacomb.vpn/daemon/internal/guard"
 	"katacomb.vpn/daemon/internal/ops"
@@ -108,8 +107,8 @@ func Dispatch(ctx context.Context, req protocol.Request, e *ops.Env) protocol.Re
 				bypass = append(bypass, r)
 			}
 		}
-		// The pinned bundled tun2socks; any client-supplied path is ignored.
-		p := ops.TunUpParams{Bin: filepath.Join(e.BinDir, "tun2socks"), SocksAddr: socks, RemoteHost: remote, Gateway: gw, Iface: iface, BypassRoutes: bypass}
+		// The engine is embedded in this helper; a client-supplied path never mattered here.
+		p := ops.TunUpParams{SocksAddr: socks, RemoteHost: remote, Gateway: gw, Iface: iface, BypassRoutes: bypass}
 		if _, err := ops.TunUp(ctx, e, p); err != nil {
 			return failErr(err)
 		}

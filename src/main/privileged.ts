@@ -96,8 +96,10 @@ async function runViaDaemon(args: string[]): Promise<void> {
       await daemonRequest('openvpn_down')
       return
     case 'tun-up': {
-      // rest = [tun2socksBin, socksAddr, remoteHost, gateway, iface, bypassCsv?]
-      // The daemon resolves+pins its own tun2socks, so the bin arg is dropped.
+      // rest = ['-', socksAddr, remoteHost, gateway, iface, bypassCsv?]
+      // The first slot used to name the tun2socks binary. The engine is compiled
+      // into the helper now and the slot is ignored (kept so old and new apps
+      // share one argv contract); the daemon op never carried it.
       const [, socksAddr, remoteHost, gateway, iface, bypassCsv] = rest
       const bypassRoutes = bypassCsv ? bypassCsv.split(',') : []
       await daemonRequest('tun_up', { socksAddr, remoteHost, gateway, iface, bypassRoutes })

@@ -69,14 +69,15 @@ func newFake(t *testing.T) *fakeEnv {
 			}
 			return fmt.Errorf("%s failed SHA-256 integrity check", name)
 		},
-		Warn: func(m string) { f.warns = append(f.warns, m) },
+		Executable: func() (string, error) { return filepath.Join(root, "usr/local/bin/katacomb-vpn-helper"), nil },
+		Warn:       func(m string) { f.warns = append(f.warns, m) },
 	}
-	for _, d := range []string{"sys/class/net", "shim/bin", "shim/awgbin", "usr/sbin", "proc", "etc"} {
+	for _, d := range []string{"sys/class/net", "shim/bin", "shim/awgbin", "usr/sbin", "usr/local/bin", "proc", "etc"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, b := range []string{"shim/bin/tun2socks", "shim/awgbin/awg", "shim/awgbin/awg-quick", "shim/awgbin/amneziawg-go", "usr/sbin/openvpn"} {
+	for _, b := range []string{"usr/local/bin/katacomb-vpn-helper", "shim/awgbin/awg", "shim/awgbin/awg-quick", "shim/awgbin/amneziawg-go", "usr/sbin/openvpn"} {
 		if err := os.WriteFile(filepath.Join(root, b), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +210,7 @@ const (
 func (f *fakeEnv) spawn(argv []string, _ RunOpt) (int, error) {
 	f.cmds = append(f.cmds, append([]string(nil), argv...))
 	f.nextPid++
-	if filepath.Base(argv[0]) == "tun2socks" {
+	if len(argv) > 1 && argv[1] == "_tun2socks" {
 		f.addLink("sntl-tun")
 	}
 	return f.nextPid, nil
@@ -243,6 +244,11 @@ func normalise(argv []string, root string) []string {
 			tok = "<openvpn.conf>"
 		}
 		out = append(out, tok)
+	}
+	// The bash helper spawned the vendored `tun2socks …`; the Go helper self-execs
+	// `<self> _tun2socks …` with the same flags (the engine is embedded).
+	if out[0] == "katacomb-vpn-helper" && len(out) > 1 && out[1] == "_tun2socks" {
+		out = append([]string{"tun2socks"}, out[2:]...)
 	}
 	a := out[1:]
 	switch out[0] {
@@ -502,10 +508,10 @@ func TestTranscriptParity(t *testing.T) {
 	}
 
 	awgBin := f.BinDir
-	t2s := filepath.Join(f.root, "shim/bin/tun2socks")
+	self, _ := f.Executable()
 	tunUp := func(bypass ...string) func() error {
 		return func() error {
-			pid, err := TunUp(ctx, f.Env, TunUpParams{Bin: t2s, SocksAddr: "127.0.0.1:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0", BypassRoutes: bypass})
+			pid, err := TunUp(ctx, f.Env, TunUpParams{SocksAddr: "127.0.0.1:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0", BypassRoutes: bypass})
 			if err == nil && pid == 0 {
 				t.Errorf("tun-up returned no pid")
 			}
@@ -556,8 +562,8 @@ func TestTranscriptParity(t *testing.T) {
 	step("20-tun-up-again", tunUp())
 	pid20 := f.nextPid
 	// A crash (or an upgrade that wiped /run) loses tun.state: the fallback is a
-	// /proc scan (deviation 4). Plant the real tun2socks plus two decoys that the
-	// bash `pkill -f tun://sntl-tun` WOULD have killed and this must not.
+	// /proc scan (deviation 4). Plant the real engine plus decoys that the bash
+	// `pkill -f tun://sntl-tun` WOULD have killed and this must not.
 	removeQuiet(f.runPath(tunStateName))
 	plantProc := func(pid int, exe string, argv ...string) {
 		dir := filepath.Join(f.root, "proc", strconv.Itoa(pid))
@@ -571,13 +577,15 @@ func TestTranscriptParity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plantProc(pid20, t2s, "tun2socks", "-device", "tun://sntl-tun", "-proxy", "socks5://127.0.0.1:1080")
-	plantProc(777, filepath.Join(f.root, "usr/sbin/openvpn"), "openvpn", "--note", "tun://sntl-tun")   // wrong executable
-	plantProc(778, t2s, "tun2socks", "-device", "--note=tun://sntl-tun")                                // substring, not a whole entry
-	plantProc(779, filepath.Join(f.root, "usr/sbin/openvpn"), "bash", "-c", "echo tun://sntl-tun")   // what pkill -f matched
+	plantProc(pid20, self, "katacomb-vpn-helper", "_tun2socks", "-device", "tun://sntl-tun", "-proxy", "socks5://127.0.0.1:1080")
+	plantProc(777, filepath.Join(f.root, "usr/sbin/openvpn"), "openvpn", "_tun2socks", "tun://sntl-tun")            // wrong executable
+	plantProc(778, self, "katacomb-vpn-helper", "_tun2socks", "-device", "--note=tun://sntl-tun")                   // substring, not a whole entry
+	plantProc(779, self, "katacomb-vpn-helper", "daemon", "tun://sntl-tun")                                        // our binary, not the sub-mode
+	plantProc(780, filepath.Join(f.root, "usr/sbin/openvpn"), "bash", "-c", "echo tun://sntl-tun")                // what pkill -f matched
+	plantProc(781, self+" (deleted)", "katacomb-vpn-helper", "_tun2socks", "-device", "tun://sntl-tun")            // engine from before an upgrade
 	step("21-tun-down-nostate", func() error { return TunDown(ctx, f.Env) })
-	if k := strings.Join(f.takeKills(), ","); k != fmt.Sprintf("%d:15", pid20) {
-		t.Errorf("the pid-less fallback must kill exactly the pinned tun2socks, got kills = %q", k)
+	if k := strings.Join(f.takeKills(), ","); k != fmt.Sprintf("%d:15,781:15", pid20) {
+		t.Errorf("the pid-less fallback must kill exactly our own _tun2socks processes, got kills = %q", k)
 	}
 	step("22-dns-restore-noop", func() error { return DnsRestore(ctx, f.Env) })
 	removeQuiet(resolv)
@@ -594,10 +602,8 @@ func TestTranscriptParity(t *testing.T) {
 	postup := []byte(strings.Replace(string(cfgWG), "MTU = 1420", "PostUp = touch /tmp/pwned", 1))
 	step("30-up-postup", func() error { return WireguardUp(ctx, f.Env, postup) })
 	step("32-killswitch-on-zero", ks(KillswitchParams{Iface: "sntl0", RemoteHost: "0.0.0.0"}))
-	step("33-tun-up-missing-bin", func() error {
-		_, err := TunUp(ctx, f.Env, TunUpParams{Bin: filepath.Join(f.root, "tmp/nope"), SocksAddr: "127.0.0.1:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0"})
-		return err
-	})
+	// 33-tun-up-missing-bin is not replayed: the bash helper refused a missing
+	// tun2socks path, and the engine is embedded now (the slot is ignored).
 	if err := os.MkdirAll(filepath.Join(f.root, "tmp/emptybin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +612,7 @@ func TestTranscriptParity(t *testing.T) {
 	step("36-ovpn-up-script", func() error { return OpenVpnUp(ctx, f.Env, ovpnUp) })
 	step("37-killswitch-on-badiface", ks(KillswitchParams{Iface: "sntl0;reboot", RemoteHost: "203.0.113.7"}))
 	step("38-tun-up-badsocks", func() error {
-		_, err := TunUp(ctx, f.Env, TunUpParams{Bin: t2s, SocksAddr: "localhost:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0"})
+		_, err := TunUp(ctx, f.Env, TunUpParams{SocksAddr: "localhost:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0"})
 		return err
 	})
 	if len(f.warns) != 0 {
@@ -695,7 +701,7 @@ func TestOpenVpnPollWaitsBetweenTries(t *testing.T) {
 func TestTunUpKillsTheChildWhenNoInterfaceAppears(t *testing.T) {
 	f := newFake(t)
 	f.Env.Spawn = func(argv []string, _ RunOpt) (int, error) { return 4321, nil } // never creates sntl-tun
-	_, err := TunUp(context.Background(), f.Env, TunUpParams{Bin: filepath.Join(f.root, "shim/bin/tun2socks"), SocksAddr: "127.0.0.1:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0"})
+	_, err := TunUp(context.Background(), f.Env, TunUpParams{SocksAddr: "127.0.0.1:1080", RemoteHost: "203.0.113.7", Gateway: "192.168.1.1", Iface: "eth0"})
 	if err == nil || !strings.Contains(err.Error(), "TUN interface did not appear") {
 		t.Fatalf("got %v", err)
 	}

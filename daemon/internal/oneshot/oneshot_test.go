@@ -36,9 +36,12 @@ func newRec(t *testing.T) *rec {
 		},
 		Spawn: func(argv []string, _ ops.RunOpt) (int, error) {
 			r.cmds = append(r.cmds, argv)
-			link("sntl-tun")
+			if len(argv) > 1 && argv[1] == "_tun2socks" {
+				link("sntl-tun")
+			}
 			return 777, nil
 		},
+		Executable: func() (string, error) { return filepath.Join(root, "usr/local/bin/katacomb-vpn-helper"), nil },
 		Kill:     func(int, syscall.Signal) error { return nil },
 		Sleep:    func(time.Duration) {},
 		Root:     root,
@@ -215,21 +218,20 @@ func TestKillswitchOnArgvShapes(t *testing.T) {
 	}
 }
 
-func TestTunUpPrintsThePidAndPinsTheBinary(t *testing.T) {
-	r := newRec(t)
-	bin := filepath.Join(r.root, "pinned/tun2socks")
-	code, out, errs := runVerb(t, r, "tun-up", bin, "127.0.0.1:1080", "203.0.113.7", "192.168.1.1", "eth0", "10.0.0.0/8,0.0.0.0/0")
-	if code != 0 || strings.TrimSpace(out) != "777" {
-		t.Fatalf("code=%d out=%q err=%q", code, out, errs)
-	}
-	if !strings.Contains(r.lines(), "ip route add 10.0.0.0/8 via") || strings.Contains(r.lines(), "0.0.0.0/0") {
-		t.Fatalf("bypass handling: %s", r.lines())
-	}
-	r.pinOK = false
-	r.cmds = nil
-	code, _, errs = runVerb(t, r, "tun-up", bin, "127.0.0.1:1080", "203.0.113.7", "192.168.1.1", "eth0")
-	if code != 1 || !strings.Contains(errs, "integrity") || len(r.cmds) != 0 {
-		t.Fatalf("an unpinned binary must be refused: code=%d stderr=%q cmds=%v", code, errs, r.cmds)
+func TestTunUpPrintsThePidAndIgnoresTheBinSlot(t *testing.T) {
+	self := "usr/local/bin/katacomb-vpn-helper _tun2socks -device tun://sntl-tun"
+	for _, slot := range []string{"-", "/tmp/evil", "/opt/Katacomb VPN/resources/linux/bin/tun2socks"} {
+		r := newRec(t)
+		code, out, errs := runVerb(t, r, "tun-up", slot, "127.0.0.1:1080", "203.0.113.7", "192.168.1.1", "eth0", "10.0.0.0/8,0.0.0.0/0")
+		if code != 0 || strings.TrimSpace(out) != "777" {
+			t.Fatalf("slot %q: code=%d out=%q err=%q", slot, code, out, errs)
+		}
+		if !strings.Contains(r.lines(), self) || strings.Contains(r.lines(), slot+" ") {
+			t.Fatalf("slot %q: must self-exec the embedded engine, never the slot: %s", slot, r.lines())
+		}
+		if !strings.Contains(r.lines(), "ip route add 10.0.0.0/8 via") || strings.Contains(r.lines(), "0.0.0.0/0") {
+			t.Fatalf("bypass handling: %s", r.lines())
+		}
 	}
 }
 

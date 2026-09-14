@@ -76,7 +76,7 @@ Strict Electron security isolation with three process boundaries:
   group; its `keepSeed` is only valid when that group is the last thing stored, because
   `retainedSeedId` can only hold a seed while zero wallets exist.
 - `chain-service.ts`: `SigningSentinelClient` for on-chain tx (node subscription via `nodeStartSession`), session ID extraction from tx events, cryptographic handshake with nodes (WireGuard/V2Ray branching). Session configs saved to disk for reconnect.
-- `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled binaries (v2ray, tun2socks) verified via SHA-256 before use, with system PATH fallback.
+- `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled child-proxy binaries (v2ray, xray, hysteria) verified via SHA-256 before use, with system PATH fallback. tun2socks is no longer a binary: the engine is compiled into the privileged helper (`daemon/internal/tun2socks`), and `tun-up` self-execs it.
 - `ipc-handlers.ts`: all IPC channels (registered via a `handle()` wrapper that rejects calls from any frame that isn't our own renderer), pre-connect balance validation, node list fetch from `api.sentnodes.com/v2/nodes` via `net.fetch`, auto-reconnect + a WireGuard liveness monitor. Caches balance/sessions/nodes when VPN is active (RPC unreachable through tunnel).
 - `config-guard.ts`: **pure validators for untrusted-node data** — `assertSafeWireguardConfig` (allow-list keys, reject `PostUp`/`PreUp`/… so a node config can't run shell as root via `wg-quick`), `assertSafeV2RayConfig`, `isAllowedBypassCidr`/`sanitizeBypassRoutes` (reject `0.0.0.0/x` split-tunnel routes), `extractWireguardEndpointHost`. Unit-tested; see the node-trust invariant below.
 - `fs-utils.ts`: `writeFileAtomic(path, data, mode=0o600)` (temp + rename). Use it for all settings/wallet/session/cache writes — never `writeFileSync` directly for persisted state.
@@ -118,11 +118,14 @@ inside the package):
 - `resources/linux/privileged/com.katacomb.vpn.policy` — polkit policy for cached auth (pins that path)
 - `resources/linux/privileged/katacomb-vpn-daemon.service` — systemd unit, `ExecStart=/usr/local/bin/katacomb-vpn-helper daemon`
 - `resources/linux/packaging/postinstall.sh` — deb postinstall that deploys the helper + policy + unit
-- One binary, three entry modes: `katacomb-vpn-helper daemon` (systemd; serves protocol
+- One binary, four entry modes: `katacomb-vpn-helper daemon` (systemd; serves protocol
   v1 on the socket), `katacomb-vpn-helper <verb> <args…>` (the pkexec one-shot, the argv
-  contract below), `katacomb-vpn-helper --version`. An unknown verb prints the usage
-  line and exits 1.
-- Helper verbs: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface> [bypass]`, `tun-down`, `killswitch-on <iface> <host> [dns] [lan-sharing]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
+  contract below), `katacomb-vpn-helper --version`, and the hidden
+  `katacomb-vpn-helper _tun2socks …` (the embedded tun2socks engine, which `tun-up`
+  self-execs detached; every engine field is hardcoded except `-proxy`, and the
+  engine's own flag parser and `TUNPreUp`/`TUNPostUp` shell hooks are never reached).
+  An unknown verb prints the usage line and exits 1.
+- Helper verbs: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface> [bypass]` (`<bin>` is accepted and IGNORED since the engine is embedded; the slot stays so old and new apps share one argv contract, and the app passes `-`), `tun-down`, `killswitch-on <iface> <host> [dns] [lan-sharing]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard/AmneziaWG interface: `sntl0`. tun2socks: `sntl-tun`. OpenVPN: `sntl-ovpn`.
 
 ### Privileged daemon (deb) vs. pkexec fallback (AppImage/dev)
@@ -140,7 +143,8 @@ daemon, so they fall back to the per-op `pkexec` one-shot (one cached prompt);
 `npm run dev` builds the helper (`predev`) and the existing "VPN Helper Setup" dialog
 installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemon`.
 
-- **`daemon/` is the whole root side**: one Go module, no dependencies.
+- **`daemon/` is the whole root side**: one Go module whose only dependency is the
+  tun2socks engine (`go.sum` + the checksum DB are the pin; no `vendor/`).
   `internal/ops` implements the twelve verbs natively and is **THE trust boundary** —
   both doors (the unauthenticated socket, the polkit-authenticated argv) end in the same
   `ops` call and every argument is validated there again, whatever the client checked.
@@ -166,9 +170,9 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   mode refuses euid ≠ 0; the socket is bound under `umask 077`; `null` / non-object /
   non-numeric-id requests get `{"id":0,"ok":false,"error":"invalid request"}` instead of
   killing the daemon (any group member could bounce it with `null\n`); the pid-less
-  `tun-down` fallback is a `/proc` scan that signals only a process whose argv carries
-  `tun://sntl-tun` as a WHOLE entry AND whose executable hashes to the tun2socks pin
-  (never `pkill -f`); **one validation layer for both modes** — the DNS allow-list and
+  `tun-down` fallback is a `/proc` scan that signals only a process whose executable
+  IS this helper, whose argv[1] is `_tun2socks` and whose argv carries `tun://sntl-tun`
+  as a WHOLE entry (never `pkill -f`); **one validation layer for both modes** — the DNS allow-list and
   the SHA pins apply to the pkexec one-shot too, so an admin-authenticated user cannot
   make root run an arbitrary binary or point every lookup at their resolver;
   **one-shot configs are read ONCE**, via `O_NOFOLLOW` + `fstat` (regular file, owned by
@@ -1596,7 +1600,7 @@ immune to Ubuntu's partial OSS4 shim. Vendored **from a `debian:bookworm` contai
 never from the maintainer's desktop, for the reason `scripts/build-amneziawg.sh` builds
 in one: a native copy inherits this machine's glibc and would refuse to load on older
 targets (floor is GLIBC_2.34; re-check on any refresh). It is LGPL-2.1, so unlike the
-six executables it is *linked into* the process and carries a source offer in
+five executables it is *linked into* the process and carries a source offer in
 `THIRD-PARTY-LICENSES.md` — keep that entry in step if the file is ever refreshed.
 
 **The AppImage runs UNSANDBOXED on Ubuntu 24.04+ — this is known, documented, and not
@@ -1630,7 +1634,11 @@ click **Install** once, assert the helper is 755 root:root and byte-identical to
 there means the runtime started passing `allow_root` — re-read this before "simplifying"
 the staging away), and then remove both files again so the deb phases keep their clean
 slate. Anything else in main that ever hands a resource path to `pkexec`, `sudo`, or the
-daemon inherits this: copy it out first.
+daemon inherits this: copy it out first. `tun-up` no longer does: the tun2socks engine is
+compiled into the helper, which self-execs from `/usr/local/bin`, so AppImage
+V2Ray/XRAY/Hysteria2 tunnel mode works there. `awg-up <bindir>` still hands root the
+mount's `awg-quick`, so AmneziaWG stays broken on the AppImage until it is reimplemented
+natively (Phase 3 of the daemon rewrite; not started).
 
 **Verify packaging by installing, not by reading config** —
 `scripts/verify-deb-portability.sh` (interactive, needs root, pauses for GUI steps)
@@ -1644,11 +1652,15 @@ app dies with `FATAL … chrome-sandbox … mode 4755` before a window ever appe
 Flip the sysctl to reproduce stock behaviour on this hardware.
 
 Licensing (required for any public distribution): the app is **GPL-3.0-or-later**
-(`LICENSE`, `package.json` `license` → the deb's `License:` field). All six bundled
+(`LICENSE`, `package.json` `license` → the deb's `License:` field). All five bundled
 binaries carry their upstream text as `resources/linux/bin/LICENSE.<name>`, and
 `THIRD-PARTY-LICENSES.md` records each one's pinned version/commit plus the GPL-2.0
-source offer for `awg`/`awg-quick` (the only copyleft binary — `tun2socks` v2.6.0 is
-MIT, despite the v1 series having been GPL-3.0). `LICENSE` and `THIRD-PARTY-LICENSES.md`
-ship via explicit `extraResources` entries so the notices travel with the binaries.
+source offer for `awg`/`awg-quick` (the only copyleft binary). The privileged helper
+statically LINKS tun2socks v2.6.0 (MIT, despite the v1 series having been GPL-3.0) and
+its dependencies (gvisor Apache-2.0, `golang.org/x` BSD-3, …): `scripts/gen-go-notices.sh`
+regenerates `daemon/THIRD-PARTY-NOTICES.md` from `go list -deps` — rerun it after any
+change to `daemon/go.mod` — and it ships beside `THIRD-PARTY-LICENSES.md`. `LICENSE`,
+`THIRD-PARTY-LICENSES.md` and `THIRD-PARTY-NOTICES.md` ship via explicit
+`extraResources` entries so the notices travel with the binaries.
 **When bumping a bundled binary, re-check its LICENSE at the new tag** — it can change
 between versions.

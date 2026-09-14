@@ -70,8 +70,10 @@ func Run(args []string, e *ops.Env, stdout, stderr io.Writer) int {
 	case "ovpn-down":
 		err = ops.OpenVpnDown(ctx, e)
 	case "tun-up":
-		// $2 = tun2socks binary, $3 = SOCKS addr, $4 = remote server IP,
-		// $5 = gateway, $6 = interface, $7 = bypass routes (optional CSV)
+		// $2 used to be the tun2socks binary and is IGNORED (the engine is embedded;
+		// the slot stays so old and new apps share one argv contract), $3 = SOCKS
+		// addr, $4 = remote server IP, $5 = gateway, $6 = interface, $7 = bypass
+		// routes (optional CSV)
 		socks := arg(2)
 		if socks == "" {
 			socks = "127.0.0.1:1080"
@@ -82,7 +84,7 @@ func Run(args []string, e *ops.Env, stdout, stderr io.Writer) int {
 		}
 		var pid int
 		pid, err = ops.TunUp(ctx, e, ops.TunUpParams{
-			Bin: arg(1), SocksAddr: socks, RemoteHost: arg(3), Gateway: arg(4), Iface: arg(5), BypassRoutes: bypass,
+			SocksAddr: socks, RemoteHost: arg(3), Gateway: arg(4), Iface: arg(5), BypassRoutes: bypass,
 		})
 		if err == nil {
 			fmt.Fprintln(stdout, pid)

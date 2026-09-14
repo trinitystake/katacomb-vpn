@@ -13,12 +13,12 @@ import (
 	"katacomb.vpn/daemon/internal/guard"
 )
 
-// TunUpParams is `tun-up <bin> <socks> <remote> <gw> <if> [bypass…]`.
+// TunUpParams is `tun-up <bin> <socks> <remote> <gw> <if> [bypass…]`. The
+// `<bin>` slot is accepted and IGNORED: the tun2socks engine is compiled into
+// this helper (internal/tun2socks) and tun-up self-execs it, so root never runs
+// a binary it was handed. The slot stays so old and new apps share one argv
+// contract (the new app passes `-`).
 type TunUpParams struct {
-	// Bin is the tun2socks executable; it must hash to the compiled-in pin in
-	// BOTH modes (deviation 5), so a polkit-authenticated caller cannot make root
-	// run an arbitrary binary through this verb.
-	Bin        string
 	SocksAddr  string
 	RemoteHost string
 	Gateway    string
@@ -33,11 +33,24 @@ const (
 	tunPollInterval = 100 * time.Millisecond
 )
 
-// TunUp spawns tun2socks detached and installs the routing around it: a /32 to
-// the node via the real gateway (so the proxy's own traffic bypasses the tunnel),
-// the two /1 halves (more specific than the default route, so everything else
-// enters the TUN), then the bypass routes. Returns tun2socks' pid, which is also
-// recorded in tun.state for TunDown.
+// selfExecutable is this helper's path, which tun-up execs as `_tun2socks`. If
+// the binary was replaced underneath a running daemon (an upgrade), /proc/self/exe
+// reads `… (deleted)`: the file at the plain path is the new helper, which has the
+// same sub-mode, so use that.
+func selfExecutable(e *Env) (string, error) {
+	p, err := e.Executable()
+	if err != nil {
+		return "", fmt.Errorf("cannot locate the helper executable: %v", err)
+	}
+	return strings.TrimSuffix(p, " (deleted)"), nil
+}
+
+// TunUp spawns the embedded tun2socks detached (`<self> _tun2socks …`) and
+// installs the routing around it: a /32 to the node via the real gateway (so the
+// proxy's own traffic bypasses the tunnel), the two /1 halves (more specific
+// than the default route, so everything else enters the TUN), then the bypass
+// routes. Returns the engine's pid, which is also recorded in tun.state for
+// TunDown.
 func TunUp(ctx context.Context, e *Env, p TunUpParams) (int, error) {
 	if !guard.IsValidSocksAddr(p.SocksAddr) {
 		return 0, fmt.Errorf("invalid SOCKS address: %s", p.SocksAddr)
@@ -51,10 +64,8 @@ func TunUp(ctx context.Context, e *Env, p TunUpParams) (int, error) {
 	if !guard.IsValidInterfaceName(p.Iface) {
 		return 0, fmt.Errorf("invalid interface name: %s", p.Iface)
 	}
-	if !isExecutableFile(p.Bin) {
-		return 0, fmt.Errorf("tun2socks binary not found or not executable: %s", p.Bin)
-	}
-	if err := e.VerifyPin(p.Bin, "tun2socks"); err != nil {
+	self, err := selfExecutable(e)
+	if err != nil {
 		return 0, err
 	}
 	var bypass []string
@@ -65,7 +76,7 @@ func TunUp(ctx context.Context, e *Env, p TunUpParams) (int, error) {
 	}
 
 	var pid int
-	err := withLock(ctx, e, func() error {
+	err = withLock(ctx, e, func() error {
 		ip, err := tool(e, "ip")
 		if err != nil {
 			return err
@@ -73,9 +84,11 @@ func TunUp(ctx context.Context, e *Env, p TunUpParams) (int, error) {
 		// Clean up any previous state.
 		runQuiet(ctx, e, ip, "link", "delete", tunIface)
 
-		// -mtu is set at startup so the netstack advertises a proxy-safe MSS.
+		// The engine hardcodes device/mtu/loglevel; they ride on the argv so the
+		// process reads sensibly in `ps` and the pid-less fallback below can key
+		// on the `tun://sntl-tun` entry. -proxy is the one value it reads.
 		var spawnErr error
-		pid, spawnErr = e.Spawn([]string{p.Bin,
+		pid, spawnErr = e.Spawn([]string{self, "_tun2socks",
 			"-device", "tun://" + tunIface,
 			"-proxy", "socks5://" + p.SocksAddr,
 			"-mtu", tunMTU, "-loglevel", "silent"}, RunOpt{})
@@ -164,10 +177,15 @@ func TunDown(ctx context.Context, e *Env) error {
 // reapStrayTun2socks is the pid-less fallback when tun.state is gone (a crash, or
 // an upgrade that wiped /run). The bash helper did `pkill -f tun://sntl-tun`, a
 // match on process NAME that CLAUDE.md forbids everywhere else. Deviation 4: a
-// process is signalled only if its argv carries `tun://sntl-tun` as a WHOLE entry
-// AND its executable hashes to the tun2socks pin, so an unrelated process that
-// merely mentions the string in an argument is never touched.
+// process is signalled only if its executable IS this helper, its argv[1] is
+// `_tun2socks` and its argv carries `tun://sntl-tun` as a WHOLE entry, so an
+// unrelated process that merely mentions the string in an argument is never
+// touched.
 func reapStrayTun2socks(e *Env) {
+	self, err := selfExecutable(e)
+	if err != nil {
+		return
+	}
 	entries, err := os.ReadDir(e.path("/proc"))
 	if err != nil {
 		return
@@ -177,10 +195,12 @@ func reapStrayTun2socks(e *Env) {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if !procArgvHas(e, pid, "tun://"+tunIface) {
+		argv := procArgv(e, pid)
+		if len(argv) < 2 || argv[1] != "_tun2socks" || !argvHas(argv, "tun://"+tunIface) {
 			continue
 		}
-		if e.VerifyPin(e.path(fmt.Sprintf("/proc/%d/exe", pid)), "tun2socks") != nil {
+		exe, err := os.Readlink(e.path(fmt.Sprintf("/proc/%d/exe", pid)))
+		if err != nil || strings.TrimSuffix(exe, " (deleted)") != self {
 			continue
 		}
 		_ = e.Kill(pid, syscall.SIGTERM)
@@ -196,8 +216,8 @@ func procArgv(e *Env, pid int) []string {
 	return strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
 }
 
-func procArgvHas(e *Env, pid int, entry string) bool {
-	for _, a := range procArgv(e, pid) {
+func argvHas(argv []string, entry string) bool {
+	for _, a := range argv {
 		if a == entry {
 			return true
 		}

@@ -234,8 +234,9 @@ phase1() {
   # A deb shipping resources/linux/ with NO binaries in it passed every check
   # above (2026-09-02): electron-builder only WARNS on a missing extraResources
   # source. Assert the layout the two resolvers (vpn-manager, the helper's ops) read.
-  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]"  "tun2socks bundled + executable"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]" "tun2socks no longer vendored (embedded in the helper since 1.9.0)"
   check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
+  check "[ -f '/opt/Katacomb VPN/THIRD-PARTY-NOTICES.md' ]"         "Go module notices shipped beside THIRD-PARTY-LICENSES.md"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
   check "[ ! -e '/opt/Katacomb VPN/resources/daemon' ]"      "no Electron-run daemon bundle shipped (the helper is the daemon since 1.9.0)"
@@ -391,9 +392,21 @@ EOM
   read the FUSE mount; the app now stages the files through mkdtemp) and this is
   where it gets checked. Leave the app running until you press Enter.
 
+  THEN, still in the AppImage: connect a V2Ray, XRAY or Hysteria2 node in TUNNEL
+  mode (needs a funded wallet). This is the AppImage case the Go helper fixed:
+  root cannot read the FUSE mount, so the bash helper's `tun-up` was handed a
+  tun2socks path it could not execute and every child-proxy tunnel failed here.
+  The engine is compiled into the helper now and self-exec'd from /usr/local/bin.
+  PASS = `ip link show sntl-tun` exists and the page loads through the tunnel.
+  FAIL = "TUN interface did not appear" / "tun2socks binary not found".
+  (AmneziaWG is EXPECTED to still fail on the AppImage: awg-up hands root the
+  mount's awg-quick, until Phase 3.) Disconnect before you press Enter.
+
   Press Enter when done — the sysctl is restored to Mint's default either way.
 EOM
   read -r _
+  read -r -p "  Did the child-proxy tunnel come up on the AppImage (sntl-tun present, traffic flowing)? [y/N] " ans
+  case "$ans" in y|Y|yes|YES) ok "AppImage V2Ray/XRAY/Hysteria2 tunnel mode (embedded tun2socks, self-exec'd from /usr/local/bin)";; *) no "AppImage child-proxy tunnel mode (see the FAIL text above)";; esac
   local mnt; mnt="$(appimage_mount)"
   if [ -n "$mnt" ]; then
     check "! cat '$mnt/resources/linux/privileged/katacomb-vpn-helper' >/dev/null 2>&1" "root cannot read the AppImage FUSE mount (no allow_root) — why the helper is staged via mkdtemp"
@@ -450,8 +463,9 @@ fullcycle() {
   check "systemctl is-active --quiet katacomb-vpn-daemon"           "daemon active"
   check "systemctl is-enabled --quiet katacomb-vpn-daemon"          "daemon enabled at boot"
   check "[ ! -e /opt/katacomb-vpn ]"                                "/opt/katacomb-vpn symlink absent (dropped in 1.9.0)"
-  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]"  "tun2socks bundled + executable"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]" "tun2socks no longer vendored (embedded in the helper)"
   check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
+  check "[ -f '/opt/Katacomb VPN/THIRD-PARTY-NOTICES.md' ]"         "Go module notices shipped"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
   check "[ ! -e '/opt/Katacomb VPN/resources/daemon' ]"            "no Electron-run daemon bundle shipped"

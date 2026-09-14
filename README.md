@@ -385,8 +385,9 @@ the chain's, not the product's.
 
 GPL-3.0-or-later, see [LICENSE](LICENSE).
 
-The packages also ship six third-party executables (v2ray, tun2socks, xray, hysteria,
+The packages also ship five third-party executables (v2ray, xray, hysteria,
 amneziawg-go, awg/awg-quick), each a separate program under its own license, with the
-full text alongside it in `resources/linux/bin/`. Pinned versions, licenses and the
-GPL-2.0 source offer for `awg` are in
-[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+full text alongside it in `resources/linux/bin/`, and the privileged helper statically
+links the tun2socks engine and its dependencies (MIT, BSD-3-Clause, Apache-2.0), whose
+notices ship as `THIRD-PARTY-NOTICES.md`. Pinned versions, licenses and the GPL-2.0
+source offer for `awg` are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

@@ -86,6 +86,9 @@ type Env struct {
 	LookPath func(name string) (string, error)
 	// VerifyPin checks a file's SHA-256 against pins.go; fails closed on unknown names.
 	VerifyPin func(path, name string) error
+	// Executable is this helper's own path (os.Executable): tun-up self-execs it
+	// as `_tun2socks`, and the pid-less tun-down fallback matches against it.
+	Executable func() (string, error)
 	// Warn reports a non-fatal condition (the daemon's log, or stderr one-shot).
 	Warn func(msg string)
 }
@@ -100,8 +103,9 @@ func RealEnv() *Env {
 		Root:      "",
 		BinDir:    DebBinDir,
 		LookPath:  lookPathFixed,
-		VerifyPin: VerifyPin,
-		Warn:      func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) },
+		VerifyPin:  VerifyPin,
+		Executable: os.Executable,
+		Warn:       func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) },
 	}
 }
 

@@ -310,8 +310,13 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   (tab open and Retest) while the RPC state is `suspended`/`blocked`.
 - **Bound every wait.** RPC connects go through `withTimeout`; session-creating broadcasts
   go through `broadcastOrTimeout` and set a `timeoutHeight`. `provider-service.ts` is the
-  reference for the timeout pattern. (`node-tester.ts`'s `nodeFetch` timeout does NOT
-  cover the TCP connect — a blackholed node hangs past it — so wrap its callers.)
+  reference for the timeout pattern. (`node-tester.ts`'s `nodeFetch` now enforces ONE
+  deadline across DNS, TCP connect, TLS and body. It used to set only
+  `req.setTimeout`, a socket INACTIVITY timer that does not arm until the socket
+  connects, so a blackholed node hung past it: measured at >120s against an 8s budget,
+  and with the batch probe's `CONCURRENCY` of 3 that stalls a whole sweep. Three of the
+  four call sites already wrapped it in `withTimeout`; `probeNode` did not, which was
+  the live path. Those wraps stay as defence in depth but are no longer load-bearing.)
 - **Pin every node endpoint to an IPv4 literal, for EVERY protocol.** Nodes advertise
   themselves by hostname on chain (`remoteAddrs: ["helen.busur.cc:63115"]`), and two
   separate things break on that: the tunnel re-resolves it *through itself* (the v2ray

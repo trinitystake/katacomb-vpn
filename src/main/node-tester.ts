@@ -22,13 +22,29 @@ function nodeFetch(
     const isHttps = url.startsWith('https')
     const mod = isHttps ? https : http
     const options = isHttps ? { agent: agent ?? insecureAgent } : {}
+    // ONE deadline covering the whole request: DNS, TCP connect, TLS handshake
+    // and body. `req.setTimeout` alone is not enough — it is a socket INACTIVITY
+    // timer that does not arm until the socket is connected, so a blackholed node
+    // (SYN silently dropped, which is the common failure for a dead dVPN node)
+    // hangs past it until the OS connect timeout, measured at ~130s. With the
+    // batch probe's CONCURRENCY of 3, three such nodes stall a whole sweep.
+    // Callers may still wrap this in withTimeout; that stays as defence in depth,
+    // but it is no longer load-bearing.
+    let settled = false
+    let deadline: NodeJS.Timeout
+    const finish = (fn: () => void): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(deadline)
+      fn()
+    }
     const req = mod.get(url, options, (res) => {
       let data = ''
       res.on('data', (chunk: Buffer) => { data += chunk.toString() })
-      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }))
+      res.on('end', () => finish(() => resolve({ status: res.statusCode || 0, body: data })))
     })
-    req.on('error', reject)
-    req.setTimeout(timeoutMs, () => { req.destroy(new Error('Timeout')) })
+    req.on('error', (err) => finish(() => reject(err)))
+    deadline = setTimeout(() => { req.destroy(new Error('Timeout')) }, timeoutMs)
   })
 }
 

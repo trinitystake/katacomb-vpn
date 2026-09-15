@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,19 +22,18 @@ type rec struct {
 	*ops.Env
 	root  string
 	cmds  [][]string
-	pinOK bool
 }
 
 func newRec(t *testing.T) *rec {
 	t.Helper()
 	root := t.TempDir()
-	r := &rec{root: root, pinOK: true}
+	r := &rec{root: root}
 	link := func(name string) { _ = os.WriteFile(filepath.Join(root, "sys/class/net", name), nil, 0o644) }
 	r.Env = &ops.Env{
 		Run: func(_ context.Context, argv []string, _ ops.RunOpt) ([]byte, []byte, error) {
 			r.cmds = append(r.cmds, argv)
 			switch filepath.Base(argv[0]) {
-			case "wg-quick", "awg-quick":
+			case "wg-quick":
 				link("sntl0")
 			case "openvpn":
 				for i := 0; i+1 < len(argv); i++ {
@@ -55,28 +53,24 @@ func newRec(t *testing.T) *rec {
 			if len(argv) > 1 && argv[1] == "_tun2socks" {
 				link("sntl-tun")
 			}
+			if len(argv) > 1 && argv[1] == "_amneziawg" {
+				link("sntl0")
+			}
 			return 555, nil
 		},
 		Executable: func() (string, error) { return filepath.Join(root, "usr/local/bin/katacomb-vpn-helper"), nil },
 		Kill:     func(int, syscall.Signal) error { return syscall.ESRCH },
 		Sleep:    func(time.Duration) {},
 		Root:     root,
-		BinDir:   filepath.Join(root, "pinned"),
 		LookPath: func(name string) (string, error) { return name, nil },
-		VerifyPin: func(path, name string) error {
-			if r.pinOK {
-				return nil
-			}
-			return fmt.Errorf("%s failed SHA-256 integrity check", name)
-		},
 		Warn: func(string) {},
 	}
-	for _, d := range []string{"sys/class/net", "pinned", "usr/sbin", "etc"} {
+	for _, d := range []string{"sys/class/net", "usr/sbin", "etc"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, b := range []string{"pinned/tun2socks", "pinned/awg", "pinned/awg-quick", "pinned/amneziawg-go", "usr/sbin/openvpn"} {
+	for _, b := range []string{"usr/sbin/openvpn"} {
 		if err := os.WriteFile(filepath.Join(root, b), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -269,15 +263,26 @@ func TestUnknownOpIsRejected(t *testing.T) {
 	}
 }
 
-func TestAmneziawgUpUsesTheDaemonsOwnBinDir(t *testing.T) {
+// The daemon no longer hands root a bin dir: the AmneziaWG device is compiled in
+// and self-exec'd from the helper's own path, and the routing is done natively.
+func TestAmneziawgUpSelfExecsTheEmbeddedDevice(t *testing.T) {
 	r := newRec(t)
 	res := call(t, r, "amneziawg_up", cfgArgs(cleanAWG))
 	if !res.OK {
 		t.Fatalf("rejected: %s", res.Error)
 	}
-	want := filepath.Join(r.root, "pinned", "awg-quick") + " up " + filepath.Join(r.root, ops.RunDir, "sntl0.conf")
-	if got := r.lines(); len(got) != 1 || got[0] != want {
-		t.Fatalf("want [%s], got %v", want, got)
+	self := filepath.Join(r.root, "usr/local/bin/katacomb-vpn-helper")
+	conf := filepath.Join(r.root, ops.RunDir, "sntl0.conf")
+	if !r.has(self + " _amneziawg " + conf) {
+		t.Fatalf("the device must be our own binary self-exec'd as _amneziawg, got %v", r.lines())
+	}
+	if !r.has("ip -4 rule add not fwmark 51820 table 51820") {
+		t.Fatalf("the fwmark rule pair must be installed natively, got %v", r.lines())
+	}
+	for _, l := range r.lines() {
+		if strings.Contains(l, "awg-quick") || strings.Contains(l, filepath.Join(r.root, "pinned")) {
+			t.Fatalf("no vendored tool and no bin dir may ever be run: %q", l)
+		}
 	}
 }
 
@@ -285,15 +290,6 @@ func TestAmneziawgUpRejectsPostUp(t *testing.T) {
 	r := newRec(t)
 	evil := strings.Replace(cleanAWG, "Jc = 4", "PostUp = touch /tmp/pwned", 1)
 	if res := call(t, r, "amneziawg_up", cfgArgs(evil)); res.OK || len(r.cmds) != 0 {
-		t.Fatalf("got %+v %v", res, r.cmds)
-	}
-}
-
-func TestAmneziawgUpFailsClosedOnIntegrity(t *testing.T) {
-	r := newRec(t)
-	r.pinOK = false
-	res := call(t, r, "amneziawg_up", cfgArgs(cleanAWG))
-	if res.OK || !strings.Contains(res.Error, "integrity") || len(r.cmds) != 0 {
 		t.Fatalf("got %+v %v", res, r.cmds)
 	}
 }

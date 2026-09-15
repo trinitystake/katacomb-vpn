@@ -4,6 +4,7 @@
 //	katacomb-vpn-helper <verb> <args…>  pkexec one-shot; the argv contract the bash helper had
 //	katacomb-vpn-helper --version       the package version it was built for
 //	katacomb-vpn-helper _tun2socks …    hidden: the embedded tun2socks engine, self-exec'd by tun-up
+//	katacomb-vpn-helper _amneziawg …    hidden: the embedded AmneziaWG device, self-exec'd by awg-up
 //
 // Both entry modes end in the same internal/ops package, which is the trust
 // boundary: the socket is unauthenticated (any member of the katacomb-vpn group)
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"os"
 
+	"katacomb.vpn/daemon/internal/amneziawg"
 	"katacomb.vpn/daemon/internal/oneshot"
 	"katacomb.vpn/daemon/internal/ops"
 	"katacomb.vpn/daemon/internal/server"
@@ -30,6 +32,8 @@ func main() {
 		os.Exit(server.Run(ops.RealEnv()))
 	case len(args) >= 1 && args[0] == "_tun2socks":
 		os.Exit(tun2socks.Run(args[1:], os.Stderr))
+	case len(args) >= 1 && args[0] == "_amneziawg":
+		os.Exit(amneziawg.Run(args[1:], os.Stderr))
 	default:
 		os.Exit(oneshot.Run(args, ops.RealEnv(), os.Stdout, os.Stderr))
 	}

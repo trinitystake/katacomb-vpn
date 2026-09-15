@@ -2,7 +2,7 @@
 
 Katacomb VPN itself is **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
 
-The packages (`.deb`, AppImage) additionally ship five third-party executables under
+The packages (`.deb`, AppImage) additionally ship three third-party executables under
 `resources/linux/bin/`. Each is a **separate program**, executed as its own process;
 the application links none of their code. Their licenses apply to those files only, and
 the full text of each accompanies the binary in the same directory. The privileged
@@ -14,20 +14,18 @@ listed in their own section below.
 | `v2ray` | [v2fly/v2ray-core](https://github.com/v2fly/v2ray-core) | v5.47.0 | — | MIT | `LICENSE.v2ray` |
 | `xray` | [XTLS/Xray-core](https://github.com/XTLS/Xray-core) | v26.3.27 | `d2758a0` | MPL-2.0 | `LICENSE.xray` |
 | `hysteria` | [apernet/hysteria](https://github.com/apernet/hysteria) | app/v2.10.0 | `f2ad1de` | MIT | `LICENSE.hysteria` |
-| `amneziawg-go` | [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) | v0.0.20250522 | `1cc9427` | MIT | `LICENSE.amneziawg-go` |
-| `awg`, `awg-quick` | [amnezia-vpn/amneziawg-tools](https://github.com/amnezia-vpn/amneziawg-tools) | v1.0.20260618-2 | `61e7417` | GPL-2.0 | `LICENSE.amneziawg-tools` |
 
 Every one of these is SHA-256 pinned in [`src/main/binary-integrity.ts`](src/main/binary-integrity.ts):
-the app checks each before it runs or forwards it, and the privileged helper carries its
-own copy of the pins for the ones root runs (`daemon/internal/ops/pins.go`, whose test
-parses that file so the two cannot drift) and refuses a binary whose hash doesn't match.
+the app checks each before it spawns it. Root runs none of them — nor any other vendored
+binary: the tun2socks engine and the AmneziaWG device are compiled into the privileged
+helper (below), so the daemon has no pin table of its own.
 
 `openvpn`, `wireguard-tools` and `pkexec` are **not** bundled — they are declared as
 `.deb` dependencies and come from your distribution under its own packaging.
 
 ## Bundled shared library (AppImage)
 
-Unlike the five executables above, this one is **linked into the application process**,
+Unlike the three executables above, this one is **linked into the application process**,
 so its license governs distribution of the combined work rather than just the file.
 
 | Library | Upstream | Pinned version | License | Text |
@@ -53,13 +51,20 @@ it with their own build of alsa-lib by substituting the file.
 the app) statically links the tun2socks engine and its dependencies: the engine that
 used to ship as a separate `tun2socks` executable is compiled into the helper since
 1.9.0, so root runs it from `/usr/local/bin` instead of from a path it is handed (which
-on the AppImage was a FUSE mount root cannot read).
+on the AppImage was a FUSE mount root cannot read). The **AmneziaWG userspace device**
+(`amneziawg-go`, MIT) is linked the same way since Phase 3, replacing the three vendored
+`amneziawg-go` / `awg` / `awg-quick` executables. The `awg-quick(8)` behaviour around it
+(addresses, MTU, DNS via `resolvconf`, fwmark policy routing) is a reimplementation from
+the wg-quick(8) manual and the WireGuard cross-platform UAPI specification: no code from
+the GPL-2.0 `amneziawg-tools` is linked or translated, so no copyleft obligation remains
+from it.
 
 | Module | Pinned version | License |
 |---|---|---|
 | [xjasonlyu/tun2socks](https://github.com/xjasonlyu/tun2socks) | v2.6.0 | MIT |
+| [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (the AmneziaWG 2.0 device; the commit sentinel-dvpnx pins) | v0.2.19 (`1cc9427`) | MIT |
 | [gvisor](https://github.com/google/gvisor) (the userspace netstack) | v0.0.0-20250523182742-eede7a881b20 | Apache-2.0 |
-| `golang.org/x/{crypto,sys,time}` | see notices | BSD-3-Clause |
+| `golang.org/x/{crypto,net,sys,time}` | see notices | BSD-3-Clause |
 | `go.uber.org/{zap,atomic,multierr}`, `github.com/go-chi/*`, `github.com/google/*`, `github.com/gorilla/*`, `github.com/docker/go-units`, `github.com/ajg/form`, `github.com/go-gost/relay` | see notices | MIT / BSD-3-Clause / Apache-2.0 |
 
 The full licence text of every linked module, verbatim at the pinned version, is in
@@ -72,38 +77,16 @@ and the helper's own source is in this repository.
 
 ## Source code offer
 
-Three of the five binaries are vendored from an upstream release; two are built from
-source by this repository.
+All three binaries are vendored **verbatim** from their upstream release archives at the
+versions in the table; nothing shipped is built from source by this repository any more.
+`xray` is MPL-2.0, whose §3.2 source obligation is satisfied by the upstream release page
+for the pinned tag; `v2ray` and `hysteria` are MIT and carry no source obligation.
 
-**`awg` / `awg-quick` (GPL-2.0) and `amneziawg-go` (MIT)** are compiled here, not
-downloaded, by [`scripts/build-amneziawg.sh`](scripts/build-amneziawg.sh). That script
-*is* the complete corresponding source instruction: it clones each upstream repository
-at the commit pinned above and builds it (`amneziawg-go` statically with
-`CGO_ENABLED=0`, `awg` inside a `debian:bullseye` container so its glibc floor stays low
-enough for Debian 11+). Run it to reproduce the shipped binaries byte-for-byte:
-
-```bash
-./scripts/build-amneziawg.sh
-sha256sum resources/linux/bin/{amneziawg-go,awg,awg-quick}   # must match binary-integrity.ts and daemon/internal/ops/pins.go
-```
-
-The upstream sources themselves:
-
-```bash
-git clone https://github.com/amnezia-vpn/amneziawg-tools && git -C amneziawg-tools checkout 61e741780e8465a67a7d7fb6cffe14a8a15d624a
-git clone https://github.com/amnezia-vpn/amneziawg-go   && git -C amneziawg-go   checkout 1cc94272ca8e9e223a5fe76382f5880f09d3c12d
-```
-
-**As required by GPL-2.0 §3(b), the maintainers of this repository offer, for at least
-three years from the date of distribution, to supply a complete machine-readable copy of
-the corresponding source for `awg` and `awg-quick` — at no charge beyond the cost of
-physically performing the distribution — to anyone who asks.** In practice, use the
-commands above; they fetch the exact same source.
-
-**`v2ray`, `xray` and `hysteria`** are vendored verbatim from their upstream release
-archives at the versions in the table. `xray` is MPL-2.0, whose §3.2 source obligation
-is satisfied by the upstream release page for the pinned tag; the other two are MIT and
-carry no source obligation.
+The GPL-2.0 §3(b) source offer that used to accompany `awg` / `awg-quick` went with them:
+since Phase 3 the AmneziaWG device is the MIT `amneziawg-go` module linked into the
+helper (its licence text is in `daemon/THIRD-PARTY-NOTICES.md`), and nothing from the
+GPL-2.0 `amneziawg-tools` is distributed. The only remaining source obligations are
+`xray`'s MPL-2.0 §3.2 above and `libasound.so.2`'s LGPL-2.1 §6 in its own section.
 
 ## Runtime dependencies
 

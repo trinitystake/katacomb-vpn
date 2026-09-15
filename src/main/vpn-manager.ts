@@ -1,7 +1,7 @@
 import { execSync, execFileSync, spawn, type ChildProcess } from 'child_process'
 import { connect as netConnect } from 'node:net'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdtempSync, appendFileSync } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { tmpdir } from 'os'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
@@ -78,21 +78,6 @@ function resolveHysteria2Binary(): string {
   return resolveBundled('hysteria')
 }
 
-/**
- * Resolve the bundled AmneziaWG trio's directory. Unlike the child-proxy
- * binaries there is NO system-PATH fallback: awg-quick/awg/amneziawg-go run as
- * root via the helper, so an unverified substitute is never acceptable — missing
- * or tampered fails closed (the daemon's resolveAmneziaWgBinDir does the same).
- */
-function resolveAmneziaWgBinDir(): string {
-  for (const name of ['amneziawg-go', 'awg', 'awg-quick']) {
-    if (resolveBundled(name) === name) {
-      throw new Error('AmneziaWG binaries are missing from this build. Reinstall the app.')
-    }
-  }
-  return dirname(resolveBundled('amneziawg-go'))
-}
-
 const TUN_IFACE = 'sntl-tun'
 // OpenVPN gets its own interface rather than reusing sntl0: a userspace AmneziaWG
 // sntl0 is already `type tun`, so a third tun on that name would make adoption and
@@ -159,7 +144,9 @@ export function protocolRuntimeError(protocol: 'wireguard' | 'amneziawg' | 'v2ra
       return binaryExists('wg-quick') ? null : 'wg-quick is not installed. Install the wireguard-tools package.'
     }
     if (protocol === 'amneziawg') {
-      resolveAmneziaWgBinDir()
+      // The device is compiled into the privileged helper (Phase 3): nothing on the
+      // user side to resolve or verify. A missing resolvconf surfaces at connect as
+      // DNS_PROVISION_FAILED, which has its own retry.
       return null
     }
     if (protocol === 'openvpn') {
@@ -170,8 +157,7 @@ export function protocolRuntimeError(protocol: 'wireguard' | 'amneziawg' | 'v2ra
     if (!isBinaryAvailable(bin)) return `The ${bin} binary is missing from this build. Reinstall the app.`
     return null
   } catch (err) {
-    // resolveBundled throws on a failed integrity check, resolveAmneziaWgBinDir
-    // when the trio is missing — both are already user-facing messages.
+    // resolveBundled throws on a failed integrity check — already a user-facing message.
     return err instanceof Error ? err.message : 'Required VPN binaries are unavailable.'
   }
 }
@@ -721,10 +707,16 @@ export async function connectWireGuardFromConfig(raw: string): Promise<void> {
   activeConfigFile = configFile
 }
 
-/** Bring up AmneziaWG from a config file via the bundled awg-quick (helper verb) */
-async function bringUpAmneziaWg(configFile: string, binDir: string): Promise<void> {
+/**
+ * Bring up AmneziaWG via the helper's awg-up. The device is compiled into the helper
+ * and self-exec'd from /usr/local/bin, so root is never handed a binary path — which
+ * on the AppImage was a FUSE mount it could not read. The third argv slot used to be
+ * that bindir; it is accepted and ignored now (the tun-up `<bin>` precedent), so old
+ * and new helpers share one argv contract, and `-` is what fills it.
+ */
+async function bringUpAmneziaWg(configFile: string): Promise<void> {
   try {
-    await runPrivileged(['awg-up', configFile, binDir])
+    await runPrivileged(['awg-up', configFile, '-'])
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('dismissed') || msg.includes('cancelled') || msg.includes('Not authorized')) {
@@ -744,23 +736,20 @@ async function bringUpAmneziaWg(configFile: string, binDir: string): Promise<voi
 }
 
 export async function connectAmneziaWgFromConfig(raw: string): Promise<void> {
-  // Fail fast on missing/tampered bundled binaries before any tunnel state changes.
-  const binDir = resolveAmneziaWgBinDir()
-
   await ensureSntl0Down()
 
   // Rides the WG branch, so it has the WG endpoint problem too — same pin.
   const configString = pinWireguardEndpoint(raw, resolveHostToIPv4)
 
   // Node operators are untrusted: same PostUp/PreUp root-exec surface as
-  // wg-quick, guarded by the AWG-aware allow-list before awg-quick runs as root.
+  // wg-quick, guarded by the AWG-aware allow-list before the helper brings it up as root.
   assertSafeAmneziaWgConfig(configString)
 
   const configFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
   writeFileSync(configFile, configString, { mode: 0o600 })
 
   try {
-    await bringUpAmneziaWg(configFile, binDir)
+    await bringUpAmneziaWg(configFile)
   } catch (err) {
     if (existsSync(configFile)) unlinkSync(configFile)
     throw err

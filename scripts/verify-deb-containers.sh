@@ -19,8 +19,12 @@
 #     root:katacomb-vpn 0660 (the postinst created the group);
 #   - with NET_ADMIN and /dev/net/tun (granted to the container, never the host),
 #     `tun-up -` must bring sntl-tun up with the EMBEDDED tun2socks engine
-#     (self-exec'd from /usr/local/bin) and `tun-down` must remove it, on every
-#     image's userland.
+#     (self-exec'd from /usr/local/bin) and `tun-down` must remove it, and `awg-up`
+#     must bring sntl0 up with the EMBEDDED AmneziaWG device the same way (no peer
+#     is needed for the bring-up itself) and `awg-down` must remove it — on every
+#     image's userland. The container is started with src_valid_mark preset because
+#     /proc/sys is read-only under NET_ADMIN alone; the helper leaves a knob already
+#     at the wanted value untouched.
 # Nothing here touches the host. The deb's dependencies are downloaded into each
 # throwaway container, so expect a few minutes per image on the first run.
 set -uo pipefail
@@ -56,9 +60,10 @@ check "[ ! -e /opt/katacomb-vpn ]" "no /opt/katacomb-vpn symlink"
 check "[ ! -e \"/opt/Katacomb VPN/resources/linux/bin/tun2socks\" ]" "tun2socks not vendored (embedded in the helper)"
 check "[ -f \"/opt/Katacomb VPN/THIRD-PARTY-NOTICES.md\" ]" "Go module notices shipped"
 check "$H _tun2socks 2>&1 | grep -q \"^_tun2socks: -proxy must be\"" "_tun2socks refuses to start without a valid -proxy"
+check "$H _amneziawg 2>&1 | grep -q \"^_amneziawg: usage\"" "_amneziawg refuses to start without a config"
 check "[ ! -e \"/opt/Katacomb VPN/resources/daemon\" ]" "no Electron-run daemon bundle"
 check "[ ! -e \"/opt/Katacomb VPN/resources/linux/packaging\" ]" "packaging/ (fpm input) not shipped"
-check "[ -x \"/opt/Katacomb VPN/resources/linux/bin/awg-quick\" ]" "awg trio bundled"
+check "[ ! -e \"/opt/Katacomb VPN/resources/linux/bin/awg-quick\" ] && [ ! -e \"/opt/Katacomb VPN/resources/linux/bin/amneziawg-go\" ]" "awg trio not vendored (AmneziaWG device embedded in the helper)"
 check "getent group katacomb-vpn" "katacomb-vpn group created"
 check "[ -f /usr/share/polkit-1/actions/com.katacomb.vpn.policy ]" "polkit policy installed"
 check "[ -f /etc/systemd/system/katacomb-vpn-daemon.service ] || ! command -v systemctl" "unit installed when systemd is present"
@@ -83,6 +88,18 @@ if [ -n "$GW" ] && [ -e /dev/net/tun ]; then
   sleep 0.3
   check "[ ! -e /sys/class/net/sntl-tun ]" "sntl-tun gone after tun-down"
   check "! ps -o args= -C katacomb-vpn-helper | grep -q _tun2socks" "engine process gone after tun-down"
+  printf "%s\n" "[Interface]" "Address = 10.8.0.5/32" "PrivateKey = cHJpdmF0ZSBrZXkgcHJpdmF0ZSBrZXkgcHJpdmF0ZSE=" "Jc = 4" "Jmin = 128" "Jmax = 800" "S1 = 15" "S2 = 40" "S3 = 20" "S4 = 10" "H1 = 1234567891" "H2 = 987654321" "H3 = 246813579" "H4 = 1357924680" "" "[Peer]" "PublicKey = aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5ISE=" "AllowedIPs = 0.0.0.0/0" "Endpoint = 203.0.113.7:51820" > /tmp/sntl0.conf
+  if $H awg-up /tmp/sntl0.conf - >/tmp/awgup.log 2>&1; then ok "awg-up - brings up the embedded AmneziaWG device"; else no "awg-up failed: $(cat /tmp/awgup.log)"; fi
+  check "[ -e /sys/class/net/sntl0 ]" "sntl0 exists"
+  check "ip -d link show sntl0 | grep -q \"tun type tun\"" "sntl0 is a userspace tun"
+  check "ps -o args= -C katacomb-vpn-helper | grep -q \"_amneziawg /run/katacomb-vpn/sntl0.conf\"" "the device runs as <helper> _amneziawg <root-owned conf>"
+  check "ip rule show | grep -q \"lookup 51820\"" "fwmark rule pair installed"
+  check "ip route show table 51820 | grep -q sntl0" "default route in table 51820"
+  check "$H awg-down" "awg-down"
+  sleep 0.3
+  check "[ ! -e /sys/class/net/sntl0 ]" "sntl0 gone after awg-down"
+  check "! ip rule show | grep -q \"lookup 51820\"" "rule pair gone after awg-down"
+  check "! ps -o args= -C katacomb-vpn-helper | grep -q _amneziawg" "device process gone after awg-down"
 else
   echo "  ....  no default route or /dev/net/tun in this container, tun-up skipped"
 fi
@@ -93,7 +110,7 @@ printf "\n%s: %d passed, %d failed\n" "$IMAGE" "$pass" "$fail"
 overall=0
 for img in "${IMAGES[@]}"; do
   printf '\n\033[1m== %s ==\033[0m\n' "$img"
-  if docker run --rm --cap-add NET_ADMIN --device /dev/net/tun -e IMAGE="$img" -e VERSION="$VERSION" -v "$DEB:/tmp/app.deb:ro" "$img" bash -c "$INNER"; then
+  if docker run --rm --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv4.conf.all.src_valid_mark=1 -e IMAGE="$img" -e VERSION="$VERSION" -v "$DEB:/tmp/app.deb:ro" "$img" bash -c "$INNER"; then
     :
   else
     overall=1

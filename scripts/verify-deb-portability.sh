@@ -235,7 +235,7 @@ phase1() {
   # above (2026-09-02): electron-builder only WARNS on a missing extraResources
   # source. Assert the layout the two resolvers (vpn-manager, the helper's ops) read.
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]" "tun2socks no longer vendored (embedded in the helper since 1.9.0)"
-  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]" "awg trio no longer vendored (AmneziaWG device embedded since Phase 3)"
   check "[ -f '/opt/Katacomb VPN/THIRD-PARTY-NOTICES.md' ]"         "Go module notices shipped beside THIRD-PARTY-LICENSES.md"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"
@@ -399,8 +399,9 @@ EOM
   The engine is compiled into the helper now and self-exec'd from /usr/local/bin.
   PASS = `ip link show sntl-tun` exists and the page loads through the tunnel.
   FAIL = "TUN interface did not appear" / "tun2socks binary not found".
-  (AmneziaWG is EXPECTED to still fail on the AppImage: awg-up hands root the
-  mount's awg-quick, until Phase 3.) Disconnect before you press Enter.
+  AmneziaWG is expected to WORK here too since Phase 3: the device is compiled into
+  the helper and self-exec'd from /usr/local/bin, so root is never handed a path on
+  the mount. Try an AmneziaWG connect as well. Disconnect before you press Enter.
 
   Press Enter when done — the sysctl is restored to Mint's default either way.
 EOM
@@ -464,7 +465,7 @@ fullcycle() {
   check "systemctl is-enabled --quiet katacomb-vpn-daemon"          "daemon enabled at boot"
   check "[ ! -e /opt/katacomb-vpn ]"                                "/opt/katacomb-vpn symlink absent (dropped in 1.9.0)"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/bin/tun2socks' ]" "tun2socks no longer vendored (embedded in the helper)"
-  check "[ -x '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]"  "awg-quick bundled + executable"
+  check "[ ! -e '/opt/Katacomb VPN/resources/linux/bin/awg-quick' ]" "awg trio no longer vendored (AmneziaWG device embedded since Phase 3)"
   check "[ -f '/opt/Katacomb VPN/THIRD-PARTY-NOTICES.md' ]"         "Go module notices shipped"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/v2ray' ]"        "obsolete v2ray/ dir absent"
   check "[ ! -e '/opt/Katacomb VPN/resources/linux/packaging' ]"    "packaging/ (fpm input) not shipped"

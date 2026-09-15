@@ -18,18 +18,17 @@ type rec struct {
 	*ops.Env
 	root  string
 	cmds  [][]string
-	pinOK bool
 }
 
 func newRec(t *testing.T) *rec {
 	t.Helper()
 	root := t.TempDir()
-	r := &rec{root: root, pinOK: true}
+	r := &rec{root: root}
 	link := func(name string) { _ = os.WriteFile(filepath.Join(root, "sys/class/net", name), nil, 0o644) }
 	r.Env = &ops.Env{
 		Run: func(_ context.Context, argv []string, _ ops.RunOpt) ([]byte, []byte, error) {
 			r.cmds = append(r.cmds, argv)
-			if b := filepath.Base(argv[0]); b == "wg-quick" || b == "awg-quick" {
+			if filepath.Base(argv[0]) == "wg-quick" {
 				link("sntl0")
 			}
 			return nil, nil, nil
@@ -39,29 +38,20 @@ func newRec(t *testing.T) *rec {
 			if len(argv) > 1 && argv[1] == "_tun2socks" {
 				link("sntl-tun")
 			}
+			if len(argv) > 1 && argv[1] == "_amneziawg" {
+				link("sntl0")
+			}
 			return 777, nil
 		},
 		Executable: func() (string, error) { return filepath.Join(root, "usr/local/bin/katacomb-vpn-helper"), nil },
 		Kill:     func(int, syscall.Signal) error { return nil },
 		Sleep:    func(time.Duration) {},
 		Root:     root,
-		BinDir:   filepath.Join(root, "pinned"),
 		LookPath: func(name string) (string, error) { return name, nil },
-		VerifyPin: func(path, name string) error {
-			if r.pinOK {
-				return nil
-			}
-			return fmt.Errorf("%s failed SHA-256 integrity check", name)
-		},
 		Warn: func(string) {},
 	}
-	for _, d := range []string{"sys/class/net", "pinned", "etc", "cfg"} {
+	for _, d := range []string{"sys/class/net", "etc", "cfg"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, b := range []string{"pinned/tun2socks", "pinned/awg", "pinned/awg-quick", "pinned/amneziawg-go"} {
-		if err := os.WriteFile(filepath.Join(root, b), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -251,7 +241,11 @@ func TestDnsSetAllowListAppliesOneShotToo(t *testing.T) {
 	}
 }
 
-func TestAwgUpTakesTheBindirFromArgv(t *testing.T) {
+// `awg-up <config> <bindir>` keeps its argv shape, but the bindir is accepted and
+// IGNORED: the AmneziaWG device is compiled in and self-exec'd from the helper's
+// own path, so root never runs a binary it was handed. The device is given our
+// root-owned /run copy of the config (deviation 6), never the caller's path.
+func TestAwgUpIgnoresTheBindirAndSelfExecsTheDevice(t *testing.T) {
 	r := newRec(t)
 	awg, _ := os.ReadFile("../guard/testdata/corpus/amneziawg/minimal.conf")
 	p := writeCfg(t, r, "sntl0.conf", string(awg))
@@ -259,11 +253,22 @@ func TestAwgUpTakesTheBindirFromArgv(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("%s", errs)
 	}
-	if !strings.HasPrefix(r.lines(), filepath.Join(r.root, "pinned", "awg-quick")+" up ") {
-		t.Fatalf("got %q", r.lines())
+	ours := filepath.Join(r.root, "run/katacomb-vpn/sntl0.conf")
+	if !strings.Contains(r.lines(), "usr/local/bin/katacomb-vpn-helper _amneziawg "+ours) {
+		t.Fatalf("the device must be our own binary handed the root-owned copy, got %q", r.lines())
 	}
-	if code, _, errs := runVerb(t, r, "awg-up", p, filepath.Join(r.root, "cfg")); code != 1 || !strings.Contains(errs, "missing from bin dir") {
-		t.Fatalf("code=%d stderr=%q", code, errs)
+	if strings.Contains(r.lines(), "_amneziawg "+p) {
+		t.Fatalf("the caller's path must never reach the device (read once, deviation 6): %q", r.lines())
+	}
+	if !strings.Contains(r.lines(), "ip link set mtu ") {
+		t.Fatalf("the native bring-up must set the MTU and bring the link up, got %q", r.lines())
+	}
+	if strings.Contains(r.lines(), "awg-quick") || strings.Contains(r.lines(), filepath.Join(r.root, "pinned")) {
+		t.Fatalf("no vendored tool and no bin dir may ever be run: %q", r.lines())
+	}
+	// A bindir that does not exist is fine too: the slot is ignored, not validated.
+	if code, _, errs := runVerb(t, r, "awg-up", p, filepath.Join(r.root, "does-not-exist")); code != 0 {
+		t.Fatalf("a bogus bindir must be ignored, code=%d stderr=%q", code, errs)
 	}
 }
 

@@ -39,6 +39,7 @@ const (
 	wgConfName          = "sntl0.conf"
 	ovpnConfName        = "openvpn.conf"
 	tunStateName        = "tun.state"
+	awgStateName        = "awg.state" // the embedded AmneziaWG device's pid, for awg-down
 	ovpnPidName         = "openvpn.pid"
 	ovpnLogName         = "openvpn.log"
 	killswitchStateName = "killswitch.state"

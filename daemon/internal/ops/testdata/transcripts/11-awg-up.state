@@ -1,5 +1,0 @@
-/run/katacomb-vpn/ mode=700
-/var/lib/katacomb-vpn/ mode=700
-/etc/resolv.conf mode=644
-  nameserver 10.0.0.53
-  search example.test

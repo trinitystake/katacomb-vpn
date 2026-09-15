@@ -4,7 +4,9 @@
 // door it came through, because neither door authenticates the caller as this app.
 //
 // Each verb is a line-for-line port of the bash helper it replaced
-// (resources/linux/privileged/katacomb-vpn-helper.sh, in git history). The exact
+// (resources/linux/privileged/katacomb-vpn-helper.sh, in git history) — except
+// awg-up/awg-down, since Phase 3 a behavioural reimplementation of wg-quick(8)
+// around the embedded AmneziaWG device (amneziawg.go, amneziawg_ops_test.go). The exact
 // external command lines — iptables rule order, tun2socks routes, openvpn's argv
 // after --config, cleanup_wg_rules' scoping — are pinned by
 // testdata/transcripts/, captured from the bash helper by
@@ -31,10 +33,6 @@ const (
 	// ChildPath is the ONLY PATH a child process ever sees (deviation 7): never the
 	// caller's, since the caller is a pkexec'd user or an unauthenticated socket.
 	ChildPath = "/usr/sbin:/usr/bin:/sbin:/bin"
-	// DebBinDir is where the deb installs the SHA-pinned bundled binaries. The
-	// daemon only exists on the deb, so daemon mode hardcodes it; one-shot callers
-	// pass their own (and the pins are checked either way).
-	DebBinDir = "/opt/Katacomb VPN/resources/linux/bin"
 	// OpTimeout bounds one verb: the budget the client's request timer and the old
 	// daemon's execFileSync both used.
 	OpTimeout = 60 * time.Second
@@ -42,10 +40,10 @@ const (
 
 // RunOpt carries the per-command options a verb can set.
 type RunOpt struct {
-	// PathPrefix is prepended to ChildPath. awg-up sets it to the verified bindir
-	// so awg-quick's bare-name calls to `awg` and `amneziawg-go` find the pinned
-	// trio and nothing else.
-	PathPrefix string
+	// Stdin, when non-nil, is written to the child's stdin: `resolvconf -a` takes
+	// its nameserver lines there and `nft -f -` its ruleset. The Env records it in
+	// tests so the payload is asserted, not just the argv.
+	Stdin []byte
 }
 
 // ExitError is a tool that ran and failed. Error() folds its stderr in VERBATIM:
@@ -80,12 +78,8 @@ type Env struct {
 	// Root prefixes every absolute path the verbs touch (/run, /var/lib, /etc,
 	// /sys, /proc, the openvpn allow-list). "" in production; a temp dir in tests.
 	Root string
-	// BinDir is where daemon mode finds the pinned bundled binaries (DebBinDir).
-	BinDir string
 	// LookPath resolves a tool name against ChildPath, never the caller's PATH.
 	LookPath func(name string) (string, error)
-	// VerifyPin checks a file's SHA-256 against pins.go; fails closed on unknown names.
-	VerifyPin func(path, name string) error
 	// Executable is this helper's own path (os.Executable): tun-up self-execs it
 	// as `_tun2socks`, and the pid-less tun-down fallback matches against it.
 	Executable func() (string, error)
@@ -101,20 +95,17 @@ func RealEnv() *Env {
 		Kill:      syscall.Kill,
 		Sleep:     time.Sleep,
 		Root:      "",
-		BinDir:    DebBinDir,
 		LookPath:  lookPathFixed,
-		VerifyPin:  VerifyPin,
 		Executable: os.Executable,
 		Warn:       func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) },
 	}
 }
 
-func childEnv(opt RunOpt) []string {
-	path := ChildPath
-	if opt.PathPrefix != "" {
-		path = opt.PathPrefix + ":" + path
-	}
-	return []string{"PATH=" + path, "HOME=/root"}
+// childEnv is the fixed environment every child gets (deviation 7): never the
+// caller's PATH under root. Since Phase 3 nothing is ever prefixed onto it — the
+// last thing that was (awg-up's bindir) no longer exists.
+func childEnv(RunOpt) []string {
+	return []string{"PATH=" + ChildPath, "HOME=/root"}
 }
 
 // realRun: foreground, bounded by ctx. On cancel the child gets SIGTERM (what
@@ -124,6 +115,9 @@ func childEnv(opt RunOpt) []string {
 func realRun(ctx context.Context, argv []string, opt RunOpt) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = childEnv(opt)
+	if opt.Stdin != nil {
+		cmd.Stdin = bytes.NewReader(opt.Stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }

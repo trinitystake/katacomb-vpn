@@ -124,7 +124,9 @@ var errInvalidPath = errors.New("invalid config path")
 
 // readConfig reads a caller-supplied config path once, safely (see the package
 // comment). requiredIface, when set, is the interface the file name must encode
-// (`sntl0.conf`), because wg-quick/awg-quick derive the interface from it.
+// (`sntl0.conf`): wg-quick derives the interface from it, and awg-up keeps the same
+// contract since Phase 3 embedded the device (which hardcodes sntl0), so a caller
+// that names the file anything else is confused about what it is configuring.
 func readConfig(path, requiredIface string) ([]byte, error) {
 	if path == "" || !strings.HasSuffix(path, ".conf") {
 		return nil, errInvalidPath

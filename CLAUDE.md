@@ -76,7 +76,7 @@ Strict Electron security isolation with three process boundaries:
   group; its `keepSeed` is only valid when that group is the last thing stored, because
   `retainedSeedId` can only hold a seed while zero wallets exist.
 - `chain-service.ts`: `SigningSentinelClient` for on-chain tx (node subscription via `nodeStartSession`), session ID extraction from tx events, cryptographic handshake with nodes (WireGuard/V2Ray branching). Session configs saved to disk for reconnect.
-- `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled child-proxy binaries (v2ray, xray, hysteria) verified via SHA-256 before use, with system PATH fallback. tun2socks is no longer a binary: the engine is compiled into the privileged helper (`daemon/internal/tun2socks`), and `tun-up` self-execs it.
+- `vpn-manager.ts`: V2Ray child process lifecycle, WireGuard via polkit helper, tun2socks TUN routing for V2Ray, connection status monitoring. Bundled child-proxy binaries (v2ray, xray, hysteria) verified via SHA-256 before use, with system PATH fallback. tun2socks is no longer a binary: the engine is compiled into the privileged helper (`daemon/internal/tun2socks`), and `tun-up` self-execs it. Likewise the AmneziaWG userspace device (`daemon/internal/amneziawg`), which `awg-up` self-execs: root runs no vendored binary any more.
 - `ipc-handlers.ts`: all IPC channels (registered via a `handle()` wrapper that rejects calls from any frame that isn't our own renderer), pre-connect balance validation, node list fetch from `api.sentnodes.com/v2/nodes` via `net.fetch`, auto-reconnect + a WireGuard liveness monitor. Caches balance/sessions/nodes when VPN is active (RPC unreachable through tunnel).
 - `config-guard.ts`: **pure validators for untrusted-node data** — `assertSafeWireguardConfig` (allow-list keys, reject `PostUp`/`PreUp`/… so a node config can't run shell as root via `wg-quick`), `assertSafeV2RayConfig`, `isAllowedBypassCidr`/`sanitizeBypassRoutes` (reject `0.0.0.0/x` split-tunnel routes), `extractWireguardEndpointHost`. Unit-tested; see the node-trust invariant below.
 - `fs-utils.ts`: `writeFileAtomic(path, data, mode=0o600)` (temp + rename). Use it for all settings/wallet/session/cache writes — never `writeFileSync` directly for persisted state.
@@ -118,14 +118,18 @@ inside the package):
 - `resources/linux/privileged/com.katacomb.vpn.policy` — polkit policy for cached auth (pins that path)
 - `resources/linux/privileged/katacomb-vpn-daemon.service` — systemd unit, `ExecStart=/usr/local/bin/katacomb-vpn-helper daemon`
 - `resources/linux/packaging/postinstall.sh` — deb postinstall that deploys the helper + policy + unit
-- One binary, four entry modes: `katacomb-vpn-helper daemon` (systemd; serves protocol
+- One binary, five entry modes: `katacomb-vpn-helper daemon` (systemd; serves protocol
   v1 on the socket), `katacomb-vpn-helper <verb> <args…>` (the pkexec one-shot, the argv
   contract below), `katacomb-vpn-helper --version`, and the hidden
   `katacomb-vpn-helper _tun2socks …` (the embedded tun2socks engine, which `tun-up`
   self-execs detached; every engine field is hardcoded except `-proxy`, and the
-  engine's own flag parser and `TUNPreUp`/`TUNPostUp` shell hooks are never reached).
+  engine's own flag parser and `TUNPreUp`/`TUNPostUp` shell hooks are never reached),
+  and the hidden `katacomb-vpn-helper _amneziawg <config>` (the embedded AmneziaWG
+  userspace device — `amneziawg-go` at the commit the Sentinel nodes pin — which
+  `awg-up` self-execs detached; it reads the root-owned `/run/katacomb-vpn/sntl0.conf`,
+  translates the wg(8) INI to the WireGuard UAPI itself and never opens a UAPI socket).
   An unknown verb prints the usage line and exits 1.
-- Helper verbs: `up <config>`, `down`, `awg-up <config> <bindir>`, `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface> [bypass]` (`<bin>` is accepted and IGNORED since the engine is embedded; the slot stays so old and new apps share one argv contract, and the app passes `-`), `tun-down`, `killswitch-on <iface> <host> [dns] [lan-sharing]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
+- Helper verbs: `up <config>`, `down`, `awg-up <config> <bindir>` (`<bindir>` is accepted and IGNORED since the AmneziaWG device is embedded — the same convention as `tun-up`'s `<bin>`; the app passes `-`), `awg-down`, `ovpn-up <config>`, `ovpn-down`, `tun-up <bin> <socks> <remote> <gw> <iface> [bypass]` (`<bin>` is accepted and IGNORED since the engine is embedded; the slot stays so old and new apps share one argv contract, and the app passes `-`), `tun-down`, `killswitch-on <iface> <host> [dns] [lan-sharing]`, `killswitch-off`, `dns-set <ip>`, `dns-restore`
 - WireGuard/AmneziaWG interface: `sntl0`. tun2socks: `sntl-tun`. OpenVPN: `sntl-ovpn`.
 
 ### Privileged daemon (deb) vs. pkexec fallback (AppImage/dev)
@@ -181,8 +185,7 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   helper validated the caller's path and let wg-quick re-open it — a TOCTOU, and with a
   validator that echoed the line, a symlink to `/etc/shadow` was a root file-read
   oracle); **guard errors carry a line number and a reason word, never content**;
-  children get a FIXED `PATH=/usr/sbin:/usr/bin:/sbin:/bin` (the verified bindir first
-  for `awg-up`); every state-changing verb takes `flock(/run/katacomb-vpn/.lock)` in
+  children get a FIXED `PATH=/usr/sbin:/usr/bin:/sbin:/bin`; every state-changing verb takes `flock(/run/katacomb-vpn/.lock)` in
   BOTH modes (the daemon's mutex cannot see postrm's one-shot teardown or a pkexec
   fallback racing it); a timeout SIGTERMs the child and detached children are reaped by
   a goroutine; `status` and the link polls read `/sys/class/net/<iface>` instead of
@@ -193,7 +196,7 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   wiped `tun.state`/`openvpn.pid`, so the next `tun-down` found no pid and no remote
   host and left the `/32` and bypass routes behind. `KillMode` is untouched: an upgrade
   while connected still SIGTERMs the daemon's detached children (tun2socks,
-  `openvpn --daemon`, `amneziawg-go`), so only kernel WireGuard survives one —
+  `openvpn --daemon`, the embedded AmneziaWG device), so only kernel WireGuard survives one —
   pre-existing, and a separate decision.
 - **Install the helper through a temp name + `mv -f`** (postinstall and
   `ensurePolkitSetup`'s pkexec script): the daemon now runs FROM
@@ -986,31 +989,54 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   the client generates them (Jc [3,10], Jmin [64,256], Jmax [512,1024], the SDK's
   own defaults). Constraint re-checks (S1+56≠S2; H1-H4 all-zero or all distinct >4;
   I1-I5 tag grammar) throw → refund.
-- Three bundled binaries in `resources/linux/bin/` — **`amneziawg-go`, `awg`,
-  `awg-quick`** — built from source by `scripts/build-amneziawg.sh` at the exact
-  commits the upstream node pins (no prebuilt amneziawg-go exists anywhere), SHA-pinned incl.
-  the root-run awg-quick bash script. **No system-PATH fallback — root-run binaries
-  fail closed** (both `vpn-manager.resolveAmneziaWgBinDir` and the daemon's).
-  **Never build these natively** — they are the only shipped binaries we compile,
-  so they are the only ones that can inherit the maintainer's glibc. A native
-  build on Ubuntu 24.04 rewrites `strtoul`/`strtoll` into `__isoc23_*`, pinning
-  `awg` to GLIBC_2.38 and making it fail to load on Debian 12 (2.36) and Ubuntu
-  22.04 (2.35) — with no fallback, per the fail-closed rule above. The script
-  therefore builds `amneziawg-go` with `CGO_ENABLED=0` (fully static) and `awg`
-  inside `debian:bullseye` (glibc 2.31), then asserts the resulting floor so a
-  toolchain bump can't regress it silently.
-- Helper verbs `awg-up <config> <bindir>` / `awg-down`; daemon ops `amneziawg_up` /
-  `amneziawg_down` (additive — no protocol-version bump); `guard.AssertAmneziaWgConfig`
-  in `daemon/` is the root-side mirror of `assertSafeAmneziaWgConfig` (allow-list = WG
-  keys + jc/jmin/jmax/s1-s4/h1-h4/i1-i5; PostUp/PreUp still rejected — awg-quick
-  executes them as root identically), pinned to it by the shared corpus.
-- **The tunnel reuses iface `sntl0`** (awg-quick derives it from the config
-  filename) so kill switch, `/proc/net/dev` traffic stats, the WG liveness monitor
-  and daemon status work unchanged — BUT a userspace AWG `sntl0` is `type tun`, not
-  `type wireguard`, so every "sntl0 ⇒ kernel WG" assumption branches on
+- **No vendored binaries since Phase 3.** The userspace device is
+  `github.com/amnezia-vpn/amneziawg-go` **linked into the helper** as the hidden
+  `_amneziawg` sub-mode (`daemon/internal/amneziawg`), self-exec'd by `awg-up` from
+  `/usr/local/bin` exactly like `_tun2socks` — which is what made AmneziaWG work on the
+  AppImage, where root cannot read the FUSE mount the old `awg-quick`/`awg`/
+  `amneziawg-go` trio lived on. It reads the root-owned `/run/katacomb-vpn/sntl0.conf`,
+  translates the wg(8) INI to the WireGuard UAPI itself (`ToUAPI`: base64 keys → hex,
+  jc/jmin/jmax/s1-s4/h1-h4/i1-i5 passthrough, `fwmark=51820` injected) and never opens
+  a UAPI socket. The `awg-quick(8)` work around it — addresses, MTU (route MTU − 80),
+  DNS via an exec of `resolvconf -a sntl0`, the fwmark rule pair + `/0` route in table
+  51820, `src_valid_mark=1` — is a **behavioural reimplementation from wg-quick(8) and
+  the UAPI spec** in `daemon/internal/ops/amneziawg.go`, never a port: `amneziawg-tools`
+  is GPL-2.0-only and nothing from it is linked or translated, so the project's only
+  copyleft obligation went with the trio. Deliberate deviations: no anti-spoof nft
+  firewall (the tun2socks path never had one; validated by a real handshake), IPv6
+  routing best-effort, the kernel `amneziawg` module never tried.
+- **The `amneziawg-go` pin tracks `sentinel-dvpnx`'s `AMNEZIAWG_GO_COMMIT`, never
+  upstream latest** (today `1cc9427` = `v0.2.19` = **AmneziaWG 2.0**, the protocol every
+  node speaks; verify against dvpnx's `Dockerfile` before any bump). AmneziaWG 3.x
+  (`v3.0.0`+, upstream HEAD `v3.1.x`) is a **wire-protocol break** — `header_protection_key`
+  replaces the static H1–H4, plus random trailers/padding and randomized timers — so a
+  3.x client cannot handshake with a 2.0 node; a network move is node-led (go-sdk
+  `ServerMetadata` → dvpnx pin → our `amneziawg-config.ts` → the guard corpus →
+  `ToUAPI` → `go.mod`). The Go module proxy lists phantom `v1.0.x` tags that are not in
+  the repo; ignore them.
+- **`scripts/verify-awg-handshake.sh` is the acceptance test**: two containers, the
+  server built from the dvpnx-pinned upstream commits under the real `awg-quick`, the
+  client our helper's `awg-up`; ICMP+HTTP through the tunnel proves the translation and
+  the routing (28 checks, with and without DNS). A wrong `ToUAPI` shows up there as "no
+  handshake" and nowhere else. `amneziawg_ops_test.go` pins the native command sequence
+  against the recording Env (an authored test, not a bash golden: awg-quick's firewall
+  goes through process substitution and is unobservable in an argv transcript).
+- Helper verbs `awg-up <config> <bindir>` / `awg-down` — **`<bindir>` is accepted and
+  IGNORED** (the `tun-up <bin>` convention; the app passes `-`) so old and new helpers
+  share one argv contract; daemon ops `amneziawg_up` / `amneziawg_down` (additive — no
+  protocol-version bump); `guard.AssertAmneziaWgConfig` in `daemon/` is the root-side
+  mirror of `assertSafeAmneziaWgConfig` (allow-list = WG keys + jc/jmin/jmax/s1-s4/
+  h1-h4/i1-i5; PostUp/PreUp still rejected — a hook line is a root-shell vector whatever
+  consumes the file), pinned to it by the shared corpus. `awg-down` SIGTERMs the pid in
+  `awg.state` (else a `/proc` scan matching only our own `_amneziawg` process), deletes
+  the link, repairs the rule pair via `cleanupWgRules`, undoes `resolvconf -d`.
+- **The tunnel reuses iface `sntl0`** so kill switch, `/proc/net/dev` traffic stats, the
+  WG liveness monitor and daemon status work unchanged — BUT a userspace AWG `sntl0` is
+  `type tun`, not `type wireguard`, so every "sntl0 ⇒ kernel WG" assumption branches on
   `sntl0IsKernelWireGuard()` (teardown via `ensureSntl0Down`, adoption, status,
-  `detectOtherVpn` exclusion). DNS is owned by awg-quick (resolvconf) like wg-quick
-  — no `dns-set`, no DoH.
+  `detectOtherVpn` exclusion). DNS is provisioned through `resolvconf` like wg-quick —
+  no `dns-set`, no DoH — and a missing `resolvconf` still fails the bring-up with the
+  `/resolvconf/i` text that drives `DNS_PROVISION_FAILED`.
 
 **OpenVPN** (type 3) also rides the **root/privileged path** (`isChildProxy` must never
 include it). The wire shape is identical at go-sdk master and the commit node v8.3.1
@@ -1597,8 +1623,7 @@ AppImage user including the ones it works for today, to rescue hosts that have n
 graphics stack to run a GUI on regardless. `libasound` has no such coupling and the app
 never plays audio; it only needs the symbols to resolve, which is also what makes it
 immune to Ubuntu's partial OSS4 shim. Vendored **from a `debian:bookworm` container**,
-never from the maintainer's desktop, for the reason `scripts/build-amneziawg.sh` builds
-in one: a native copy inherits this machine's glibc and would refuse to load on older
+never from the maintainer's desktop: a native copy inherits this machine's glibc and would refuse to load on older
 targets (floor is GLIBC_2.34; re-check on any refresh). It is LGPL-2.1, so unlike the
 five executables it is *linked into* the process and carries a source offer in
 `THIRD-PARTY-LICENSES.md` — keep that entry in step if the file is ever refreshed.
@@ -1636,9 +1661,15 @@ the staging away), and then remove both files again so the deb phases keep their
 slate. Anything else in main that ever hands a resource path to `pkexec`, `sudo`, or the
 daemon inherits this: copy it out first. `tun-up` no longer does: the tun2socks engine is
 compiled into the helper, which self-execs from `/usr/local/bin`, so AppImage
-V2Ray/XRAY/Hysteria2 tunnel mode works there. `awg-up <bindir>` still hands root the
-mount's `awg-quick`, so AmneziaWG stays broken on the AppImage until it is reimplemented
-natively (Phase 3 of the daemon rewrite; not started).
+V2Ray/XRAY/Hysteria2 tunnel mode works there. `awg-up` no longer does either: since
+Phase 3 the AmneziaWG device is compiled into the helper (`_amneziawg`, self-exec'd from
+`/usr/local/bin`), so all six protocols work on the AppImage. The preflight guard that
+refused AmneziaWG there (added 2026-09-14 after session 61449769 paid for a tunnel root
+could never bring up — the trio lived on the mount, and only the preflight, running as
+the user, could see it) is gone with the trio. The lesson stands for anything future:
+if a verb ever again depends on a path root must read, the refusal belongs in
+`protocolRuntimeError`, BEFORE the purchase, because `establishSessionOrRefund` only
+ever covers a failed handshake.
 
 **Verify packaging by installing, not by reading config** —
 `scripts/verify-deb-portability.sh` (interactive, needs root, pauses for GUI steps)
@@ -1652,12 +1683,13 @@ app dies with `FATAL … chrome-sandbox … mode 4755` before a window ever appe
 Flip the sysctl to reproduce stock behaviour on this hardware.
 
 Licensing (required for any public distribution): the app is **GPL-3.0-or-later**
-(`LICENSE`, `package.json` `license` → the deb's `License:` field). All five bundled
+(`LICENSE`, `package.json` `license` → the deb's `License:` field). All three bundled
 binaries carry their upstream text as `resources/linux/bin/LICENSE.<name>`, and
-`THIRD-PARTY-LICENSES.md` records each one's pinned version/commit plus the GPL-2.0
-source offer for `awg`/`awg-quick` (the only copyleft binary). The privileged helper
-statically LINKS tun2socks v2.6.0 (MIT, despite the v1 series having been GPL-3.0) and
-its dependencies (gvisor Apache-2.0, `golang.org/x` BSD-3, …): `scripts/gen-go-notices.sh`
+`THIRD-PARTY-LICENSES.md` records each one's pinned version/commit. Nothing shipped is
+under GPL-2.0 since Phase 3 replaced the `awg`/`awg-quick`/`amneziawg-go` trio with the
+embedded device. The privileged helper statically LINKS tun2socks v2.6.0 (MIT, despite
+the v1 series having been GPL-3.0) and the AmneziaWG device (`amneziawg-go` v0.2.19, MIT)
+and their dependencies (gvisor Apache-2.0, `golang.org/x` BSD-3, …): `scripts/gen-go-notices.sh`
 regenerates `daemon/THIRD-PARTY-NOTICES.md` from `go list -deps` — rerun it after any
 change to `daemon/go.mod` — and it ships beside `THIRD-PARTY-LICENSES.md`. `LICENSE`,
 `THIRD-PARTY-LICENSES.md` and `THIRD-PARTY-NOTICES.md` ship via explicit

@@ -1,4 +1,0 @@
-argv: awg-up /tmp/cfg/sntl0.conf /shim/awgbin
-exit: 0
-stdout: 
-stderr: 

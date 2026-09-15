@@ -1670,7 +1670,8 @@ async function armKillSwitch(
   lanSharing: boolean,
 ): Promise<boolean> {
   // AmneziaWG rides the WG branch throughout: same sntl0 iface, same Endpoint=
-  // line in its config, and awg-quick owns resolv.conf like wg-quick does.
+  // line in its config, and the helper's awg-up provisions DNS through resolvconf like
+  // wg-quick does.
   const isWgLike = protocol === 'wireguard' || protocol === 'amneziawg'
   // OpenVPN has its own interface and its own `remote` line; the kill switch
   // itself is protocol-agnostic (`-d host -j ACCEPT`), so it needs no changes.

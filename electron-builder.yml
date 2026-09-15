@@ -30,8 +30,8 @@ extraResources:
     filter:
       - "**/*"
       - "!packaging/"
-  # The app is GPL-3.0-or-later and ships GPL-2.0 binaries (awg/awg-quick), so the
-  # licence text and the source offer must accompany the binaries, not just the repo.
+  # The app is GPL-3.0-or-later; the bundled executables' licence texts and the linked
+  # Go modules' notices must accompany the binaries, not just the repo.
   - from: LICENSE
     to: ../LICENSE
   - from: THIRD-PARTY-LICENSES.md
@@ -84,8 +84,7 @@ linux:
   # app never plays audio, it only needs the symbols to resolve.
   #
   # Extracted from a debian:bookworm container (alsa-lib 1.2.8-1+b1), never from the
-  # maintainer's desktop, for the same reason scripts/build-amneziawg.sh builds in a
-  # container: a native copy inherits this machine's glibc and would refuse to load
+  # maintainer's desktop: a native copy inherits this machine's glibc and would refuse to load
   # on older targets. Floor is GLIBC_2.34, under every supported release, and it
   # needs only libc/libm. Re-check that floor if this is ever refreshed.
   extraFiles:

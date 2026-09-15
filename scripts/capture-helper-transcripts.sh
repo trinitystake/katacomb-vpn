@@ -330,9 +330,9 @@ run 07-dns-set-second         dns-set 9.9.9.9
 run 08-dns-restore            dns-restore
 run 09-killswitch-off         killswitch-off
 run 10-down                   down
-use_awg
-run 11-awg-up                 awg-up /tmp/cfg/sntl0.conf /shim/awgbin
-run 12-awg-down               awg-down
+# awg-up / awg-down are no longer captured here: since Phase 3 the AmneziaWG device
+# is embedded and awg-up is a behavioural reimplementation of wg-quick(8), asserted by
+# daemon/internal/ops/amneziawg_ops_test.go rather than diffed against the bash helper.
 run 13-ovpn-up                ovpn-up /tmp/cfg/openvpn.conf
 run 14-ovpn-down              ovpn-down
 touch /shim/ovpn-fail
@@ -361,7 +361,6 @@ run 31-up-badname             up /tmp/cfg/wg0.conf
 run 32-killswitch-on-zero     killswitch-on sntl0 0.0.0.0
 run 33-tun-up-missing-bin     tun-up /tmp/nope 127.0.0.1:1080 203.0.113.7 192.168.1.1 eth0
 run 34-unknown-verb           frobnicate
-run 35-awg-up-missing-bin     awg-up /tmp/cfg/sntl0.conf /tmp/emptybin
 run 36-ovpn-up-script         ovpn-up /tmp/cfg/openvpn-up.conf
 run 37-killswitch-on-badiface killswitch-on 'sntl0;reboot' 203.0.113.7
 run 38-tun-up-badsocks        tun-up /shim/bin/tun2socks localhost:1080 203.0.113.7 192.168.1.1 eth0

@@ -7,7 +7,7 @@ import { buildAmneziaWgConfig, type AwgMetadataEntry } from './amneziawg-config.
 // h1..h4 / optional i1..i5. Jc/Jmin/Jmax are generated client-side.
 const META: AwgMetadataEntry = {
   port: 51820,
-  public_key: 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5IQ==',
+  public_key: 'aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5ISE=',
   s1: 15,
   s2: 40,
   s3: 20,
@@ -103,6 +103,22 @@ test('buildAmneziaWgConfig rejects missing/invalid node basics', () => {
     () => buildAmneziaWgConfig([META], ADDRS, ['10.8.0.5; rm -rf /'], PRIVKEY),
     /malformed/,
   )
+})
+
+// A key that is valid base64 but not 32 bytes passes the alphabet check and is then
+// rejected by the device at bring-up — after the session is paid for and past the
+// refund window. It must throw here instead.
+test('buildAmneziaWgConfig rejects a public key that is not 32 bytes', () => {
+  const short = Buffer.alloc(31).toString('base64')
+  const long = Buffer.alloc(33).toString('base64')
+  for (const key of [short, long]) {
+    assert.throws(
+      () => buildAmneziaWgConfig([{ ...META, public_key: key }], ADDRS, ASSIGNED, PRIVKEY),
+      /invalid public key/,
+    )
+  }
+  // and the 32-byte one still builds
+  assert.ok(buildAmneziaWgConfig([META], ADDRS, ASSIGNED, PRIVKEY).includes('PublicKey'))
 })
 
 test('buildAmneziaWgConfig rejects out-of-range or inconsistent obfuscation params', () => {

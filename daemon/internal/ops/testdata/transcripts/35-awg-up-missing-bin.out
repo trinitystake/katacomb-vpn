@@ -1,4 +1,0 @@
-argv: awg-up /tmp/cfg/sntl0.conf /tmp/emptybin
-exit: 1
-stdout: 
-stderr: Error: awg missing from bin dir

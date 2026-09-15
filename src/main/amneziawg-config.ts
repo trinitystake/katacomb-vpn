@@ -59,6 +59,20 @@ function randInt([min, max]: readonly [number, number]): number {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
+// A WireGuard key is exactly 32 bytes. BASE64_KEY above only checks the ALPHABET,
+// and that is not enough on the money path: the device rejects a wrong-length key
+// when the tunnel is brought up, which is AFTER the handshake succeeded and so after
+// establishSessionOrRefund can refund anything — the user would be left with a paid
+// session that can never connect (the same shape as the AppImage bug of 2026-09-14).
+// Refuse it here instead, where the throw still reaches the refund.
+function isCurve25519Key(b64: string): boolean {
+  try {
+    return Buffer.from(b64, 'base64').length === 32
+  } catch {
+    return false
+  }
+}
+
 function assertUintInRange(name: string, value: number, max: number): void {
   if (!Number.isInteger(value) || value < 0 || value > max) {
     throw new Error(`AmneziaWG obfuscation param ${name} out of range`)
@@ -81,7 +95,8 @@ export function buildAmneziaWgConfig(
   }
   const entry = metadata[0]
 
-  if (typeof entry.public_key !== 'string' || !BASE64_KEY.test(entry.public_key)) {
+  if (typeof entry.public_key !== 'string' || !BASE64_KEY.test(entry.public_key)
+      || !isCurve25519Key(entry.public_key)) {
     throw new Error('AmneziaWG node returned an invalid public key')
   }
   const port = typeof entry.port === 'string' ? parseInt(entry.port, 10) : entry.port

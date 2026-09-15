@@ -56,8 +56,10 @@ func Dispatch(ctx context.Context, req protocol.Request, e *ops.Env) protocol.Re
 		if !ok {
 			return fail("amneziawg_up: configString required")
 		}
-		// The pinned trio from the daemon's own bin dir; a client-supplied path is ignored.
-		if err := ops.AmneziaWgUp(ctx, e, []byte(cfg), e.BinDir); err != nil {
+		// The bindir slot is accepted and IGNORED by AmneziaWgUp (the device is
+		// embedded and self-exec'd); a client-supplied path was never honoured. `-` is
+		// what the one-shot app passes for the same slot.
+		if err := ops.AmneziaWgUp(ctx, e, []byte(cfg), "-"); err != nil {
 			return failErr(err)
 		}
 		return reply(nil)

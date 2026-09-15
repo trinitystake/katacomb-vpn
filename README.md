@@ -92,7 +92,7 @@ Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 | 2 | V2Ray | `sntl-tun` | userspace core + tun2socks | Bundled `v2ray`; encrypted DNS via DoH |
 | 3 | OpenVPN | `sntl-ovpn` | root (`openvpn`) | Distro client; the node's PKI issues the client cert |
 | 4 | XRAY | `sntl-tun` | userspace core + tun2socks | VLESS + Reality; bundled `xray` |
-| 5 | AmneziaWG | `sntl0` | root (`awg-quick`) | WireGuard fork with DPI-evasion params; bundled userspace trio |
+| 5 | AmneziaWG | `sntl0` | root (device compiled into the helper) | WireGuard fork with DPI-evasion params; the userspace device is embedded in the privileged helper |
 | 6 | Hysteria2 | `sntl-tun` | userspace core + tun2socks | QUIC; refuses to connect without a TLS pin |
 
 Type 0 (unknown) is the only kind the client will not connect to.
@@ -104,10 +104,10 @@ superset of what the builder emits. The exit hop additionally has to serve plain
 grpc and websocket bring their own dialer and fail when carried inside another hop.
 
 Bundled binaries live in [resources/linux/bin/](resources/linux/bin/) and are
-SHA-256 pinned in [binary-integrity.ts](src/main/binary-integrity.ts). Both the app and
-the root daemon refuse to execute one whose hash doesn't match. The AmneziaWG trio is
-built from source at the commits upstream pins (no prebuilt `amneziawg-go` exists), via
-[scripts/build-amneziawg.sh](scripts/build-amneziawg.sh).
+SHA-256 pinned in [binary-integrity.ts](src/main/binary-integrity.ts); the app refuses to
+spawn one whose hash doesn't match. Root runs no vendored binary at all: the tun2socks
+engine and the AmneziaWG userspace device (`amneziawg-go`, at the commit the Sentinel
+nodes pin) are compiled into the privileged helper.
 
 ## Install
 
@@ -354,7 +354,7 @@ beside its polkit policy and systemd unit);
 
 ## Troubleshooting
 
-**Connect fails with a DNS provisioning error.** `wg-quick`/`awg-quick` need
+**Connect fails with a DNS provisioning error.** `wg-quick` and the AmneziaWG bring-up need
 `resolvconf` and fail the whole bring-up without it. Install it, or accept the offered
 retry, which strips the `DNS =` lines and means DNS queries leave the tunnel.
 The app says so before you agree.
@@ -385,9 +385,10 @@ the chain's, not the product's.
 
 GPL-3.0-or-later, see [LICENSE](LICENSE).
 
-The packages also ship five third-party executables (v2ray, xray, hysteria,
-amneziawg-go, awg/awg-quick), each a separate program under its own license, with the
-full text alongside it in `resources/linux/bin/`, and the privileged helper statically
-links the tun2socks engine and its dependencies (MIT, BSD-3-Clause, Apache-2.0), whose
-notices ship as `THIRD-PARTY-NOTICES.md`. Pinned versions, licenses and the GPL-2.0
-source offer for `awg` are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
+The packages also ship three third-party executables (v2ray, xray, hysteria), each a
+separate program under its own license, with the full text alongside it in
+`resources/linux/bin/`, and the privileged helper statically links the tun2socks engine
+and the AmneziaWG userspace device with their dependencies (MIT, BSD-3-Clause,
+Apache-2.0), whose notices ship as `THIRD-PARTY-NOTICES.md`. Pinned versions and
+licenses are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md); nothing shipped
+carries a GPL-2.0 obligation any more.

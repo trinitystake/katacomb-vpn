@@ -1,49 +1,49 @@
-# Katacomb VPN 1.8.0
+# Katacomb VPN 1.9.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-A correctness and privacy release. Transactions no longer carry a memo naming this app,
-and the wallet that paid for a session can no longer be switched, replaced or deleted
-while that session is running.
+1.9.0 rebuilds the part of the app that holds root privileges. Four of the six
+protocols could not connect at all from the AppImage; now every one of them can.
 
 ## Highlights
 
-- **Transactions carry no memo.** Every purchase, cancel, renewal and provider action
-  used to write "katacomb-vpn" into a public field of the transaction, kept forever on
-  chain and readable by anyone. It labelled each of those actions as having come from
-  this client and tied one account's activity together. Nothing in the app ever read a
-  memo back, so none is sent now.
-- **The wallet in use is locked for the length of a session.** Switching, adding or
-  deleting a wallet is refused while you are connected, with a banner on Settings,
-  Wallets saying why. Nothing on disk records which wallet a session belongs to, so
-  changing it left the session uncancellable: ending it signed with the wrong account,
-  the chain rejected that, and the deposit stayed locked until the session expired on its
-  own. Your balance and session list also kept showing the previous wallet's figures
-  under the new address for the rest of the connection. Renaming a wallet, deriving a
-  subaccount and reading a recovery phrase still work, because none of them changes which
-  wallet signs.
-- **One paid session at a time, in local-proxy mode too.** Buying a plan session was
-  refused only when your routing was redirected. In local-proxy mode, and during an
-  automatic reconnect, a second purchase went through and then failed to connect, leaving
-  a paid session that nothing was watching for expiry.
-- **The session carrying your connection cannot be ended by accident.** Ending it, or
-  cancelling the subscription behind it, is refused while it is in use. The Sessions tab
-  already disconnected first, but not during an automatic reconnect, where the cancel
-  landed on a session that was about to come back.
-- **A form opened before you connect stops accepting.** Provider and subscription forms
-  left open when a tunnel comes up now grey out their confirm button, instead of taking
-  the click and failing on the way to the chain.
-- **Endpoint testing pauses while connected.** Settings, Network no longer probes every
-  public RPC through the tunnel. Those measurements described the tunnel rather than the
-  endpoint, and the app already refused to act on them. It now says which of the two
-  reasons applies, the VPN or the kill switch, and resumes when you disconnect.
+- **Every protocol now works from the AppImage.** V2Ray, XRAY and Hysteria2 in
+  full-tunnel mode, and AmneziaWG in any mode, could not connect there at all. An
+  AppImage mounts itself as a filesystem readable only by the user who launched it, so
+  when the app asked the privileged helper to run one of the bundled programs from
+  inside that mount, root was refused access and the connection failed. For AmneziaWG
+  it failed after the session had already been paid for. Those programs are now built
+  into the helper, which lives on your disk, so nothing inside the mount is needed.
+- **The program that runs as root is now a single 12 MB binary.** It used to be the
+  bundled 100 MB Electron runtime, started as root, shelling out to a 785 line shell
+  script for every privileged operation. Alongside the memory that saves, the checks
+  that stop a hostile node from running commands as root existed twice, once in each
+  language, and had to be kept in step by hand. There is one implementation now, and a
+  shared set of test cases fails if the two halves of the app ever disagree about what
+  is safe.
+- **Nothing runs as root that this project did not build.** The tun2socks and AmneziaWG
+  engines are compiled into the helper rather than shipped as separate programs for it
+  to launch, which is what fixes the AppImage. Five bundled executables are down to
+  three, and the download is smaller for it.
+- **A node that sends a malformed key is refused before you pay.** The key a node
+  supplies was checked for valid characters but never for its length. A key of the wrong
+  length passed that check, the session was bought, and the connection then failed when
+  the tunnel was brought up, which is past the point where a failure is refunded. It is
+  rejected before the transaction now.
+- **The tray icon no longer sticks on "connecting".** On the AppImage it could show the
+  amber connecting dot over a working tunnel indefinitely, while the window and the tray
+  menu both correctly said Connected.
+- **A healthy install no longer asks you to install tun2socks.** The setup dialog
+  appeared on every launch reporting tun2socks as missing, and offered a package that
+  would not have been used if you had installed it. It is part of the helper now, so
+  there is nothing to look for.
 
-## Fixes in 1.8.0
 
-- Freeze the active wallet, and a few chain actions, while a session is live
-- Send no memo on any transaction
+## Fixes in 1.9.0
+
+<!-- regenerated by release.sh from v1.8.0..HEAD at cut time; leave the heading -->
 
 ## Known limitations
 
@@ -118,6 +118,6 @@ for the full threat model and architecture.
 
 ## License
 
-GPL-3.0-or-later. Bundled binaries (v2ray, xray, hysteria, awg, amneziawg-go, tun2socks)
-are under their respective licenses. See
+GPL-3.0-or-later. Bundled binaries (v2ray, xray, hysteria) are under their respective
+licenses. See
 [THIRD-PARTY-LICENSES.md](https://github.com/trinitystake/katacomb-vpn/blob/main/THIRD-PARTY-LICENSES.md).

@@ -1,55 +1,52 @@
-# Katacomb VPN 1.9.0
+# Katacomb VPN 1.9.1
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-1.9.0 rebuilds the part of the app that holds root privileges. Four of the six
-protocols could not connect at all from the AppImage; now every one of them can.
+1.9.1 is a fixes release. The headline is a bug that could take down a VPN this app
+did not create: disconnecting Katacomb deleted every WireGuard tunnel on the machine,
+including one belonging to another provider.
 
 ## Highlights
 
-- **Every protocol now works from the AppImage.** V2Ray, XRAY and Hysteria2 in
-  full-tunnel mode, and AmneziaWG in any mode, could not connect there at all. An
-  AppImage mounts itself as a filesystem readable only by the user who launched it, so
-  when the app asked the privileged helper to run one of the bundled programs from
-  inside that mount, root was refused access and the connection failed. For AmneziaWG
-  it failed after the session had already been paid for. Those programs are now built
-  into the helper, which lives on your disk, so nothing inside the mount is needed.
-- **The program that runs as root is now a single 12 MB binary.** It used to be the
-  bundled 100 MB Electron runtime, started as root, shelling out to a 785 line shell
-  script for every privileged operation. Alongside the memory that saves, the checks
-  that stop a hostile node from running commands as root existed twice, once in each
-  language, and had to be kept in step by hand. There is one implementation now, and a
-  shared set of test cases fails if the two halves of the app ever disagree about what
-  is safe.
-- **Nothing runs as root that this project did not build.** The tun2socks and AmneziaWG
-  engines are compiled into the helper rather than shipped as separate programs for it
-  to launch, which is what fixes the AppImage. Five bundled executables are down to
-  three, and the download is smaller for it.
-- **A node that sends a malformed key is refused before you pay.** The key a node
-  supplies was checked for valid characters but never for its length. A key of the wrong
-  length passed that check, the session was bought, and the connection then failed when
-  the tunnel was brought up, which is past the point where a failure is refunded. It is
-  rejected before the transaction now.
-- **The tray icon no longer sticks on "connecting".** On the AppImage it could show the
-  amber connecting dot over a working tunnel indefinitely, while the window and the tray
-  menu both correctly said Connected.
-- **A healthy install no longer asks you to install tun2socks.** The setup dialog
-  appeared on every launch reporting tun2socks as missing, and offered a package that
-  would not have been used if you had installed it. It is part of the helper now, so
-  there is nothing to look for.
+- **Disconnecting no longer takes your other VPN down with it.** If you had a WireGuard
+  tunnel from another provider running, Mullvad or IVPN or one you set up by hand,
+  disconnecting Katacomb deleted it too. It happened as root, with nothing on screen to
+  say so, and the app had already warned you that the other VPN was there. Only our own
+  tunnel is torn down now. The warning about other VPNs stays a warning: it can be wrong
+  about Tailscale, so it has never blocked a connection and still does not.
+- **Ending or reconnecting a session survives switching tabs.** Those are on-chain
+  transactions, and they keep running after you leave the Sessions tab. The screen
+  tracking them did not. Coming back showed the row with no spinner and both buttons
+  live while the first transaction was still being sent, so a second press could collide
+  with it, and any error had nowhere left to appear. The same applied to Link and Unlink
+  in the Provider console.
+- **A dead node no longer stalls the node scan for two minutes.** The scan gave each node
+  eight seconds, but that budget only started once a connection was established. A node
+  that accepts nothing and answers nothing never got that far, so it ran until the
+  operating system gave up, measured at over two minutes. Three of those in a row held up
+  the whole batch.
+- **An out-of-date background service is caught before you pay, not after.** Installing an
+  update does not always restart the privileged service, and an older one may not know how
+  to bring up the protocol you picked. That used to surface as a failure after the session
+  had been bought. The app now asks the service what it can do before the transaction, and
+  says to restart it instead.
+- **IPsec VPNs are now detected.** The check for other active VPNs looked for network
+  interfaces, and IPsec clients, including most corporate ones, do not create one, so
+  they were invisible to it. They are included in the warning now. This one needs the
+  .deb, because reading IPsec state requires the privileged service the AppImage does
+  not install.
+- **Fewer moving parts behind a connection.** The app no longer loads the bundled SDK's
+  connection-management code to generate keys and configuration files. That code could
+  start programs, write temporary files and generate QR codes, none of which a VPN client
+  needs, and the V2Ray path was writing its configuration to a temporary file and reading
+  it straight back, with the session credentials in that file the whole time. The
+  replacements produce byte-for-byte identical output, which is enforced by tests.
 
+## Fixes in 1.9.1
 
-## Fixes in 1.9.0
-
-- Release notes for 1.9.0
-- Remove fixtures and scaffolding nothing uses any more
-- Replace the AmneziaWG trio with an embedded device (Phase 3)
-- Fix a stale binary check, a stuck tray icon and a silent pkexec fallback
-- Embed tun2socks in the privileged helper (Phase 2)
-- Rewrite the privileged daemon in Go (Phase 1: parity swap)
-- ship.sh: derive reboot necessity and clean up unnecessary prompts
+<!-- regenerated by release.sh from v1.9.0..HEAD at cut time; leave the heading -->
 
 ## Known limitations
 

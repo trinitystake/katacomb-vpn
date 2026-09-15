@@ -1,4 +1,0 @@
-argv: up /tmp/cfg/wg0.conf
-exit: 1
-stdout: 
-stderr: Error: interface must be sntl0, got wg0

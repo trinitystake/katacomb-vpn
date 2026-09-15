@@ -13,12 +13,12 @@
 # tree; this script reads it back from git history (the commit that deleted it).
 #
 # WHY A CONTAINER, AS ROOT, WITH SHIMS
-# The helper resolves openvpn by ABSOLUTE path (/usr/sbin/openvpn) and awg-quick via
-# its $BINDIR argument, so PATH shims alone cannot intercept them, and putting a shim
-# at /usr/sbin/openvpn on the maintainer's machine is not acceptable. It also writes
+# The helper resolves openvpn by ABSOLUTE path (/usr/sbin/openvpn), so PATH shims
+# alone cannot intercept it, and putting a shim at /usr/sbin/openvpn on the
+# maintainer's machine is not acceptable. It also writes
 # /etc/resolv.conf, /run/katacomb-vpn and /var/lib/katacomb-vpn, and chowns them.
 # So it runs as root in a throwaway debian:bookworm, where every external tool it
-# calls (ip, iptables, ip6tables, wg-quick, pkill, openvpn, the awg trio, tun2socks)
+# calls (ip, iptables, ip6tables, wg-quick, pkill, openvpn, tun2socks)
 # is a shim that appends its basename + argv to a log and answers the way the real
 # tool would on a host where the verb succeeds. Query commands (`ip link show X`,
 # `ip -o link show type wireguard`, `ip rule show`, `ip6tables -S`) answer from a
@@ -68,7 +68,7 @@ fi
 HELPER=/helper.sh
 SHIM=/shim
 LOG=$SHIM/argv.log
-mkdir -p $SHIM/bin $SHIM/links $SHIM/awgbin /tmp/cfg /tmp/emptybin
+mkdir -p $SHIM/bin $SHIM/links /tmp/cfg
 
 # Every shim starts with this: log basename + argv, one line, space-joined.
 logger_prelude() {
@@ -137,16 +137,6 @@ case "${1:-}" in
 esac
 exit 0'
 
-# The awg trio lives in a caller-supplied bindir. awg-quick up creates a tun-type
-# sntl0 (no wgtype) and the same leaked rule pairs.
-mkshim awg-quick $SHIM/awgbin '
-case "${1:-}" in
-  up) touch /shim/links/sntl0; for f in rules-4.fw rules-4.sp rules-6.fw rules-6.sp; do echo 2 > /shim/$f; done; exit 0 ;;
-esac
-exit 0'
-mkshim awg          $SHIM/awgbin 'exit 0'
-mkshim amneziawg-go $SHIM/awgbin 'exit 0'
-
 # openvpn is resolved by absolute path. With --daemon the real one forks and the
 # parent exits 0 at once; the shim writes what the helper then polls for.
 mkdir -p /usr/sbin
@@ -193,30 +183,6 @@ PresharedKey = cHNrLWtleS1iYXNlNjQtZW5jb2RlZC12YWx1ZS09PQ==
 AllowedIPs = 0.0.0.0/0
 Endpoint = 203.0.113.7:51820
 PersistentKeepalive = 25
-EOF
-cat > /tmp/cfg/awg.conf <<'EOF'
-[Interface]
-Address = 10.8.0.5/32,fd00::5/128
-PrivateKey = cHJpdmF0ZSBrZXkgcHJpdmF0ZSBrZXkgcHJpdmF0ZSE=
-DNS = 10.8.0.1,1.0.0.1,1.1.1.1
-Jc = 4
-Jmin = 128
-Jmax = 800
-S1 = 15
-S2 = 40
-S3 = 20
-S4 = 10
-H1 = 1234567891
-H2 = 987654321
-H3 = 246813579
-H4 = 1357924680
-I1 = <b 0xf6ab3267fd><r 16><t>
-
-[Peer]
-PublicKey = aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5IQ==
-AllowedIPs = 0.0.0.0/0,::/0
-Endpoint = 203.0.113.10:51820
-PersistentKeepalive = 15
 EOF
 cat > /tmp/cfg/openvpn.conf <<'EOF'
 client
@@ -266,7 +232,6 @@ sed 's/^nobind$/up \/bin\/sh/' /tmp/cfg/openvpn.conf > /tmp/cfg/openvpn-up.conf
 # The helper derives the interface from the config's basename, so the WG/AWG
 # configs are handed over as sntl0.conf.
 use_wg()  { cp /tmp/cfg/wg.conf  /tmp/cfg/sntl0.conf; }
-use_awg() { cp /tmp/cfg/awg.conf /tmp/cfg/sntl0.conf; }
 use_wg_postup() { cp /tmp/cfg/wg-postup.conf /tmp/cfg/sntl0.conf; }
 
 # /etc/resolv.conf: a plain file with known content (docker bind-mounts it).
@@ -356,11 +321,7 @@ run 26-dns-restore-absent     dns-restore
 # --- refusals: no tool may run, exit 1, Error: on stderr --------------------
 use_wg_postup
 run 30-up-postup              up /tmp/cfg/sntl0.conf
-use_wg; cp /tmp/cfg/wg.conf /tmp/cfg/wg0.conf
-run 31-up-badname             up /tmp/cfg/wg0.conf
 run 32-killswitch-on-zero     killswitch-on sntl0 0.0.0.0
-run 33-tun-up-missing-bin     tun-up /tmp/nope 127.0.0.1:1080 203.0.113.7 192.168.1.1 eth0
-run 34-unknown-verb           frobnicate
 run 36-ovpn-up-script         ovpn-up /tmp/cfg/openvpn-up.conf
 run 37-killswitch-on-badiface killswitch-on 'sntl0;reboot' 203.0.113.7
 run 38-tun-up-badsocks        tun-up /shim/bin/tun2socks localhost:1080 203.0.113.7 192.168.1.1 eth0

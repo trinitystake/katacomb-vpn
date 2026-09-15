@@ -160,12 +160,6 @@ func (f *fakeEnv) run(_ context.Context, argv []string, opt RunOpt) ([]byte, []b
 		}
 		// Fails live: our config is never in /etc/wireguard.
 		return fail("wg-quick: `"+a[len(a)-1]+"' is not a WireGuard interface", 1)
-	case "awg-quick":
-		if len(a) >= 1 && a[0] == "up" {
-			f.addLink("sntl0")
-			f.leakRules()
-		}
-		return nil, nil, nil
 	case "openvpn":
 		var pidFile, logFile string
 		for i := 0; i+1 < len(a); i++ {

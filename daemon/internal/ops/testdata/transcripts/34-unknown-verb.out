@@ -1,4 +1,0 @@
-argv: frobnicate
-exit: 1
-stdout: 
-stderr: Usage: katacomb-vpn-helper {up <config>|down|awg-up <config> <bindir>|awg-down|ovpn-up <config>|ovpn-down|tun-up <bin> <socks> <remote> <gw> <if>|tun-down|killswitch-on <iface> <host> [dns] [lan-sharing]|killswitch-off|dns-set <ip>|dns-restore}

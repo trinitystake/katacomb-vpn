@@ -23,10 +23,18 @@ type TunUpParams struct {
 	RemoteHost string
 	Gateway    string
 	Iface      string
-	// BypassRoutes are split-tunnel CIDRs; invalid entries are dropped silently
-	// (the daemon always did; the app sanitises before sending).
+	// BypassRoutes are split-tunnel CIDRs, passed through RAW. Filtering happens
+	// in TunUp, which is the trust boundary: both doors reach it, and a caller's
+	// own filtering is never the one that counts.
 	BypassRoutes []string
 }
+
+// MaxBypassRoutes bounds the split-tunnel list. Each entry becomes an `ip route
+// add` as root, and the list was previously unbounded — a caller could make the
+// helper issue arbitrarily many. The app's own UI cannot produce anything near
+// this many, so exceeding it means a bug or a hostile caller, and refusing says
+// so rather than working slowly and silently.
+const MaxBypassRoutes = 64
 
 const (
 	tunPollTries    = 50
@@ -68,11 +76,24 @@ func TunUp(ctx context.Context, e *Env, p TunUpParams) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if len(p.BypassRoutes) > MaxBypassRoutes {
+		return 0, fmt.Errorf("too many bypass routes: %d, max %d", len(p.BypassRoutes), MaxBypassRoutes)
+	}
 	var bypass []string
+	var dropped int
 	for _, r := range p.BypassRoutes {
 		if guard.IsAllowedBypassCidr(r) {
 			bypass = append(bypass, strings.TrimSpace(r))
+		} else {
+			dropped++
 		}
+	}
+	// Report the COUNT, never the entries: these are caller-supplied strings and
+	// the guard's own rule is that a refusal names a reason, not content. Silently
+	// dropping them was the old behaviour and it made a half-applied split tunnel
+	// indistinguishable from a working one.
+	if dropped > 0 {
+		e.Warn(fmt.Sprintf("tun-up: ignored %d invalid bypass route(s) of %d", dropped, len(p.BypassRoutes)))
 	}
 
 	var pid int

@@ -34,10 +34,17 @@ func WireguardUp(ctx context.Context, e *Env, config []byte) error {
 // awk -F'[ :]+' on `ip -o link show` output: field 2 is the interface name.
 var reSpaceColon = regexp.MustCompile(`[ :]+`)
 
-// WireguardDown tears down EVERY wireguard-type link (parity with the bash verb;
-// aggressive, but the app never runs alongside another kernel WireGuard tunnel by
-// design), then repairs wg-quick's leaked policy rules and removes the root-owned
-// config (it holds the private key).
+// WireguardDown tears down OUR wireguard link, then repairs wg-quick's leaked
+// policy rules and removes the root-owned config (it holds the private key).
+//
+// It used to delete every wireguard-type link, carried over from the bash verb on
+// the assumption that the app never runs alongside another kernel WireGuard
+// tunnel. That assumption is not ours to make: detectOtherVpn is deliberately a
+// warn-with-override, not a gate, so a user can and does connect with Mullvad,
+// IVPN or a hand-rolled wg tunnel already up — and disconnecting Katacomb then
+// deleted theirs too, silently and as root. The link list is still read because
+// cleanupWgRules needs it to decide whether any tunnel that could own the leaked
+// rules survives; only the delete is now scoped.
 func WireguardDown(ctx context.Context, e *Env) error {
 	return withLock(ctx, e, func() error {
 		ip, err := tool(e, "ip")
@@ -52,6 +59,10 @@ func WireguardDown(ctx context.Context, e *Env) error {
 			iface := f[1]
 			if !guard.IsValidInterfaceName(iface) {
 				return fmt.Errorf("invalid interface name: %s", iface)
+			}
+			// Someone else's tunnel. Leave it alone.
+			if iface != wgIface {
+				continue
 			}
 			// `wg-quick down` resolves the name against /etc/wireguard, where our
 			// config never lives, so this fails on every disconnect and the delete

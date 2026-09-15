@@ -201,8 +201,18 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   BOTH modes (the daemon's mutex cannot see postrm's one-shot teardown or a pkexec
   fallback racing it); a timeout SIGTERMs the child and detached children are reaped by
   a goroutine; `status` and the link polls read `/sys/class/net/<iface>` instead of
-  exec'ing `ip link show`. `down` still tears down EVERY wireguard-type link and
-  `bypassRoutes` are still silently filtered and uncapped: ported as-is, flagged.
+  exec'ing `ip link show`. **`down` is now scoped to `sntl0`**: it used to delete every
+  wireguard-type link, which was wrong because `detectOtherVpn` is a warn-with-override
+  and not a gate, so a user really can connect with Mullvad or IVPN up — and our
+  disconnect deleted their tunnel too, as root. `cleanupWgRules` keeps its own scoping
+  (it repairs nothing while any wireguard link survives), and `wireguard_scope_test.go`
+  pins both halves; no golden transcript covered this, because all of them were
+  captured on a machine with only `sntl0`. **`bypassRoutes` are capped**
+  (`MaxBypassRoutes`, refused above it rather than truncated) and the count of dropped
+  entries is warned about rather than silently swallowed — the count only, never the
+  content, per the guard rule that a refusal names a reason. Value-checking moved OUT
+  of `dispatch` into `ops`: filtering in both meant `ops`, the trust boundary, never
+  saw a rejected entry and so could not report one.
 - **The unit keeps `/run/katacomb-vpn` across restarts** (`RuntimeDirectoryPreserve=restart`).
   postinstall runs `systemctl restart` on every upgrade, and without it every upgrade
   wiped `tun.state`/`openvpn.pid`, so the next `tun-down` found no pid and no remote

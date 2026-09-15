@@ -1,0 +1,173 @@
+{
+  "_readme": "Language-neutral pin for the daemon socket contract. Read by daemon/internal/protocol/protocol_test.go and by src/main/daemon-protocol-corpus.test.ts. The TS and Go sides claim to mirror each other byte for byte; this file is what makes that claim fail loudly instead of drifting. Same arrangement as internal/guard/testdata/corpus. Edit a value here only when the wire contract really changes, and expect both suites to go red until both sides follow.",
+  "version": 1,
+  "socketDir": "/run/katacomb-vpn",
+  "socketPath": "/run/katacomb-vpn/daemon.sock",
+  "maxMessageBytes": 262144,
+  "_ops": "Every op the daemon serves. An op added to one side only fails the other side's test: Go checks each name dispatches to something other than `unknown op`, TS checks the DAEMON_OPS value matches exactly.",
+  "ops": [
+    "protocol_version",
+    "status",
+    "xfrm_policies",
+    "wireguard_up",
+    "wireguard_down",
+    "amneziawg_up",
+    "amneziawg_down",
+    "openvpn_up",
+    "openvpn_down",
+    "tun_up",
+    "tun_down",
+    "killswitch_on",
+    "killswitch_off",
+    "dns_set",
+    "dns_restore"
+  ],
+  "_lockFreeOps": "Ops the server answers without taking the state mutex.",
+  "lockFreeOps": [
+    "status",
+    "protocol_version",
+    "xfrm_policies"
+  ],
+  "_requests": "Framing and parse taxonomy. `outcome` is one of valid | invalidJSON | invalidRequest | blank. The two invalid outcomes get a fixed {\"id\":0,...} reply and the connection STAYS OPEN \u2014 deviation 3 from the bash helper, because any group member could otherwise bounce the daemon with a single `null` line.",
+  "requests": [
+    {
+      "name": "status",
+      "line": "{\"id\":1,\"op\":\"status\"}",
+      "outcome": "valid",
+      "id": 1,
+      "op": "status"
+    },
+    {
+      "name": "with-args",
+      "line": "{\"id\":7,\"op\":\"dns_set\",\"args\":{\"ip\":\"1.1.1.1\"}}",
+      "outcome": "valid",
+      "id": 7,
+      "op": "dns_set"
+    },
+    {
+      "name": "id-zero",
+      "line": "{\"id\":0,\"op\":\"status\"}",
+      "outcome": "valid",
+      "id": 0,
+      "op": "status"
+    },
+    {
+      "name": "unknown-op-still-parses",
+      "line": "{\"id\":3,\"op\":\"nope\"}",
+      "outcome": "valid",
+      "id": 3,
+      "op": "nope"
+    },
+    {
+      "name": "null",
+      "line": "null",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "bare-string",
+      "line": "\"x\"",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "array",
+      "line": "[]",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "number",
+      "line": "5",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "missing-id",
+      "line": "{\"op\":\"status\"}",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "missing-op",
+      "line": "{\"id\":1}",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "non-numeric-id",
+      "line": "{\"id\":\"1\",\"op\":\"status\"}",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "non-string-op",
+      "line": "{\"id\":1,\"op\":5}",
+      "outcome": "invalidRequest"
+    },
+    {
+      "name": "broken-json",
+      "line": "{\"id\":1,",
+      "outcome": "invalidJSON"
+    },
+    {
+      "name": "trailing-garbage",
+      "line": "{\"id\":1,\"op\":\"status\"}x",
+      "outcome": "invalidJSON"
+    },
+    {
+      "name": "blank",
+      "line": "",
+      "outcome": "blank"
+    },
+    {
+      "name": "whitespace",
+      "line": "   ",
+      "outcome": "blank"
+    }
+  ],
+  "_responses": "Exact bytes the daemon writes. Field ORDER is part of the contract as Go emits it (id, ok, result, error); result and error are omitted when empty.",
+  "responses": [
+    {
+      "name": "ok-no-result",
+      "response": {
+        "id": 1,
+        "ok": true
+      },
+      "encoded": "{\"id\":1,\"ok\":true}"
+    },
+    {
+      "name": "ok-with-result",
+      "response": {
+        "id": 2,
+        "ok": true,
+        "result": {
+          "version": 1
+        }
+      },
+      "encoded": "{\"id\":2,\"ok\":true,\"result\":{\"version\":1}}"
+    },
+    {
+      "name": "failure",
+      "response": {
+        "id": 3,
+        "ok": false,
+        "error": "unknown op: nope"
+      },
+      "encoded": "{\"id\":3,\"ok\":false,\"error\":\"unknown op: nope\"}"
+    },
+    {
+      "name": "invalid-json-reply",
+      "response": {
+        "id": 0,
+        "ok": false,
+        "error": "invalid JSON"
+      },
+      "encoded": "{\"id\":0,\"ok\":false,\"error\":\"invalid JSON\"}"
+    },
+    {
+      "name": "invalid-request-reply",
+      "response": {
+        "id": 0,
+        "ok": false,
+        "error": "invalid request"
+      },
+      "encoded": "{\"id\":0,\"ok\":false,\"error\":\"invalid request\"}"
+    }
+  ],
+  "_staleDaemonMarker": "What an OLD daemon replies to an op it does not know. vpn-manager matches this prefix to detect a daemon left running across an upgrade; it is the fallback for daemons too old to answer protocol_version.",
+  "unknownOpPrefix": "unknown op: "
+}

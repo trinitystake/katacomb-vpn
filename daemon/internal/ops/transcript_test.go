@@ -43,6 +43,12 @@ type fakeEnv struct {
 	rules  map[string]int
 	ovpnOK bool
 	nextPid int
+	// foreignWg are wireguard-type links belonging to ANOTHER VPN (Mullvad, IVPN,
+	// a hand-rolled tunnel). detectOtherVpn warns about these rather than blocking,
+	// so they really can be up while ours is: WireguardDown must leave them alone.
+	foreignWg []string
+	// xfrmPolicy is the canned `ip xfrm policy` output. Empty means no IPsec.
+	xfrmPolicy string
 	// resolvconfStdin is the last payload handed to `resolvconf -a` (RunOpt.Stdin).
 	resolvconfStdin string
 }
@@ -110,10 +116,19 @@ func (f *fakeEnv) run(_ context.Context, argv []string, opt RunOpt) ([]byte, []b
 		}
 		switch {
 		case len(a) == 5 && a[0] == "-o" && a[1] == "link" && a[2] == "show" && a[3] == "type" && a[4] == "wireguard":
+			var out strings.Builder
 			if f.hasLink("sntl0") && f.wgtype {
-				return []byte("5: sntl0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/none \n"), nil, nil
+				out.WriteString("5: sntl0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/none \n")
 			}
-			return nil, nil, nil
+			for i, name := range f.foreignWg {
+				if f.hasLink(name) {
+					fmt.Fprintf(&out, "%d: %s: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/none \n", 20+i, name)
+				}
+			}
+			if out.Len() == 0 {
+				return nil, nil, nil
+			}
+			return []byte(out.String()), nil, nil
 		case len(a) == 3 && a[0] == "link" && a[1] == "show":
 			if f.hasLink(a[2]) {
 				return nil, nil, nil
@@ -133,6 +148,8 @@ func (f *fakeEnv) run(_ context.Context, argv []string, opt RunOpt) ([]byte, []b
 				sb.WriteString("32765:\tfrom all lookup main suppress_prefixlength 0\n")
 			}
 			return []byte(sb.String()), nil, nil
+		case len(a) == 2 && a[0] == "xfrm" && a[1] == "policy":
+			return []byte(f.xfrmPolicy), nil, nil
 		case len(a) == 3 && a[0] == "route" && a[1] == "get":
 			return []byte(a[2] + " via 192.168.1.1 dev eth0 src 192.168.1.10 uid 0 \n"), nil, nil
 		case len(a) >= 2 && a[0] == "route" && a[1] == "show":

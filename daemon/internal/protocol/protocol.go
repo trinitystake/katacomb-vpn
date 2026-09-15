@@ -12,9 +12,35 @@ import (
 )
 
 // Version is the protocol version reported by the protocol_version op. Bump only
-// on a breaking change (the app detects an old daemon by the `unknown op` reply,
-// not by this number).
+// on a BREAKING change. It is deliberately not bumped when an op is added, which
+// is why it cannot, on its own, detect the skew that actually happens: a daemon
+// left running across an upgrade that lacks a newly added op (amneziawg_*,
+// openvpn_* were both additive). Ops below is what answers that question.
 const Version = 1
+
+// Ops is every op this daemon serves, reported alongside Version so an upgraded
+// app can find out what a running daemon can do BEFORE it acts. That ordering
+// matters: without it a stale daemon is discovered by `unknown op` from the
+// bring-up, which for OpenVPN and AmneziaWG is after the session has been paid
+// for. Pinned to testdata/corpus/protocol.json, which the TypeScript side reads
+// too. Keep in dispatch order.
+var Ops = []string{
+	"protocol_version",
+	"status",
+	"xfrm_policies",
+	"wireguard_up",
+	"wireguard_down",
+	"amneziawg_up",
+	"amneziawg_down",
+	"openvpn_up",
+	"openvpn_down",
+	"tun_up",
+	"tun_down",
+	"killswitch_on",
+	"killswitch_off",
+	"dns_set",
+	"dns_restore",
+}
 
 // MaxMessageBytes caps a single buffered request. The TypeScript daemon capped at
 // 256 KiB of UTF-16 units; this counts bytes, which no client depends on.

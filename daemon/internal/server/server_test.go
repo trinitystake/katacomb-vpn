@@ -67,7 +67,8 @@ func TestOneRequest(t *testing.T) {
 	path, _ := startServer(t, newRec(t))
 	c := dial(t, path)
 	fmt.Fprint(c, `{"id":1,"op":"protocol_version"}`+"\n")
-	if got := readLine(t, bufio.NewReader(c)); got != `{"id":1,"ok":true,"result":{"version":1}}` {
+	// Payload pinned by corpus_test.go; this is about one request getting one reply.
+	if got := readLine(t, bufio.NewReader(c)); !strings.HasPrefix(got, `{"id":1,"ok":true,`) {
 		t.Fatal(got)
 	}
 }
@@ -77,14 +78,17 @@ func TestPipelinedRequestsInOneWrite(t *testing.T) {
 	c := dial(t, path)
 	fmt.Fprint(c, `{"id":1,"op":"protocol_version"}`+"\n"+`{"id":2,"op":"status"}`+"\n"+`{"id":3,"op":"frob"}`+"\n")
 	br := bufio.NewReader(c)
+	// Subject is ordering: three pipelined requests, three replies, in order.
+	// Only the id/ok prefix is asserted for the probe, whose payload grows with
+	// every added op and is pinned by corpus_test.go instead.
 	want := []string{
-		`{"id":1,"ok":true,"result":{"version":1}}`,
+		`{"id":1,"ok":true,`,
 		`{"id":2,"ok":true,"result":{"wgUp":false,"tunUp":false,"ovpnUp":false}}`,
 		`{"id":3,"ok":false,"error":"unknown op: frob"}`,
 	}
 	for _, w := range want {
-		if got := readLine(t, br); got != w {
-			t.Fatalf("want %s, got %s", w, got)
+		if got := readLine(t, br); !strings.HasPrefix(got, w) {
+			t.Fatalf("want prefix %s, got %s", w, got)
 		}
 	}
 }
@@ -112,7 +116,10 @@ func TestInvalidJsonThenValidOnTheSameConnection(t *testing.T) {
 	if got := readLine(t, br); got != `{"id":0,"ok":false,"error":"invalid JSON"}` {
 		t.Fatal(got)
 	}
-	if got := readLine(t, br); got != `{"id":9,"ok":true,"result":{"version":1}}` {
+	// This test is about the connection surviving a bad line, not about the
+	// probe's payload — corpus_test.go pins that, and it grows whenever an op is
+	// added. Assert only that the next request was answered normally.
+	if got := readLine(t, br); !strings.HasPrefix(got, `{"id":9,"ok":true,`) {
 		t.Fatal(got)
 	}
 }

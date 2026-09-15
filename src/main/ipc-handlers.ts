@@ -79,8 +79,6 @@ import { assignSeedGroups } from '../shared/seed-groups'
 import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
 import { normalizeNodes, parseNodesPage, type NodesPage } from './node-normalize'
 import {
-  connectV2Ray,
-  connectWireGuard,
   connectWireGuardFromConfig,
   connectAmneziaWgFromConfig,
   connectOpenVpnFromConfig,
@@ -110,6 +108,8 @@ import {
   getActiveProxyPort,
 } from './vpn-manager'
 import { runPrivileged, canEscalatePrivileges } from './privileged'
+import { daemonMissingOp, daemonXfrmPolicyCount } from './daemon-client'
+import type { DaemonOp } from './daemon-protocol'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './traffic-stats'
@@ -117,7 +117,6 @@ import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fet
 import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './multihop-config'
 import { SocksHttpsAgent } from './socks-agent'
 import { onV2RayUnexpectedExit, reapOrphanedProxyChildren } from './vpn-manager'
-import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'
 // Ceiling on the paginated node feed: 200 entries/page, ~10 pages for today's
@@ -205,10 +204,10 @@ function wireguardResolverIp(settings: AppSettings): string | null {
   return settings.dnsResolver === 'system' ? null : settings.dnsResolver
 }
 
-let activeWg: Wireguard | null = null
-let activeV2ray: V2Ray | null = null
-// Xray/Hysteria2 have no SDK instance (we build their configs ourselves), so we hold
-// the built config string across the subscribe→connect handoff, like activeWg/activeV2ray.
+// The config built during the handshake, held across the subscribe→connect
+// handoff. One string per protocol, all built by our own pure builders.
+let activeWgConfig: string | null = null
+let activeV2rayConfig: string | null = null
 let activeXrayConfig: string | null = null
 let activeHysteria2Config: string | null = null
 let activeAmneziaWgConfig: string | null = null
@@ -855,8 +854,8 @@ async function standDownSession(
     }
     await disconnect()
 
-    activeV2ray = null
-    activeWg = null
+    activeV2rayConfig = null
+    activeWgConfig = null
     activeXrayConfig = null
     activeHysteria2Config = null
     activeAmneziaWgConfig = null
@@ -1110,12 +1109,15 @@ function applySession(
   nodeMoniker: string,
   nodeCountry: string,
   nodeType: number,
-  result: { protocol: string; configString: string; wgInstance: Wireguard | null; v2rayInstance: V2Ray | null; v2raySummary?: string },
+  result: { protocol: string; configString: string; v2raySummary?: string },
 ): void {
   activeSessionId = sessionId
   activeNodeInfo = { address: nodeAddress, moniker: nodeMoniker, country: nodeCountry, type: nodeType, v2raySummary: result.v2raySummary }
-  activeWg = result.wgInstance
-  activeV2ray = result.v2rayInstance
+  // Every protocol now stashes a config STRING. WireGuard and V2Ray used to stash
+  // a live SDK object instead, which is why there were two connect paths per
+  // protocol (instance and from-config); they are one path now.
+  activeWgConfig = result.protocol === 'wireguard' ? result.configString : null
+  activeV2rayConfig = result.protocol === 'v2ray' ? result.configString : null
   activeXrayConfig = result.protocol === 'xray' ? result.configString : null
   activeHysteria2Config = result.protocol === 'hysteria2' ? result.configString : null
   activeAmneziaWgConfig = result.protocol === 'amneziawg' ? result.configString : null
@@ -1150,8 +1152,8 @@ function applyChainSession(
     address: exit.nodeAddress, moniker: exit.nodeMoniker,
     country: exit.nodeCountry, type: exit.nodeType,
   }
-  activeWg = null
-  activeV2ray = null
+  activeWgConfig = null
+  activeV2rayConfig = null
   activeXrayConfig = configString
   activeHysteria2Config = null
   activeAmneziaWgConfig = null
@@ -1223,19 +1225,34 @@ async function preflightConnect(
   // WireGuard/AmneziaWG/OpenVPN go up as root: without the daemon or the helper the
   // bring-up has no way to escalate and would fail after payment.
   if (protocol === 'wireguard' || protocol === 'amneziawg' || protocol === 'openvpn') {
+    const label = protocol === 'wireguard' ? 'WireGuard' : protocol === 'amneziawg' ? 'AmneziaWG' : 'OpenVPN'
     if (!canEscalatePrivileges()) {
-      const label = protocol === 'wireguard' ? 'WireGuard' : protocol === 'amneziawg' ? 'AmneziaWG' : 'OpenVPN'
       throw new Error(
         `Can't connect, not charged. The privileged helper isn't installed, so ${label} can't be brought up. Restart the app and accept the helper setup prompt.`
+      )
+    }
+    // ...and a daemon left running across an upgrade can be too old to serve the
+    // verb this protocol needs. amneziawg_* and openvpn_* were both added without
+    // a protocol-version bump, so the version number cannot see it; the daemon
+    // reports its op list instead. Refusing HERE is the point: the alternative is
+    // an `unknown op` from the bring-up, which happens after the session is paid
+    // for, and establishSessionOrRefund only covers a failed handshake.
+    // daemonMissingOp is false whenever the answer is uncertain, so this can only
+    // fire on a daemon that positively said it does not serve the op.
+    const requiredOp: DaemonOp =
+      protocol === 'wireguard' ? 'wireguard_up' : protocol === 'amneziawg' ? 'amneziawg_up' : 'openvpn_up'
+    if (await daemonMissingOp(requiredOp)) {
+      throw new Error(
+        `Can't connect, not charged. The Katacomb privileged service is out of date and can't bring up ${label}. Restart it (sudo systemctl restart katacomb-vpn-daemon) or reboot, then try again.`
       )
     }
   }
 
   let reported: string | number
   try {
-    // nodeFetch's own 8s timeout only covers socket inactivity, not the TCP
-    // connect — a blackholed node hangs well past it (measured). This gate sits
-    // in front of the connect button, so bound the whole wait.
+    // nodeFetch now enforces its own deadline across DNS, connect, TLS and body,
+    // so a blackholed node can no longer hang past it. This outer bound stays as
+    // defence in depth on the path that sits in front of the connect button.
     reported = await withTimeout(
       fetchNodeServiceType(apiField, agent),
       agent ? NODE_CHECK_VIA_PROXY_TIMEOUT_MS : NODE_PROTOCOL_CHECK_TIMEOUT_MS,
@@ -2008,8 +2025,8 @@ export async function performDisconnect(): Promise<void> {
     stopQuotaWatchdog()
     await revertPostConnectSettings()
     await disconnect()
-    activeV2ray = null
-    activeWg = null
+    activeV2rayConfig = null
+    activeWgConfig = null
     activeXrayConfig = null
     activeHysteria2Config = null
     activeAmneziaWgConfig = null
@@ -3323,7 +3340,17 @@ export function registerIpcHandlers(): void {
 
   // Connection: Check for other active VPNs
   handle(IPC.CONNECTION_CHECK_VPN, async () => {
-    return detectOtherVpn()
+    const found = detectOtherVpn()
+    // detectOtherVpn reads interfaces, so an IPsec VPN is invisible to it: those
+    // install policies, not links. Ask the daemon, which is root and can read
+    // them. Null means we could not find out (no daemon, or one too old to
+    // answer) and we simply report what we could see — this list drives a
+    // warn-with-override banner and must never become a gate.
+    const xfrm = await daemonXfrmPolicyCount()
+    if (xfrm !== null && xfrm > 0) {
+      found.push({ type: 'ipsec', name: 'IPsec VPN' })
+    }
+    return found
   })
 
   // Connection: Connect (establish tunnel — from SDK instance or raw config)
@@ -3373,19 +3400,17 @@ export function registerIpcHandlers(): void {
           // Same config, minus DNS (the resolvconf-missing retry), or with the
           // node's DNS list swapped for the user's resolver. config-guard still
           // validates it either way (DNS is an optional key in the allow-list).
-          const base = params.configString ?? activeWg?.buildConfigString()
-          if (!base) throw new Error('No WireGuard instance or config available')
+          const base = params.configString ?? activeWgConfig
+          if (!base) throw new Error('No WireGuard config available')
           await connectWireGuardFromConfig(
             // dnsFallback wins: it exists because resolvconf is missing, so ANY
             // DNS line fails the bring-up, including one we chose.
             dnsFallback || !wgDns ? stripDnsLines(base) : replaceDnsLines(base, wgDns),
           )
-        } else if (activeWg) {
-          await connectWireGuard(activeWg)
-        } else if (params.configString) {
-          await connectWireGuardFromConfig(params.configString)
         } else {
-          throw new Error('No WireGuard instance or config available')
+          const base = activeWgConfig ?? params.configString
+          if (!base) throw new Error('No WireGuard config available')
+          await connectWireGuardFromConfig(base)
         }
 
         // Apply DNS and kill switch if enabled
@@ -3440,16 +3465,12 @@ export function registerIpcHandlers(): void {
         // Resolve the DoH resolver up front so it's injected into the v2ray config
         // (same value applyPostConnectSettings uses for resolv.conf + kill switch).
         const dohIp = effectiveV2RayResolverIp(loadSettings())
-        if (activeV2ray) {
-          connectV2Ray(activeV2ray, dohIp, { proxyOnly })
-        } else if (params.configString) {
-          connectV2RayFromConfig(params.configString, dohIp, { proxyOnly })
-        } else {
-          throw new Error('No V2Ray instance or config available')
-        }
+        const v2rayCfg = activeV2rayConfig ?? params.configString
+        if (!v2rayCfg) throw new Error('No V2Ray config available')
+        connectV2RayFromConfig(v2rayCfg, dohIp, { proxyOnly })
         await finishChildProxyConnect({
           protocol: 'v2ray', label: 'V2Ray', proxyOnly,
-          fromSavedConfig: !activeV2ray && !!params.configString,
+          fromSavedConfig: !activeV2rayConfig && !!params.configString,
         })
         return { protocol: 'v2ray' }
       }

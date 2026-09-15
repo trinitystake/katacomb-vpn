@@ -30,10 +30,19 @@ func Dispatch(ctx context.Context, req protocol.Request, e *ops.Env) protocol.Re
 
 	switch req.Op {
 	case "protocol_version":
-		return reply(map[string]int{"version": protocol.Version})
+		// `ops` is additive on the wire: a daemon older than this change replies
+		// with `version` alone, and the client treats a missing list as "cannot
+		// say", falling back to the `unknown op` match.
+		return reply(map[string]any{"version": protocol.Version, "ops": protocol.Ops})
 
 	case "status":
 		return reply(ops.Status(e))
+
+	case "xfrm_policies":
+		// Read-only, like status: no lock, no state change. Lets the app warn about
+		// an IPsec VPN it structurally cannot see for itself (no interface, and
+		// reading policies needs CAP_NET_ADMIN).
+		return reply(map[string]int{"count": ops.XfrmPolicyCount(ctx, e)})
 
 	case "wireguard_up":
 		cfg, ok := args.str("configString")
@@ -103,14 +112,14 @@ func Dispatch(ctx context.Context, req protocol.Request, e *ops.Env) protocol.Re
 		if !ok || !guard.IsValidInterfaceName(iface) {
 			return fail("tun_up: invalid iface")
 		}
-		var bypass []string
-		for _, r := range args.strs("bypassRoutes") {
-			if guard.IsAllowedBypassCidr(r) {
-				bypass = append(bypass, r)
-			}
-		}
+		// bypassRoutes are type-checked here (they must be strings) and VALUE-checked
+		// in ops, which is the trust boundary both doors reach. Filtering here as
+		// well meant ops never saw a rejected entry and so could not report one.
 		// The engine is embedded in this helper; a client-supplied path never mattered here.
-		p := ops.TunUpParams{SocksAddr: socks, RemoteHost: remote, Gateway: gw, Iface: iface, BypassRoutes: bypass}
+		p := ops.TunUpParams{
+			SocksAddr: socks, RemoteHost: remote, Gateway: gw, Iface: iface,
+			BypassRoutes: args.strs("bypassRoutes"),
+		}
 		if _, err := ops.TunUp(ctx, e, p); err != nil {
 			return failErr(err)
 		}

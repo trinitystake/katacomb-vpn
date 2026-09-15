@@ -250,7 +250,14 @@ func TestStatusReadsTheInterfaceTable(t *testing.T) {
 
 func TestProtocolVersion(t *testing.T) {
 	r := newRec(t)
-	if got := string(call(t, r, "protocol_version", "").Encode()); got != `{"id":1,"ok":true,"result":{"version":1}}` {
+	// The reply carries the op list as well as the number, so that an upgraded
+	// app can tell a stale daemon what it cannot do before acting on it. Encoded
+	// via a map, so Go sorts the keys: ops before version.
+	got := string(call(t, r, "protocol_version", "").Encode())
+	if !strings.HasPrefix(got, `{"id":1,"ok":true,"result":{"ops":["protocol_version",`) {
+		t.Fatal(got)
+	}
+	if !strings.HasSuffix(got, `"dns_restore"],"version":1}}`) {
 		t.Fatal(got)
 	}
 }

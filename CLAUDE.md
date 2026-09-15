@@ -160,8 +160,20 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   (newline-delimited JSON, 256 KiB cap, one mutex for state-changing ops with `status`
   exempt, 60 s per op); `internal/oneshot` is the argv contract. `daemon-protocol.ts`
   and `daemon-client.ts` are unchanged: the JSON shapes, op names and every `fail()`
-  string are byte-compatible, and `unknown op: <op>` is what `vpn-manager` matches to
-  detect a stale daemon after an upgrade (nothing calls `protocol_version`).
+  string are byte-compatible. **The two sides are pinned by a shared corpus**
+  (`daemon/internal/protocol/testdata/corpus/protocol.json`, read by
+  `protocol/corpus_test.go`, `server/corpus_test.go` and
+  `src/main/daemon-protocol-corpus.test.ts`) — the same arrangement the guard corpus
+  has always had, which the "byte for byte" claim previously lacked.
+  **`protocol_version` now reports `{version, ops}` and IS called.** The version
+  integer alone could never detect the skew that actually happens, because adding an
+  op is deliberately not a version bump (`amneziawg_*` and `openvpn_*` were both
+  additive) — so a daemon left running across an upgrade was found by `unknown op`
+  from the bring-up, which for those two protocols is AFTER the session is paid for.
+  `daemonMissingOp()` asks the op list in `preflightConnect` instead, and returns
+  false whenever the answer is uncertain (no daemon, old daemon, failed probe), so it
+  can only ever add a refusal we are sure of. `ops` is additive on the wire and the
+  `unknown op` match stays as the fallback for a daemon too old to answer.
 - **The exact command lines are pinned by golden transcripts**
   (`daemon/internal/ops/testdata/transcripts/`), captured from the ORIGINAL bash helper
   by `scripts/capture-helper-transcripts.sh` in a `debian:bookworm` container with every
@@ -288,8 +300,15 @@ The connect path spends real on-chain funds, so these are enforced and must hold
   `alreadyConnected`, Sessions' Reconnect) — but that is UX; the handlers are the
   enforcement. Third-party VPNs (`detectOtherVpn`: non-sntl wireguard/tun links)
   stay a warn-with-override, never a hard block — the detection false-positives on
-  Tailscale, and IPsec/XFRM VPNs are invisible to it (reading xfrm policy needs
-  CAP_NET_ADMIN), so it can inform but must not gate.
+  Tailscale. **IPsec/XFRM VPNs are no longer invisible**: reading xfrm policy needs
+  CAP_NET_ADMIN, so the helper does it (`ops.XfrmPolicyCount`, daemon op
+  `xfrm_policies`, read-only and lock-free) and `CONNECTION_CHECK_VPN` merges the
+  answer in. Counting only policies with a `tmpl` line is load-bearing: the kernel
+  installs template-less socket policies of its own on some systems, and without that
+  filter this reports a VPN on an idle machine. It is **daemon-only, never the pkexec
+  fallback** — routing it through pkexec would put a password prompt in front of a
+  warning nobody asked for. No daemon means no answer, and the check still informs
+  rather than gates.
 - **The active wallet is frozen while a session is live.** `WALLET_SWITCH`, `WALLET_IMPORT`
   (an import becomes active), `WALLET_DELETE`, `WALLET_DELETE_ALL` and `WALLET_DELETE_SEED`
   call `assertNotConnected('switching wallets')` and friends, and `activeWalletId` is not a

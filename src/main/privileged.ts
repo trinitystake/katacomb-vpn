@@ -50,9 +50,24 @@ export async function runPrivileged(args: string[]): Promise<void> {
       return
     } catch (err) {
       // Only fall back to pkexec when the daemon is unreachable (dead process,
-      // stale socket after an OOM/crash). A live daemon that *rejected* the op
-      // (validation failure) must propagate — never silently retry it as root.
+      // stale socket after an OOM/crash, or a socket this session may not open).
+      // A live daemon that *rejected* the op (validation failure) must propagate —
+      // never silently retry it as root.
       if (!(err instanceof DaemonUnreachableError)) throw err
+      // Say WHY. This is a silent downgrade from password-free to a polkit prompt,
+      // and the two causes need opposite remedies, so discarding the error (as this
+      // did) sends you debugging the wrong one. EACCES means the daemon is healthy
+      // and THIS SESSION simply is not in the katacomb-vpn group: membership is
+      // fixed at login, so a fresh .deb install prompts until the user logs out and
+      // back in — and `postrm` groupdel's the group, so a remove/reinstall cycle
+      // re-arms it with the same gid. Anything else means the daemon really is gone.
+      // Diagnosed live 2026-09-15 from an unexplained prompt on a working deb.
+      console.warn(
+        /EACCES/.test(err.message)
+          ? `[privileged] daemon socket exists but is not accessible to this session (${err.message}). ` +
+            'Falling back to pkexec; log out and back in to pick up the katacomb-vpn group.'
+          : `[privileged] daemon unreachable (${err.message}). Falling back to pkexec.`,
+      )
       // fall through to the pkexec path below with the same args
     }
   }
@@ -76,8 +91,8 @@ async function runViaDaemon(args: string[]): Promise<void> {
       await daemonRequest('wireguard_down')
       return
     case 'awg-up': {
-      // rest = [configPath, binDir] — content is sent like `up`; the bindir is
-      // dropped because the daemon resolves + SHA-pins its own AWG trio.
+      // rest = [configPath, binDir] — content is sent like `up`; the bindir slot is
+      // ignored on both doors since the AmneziaWG device was compiled into the helper.
       const configString = readFileSync(rest[0], 'utf-8')
       await daemonRequest('amneziawg_up', { configString })
       return

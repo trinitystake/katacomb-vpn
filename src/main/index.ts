@@ -143,12 +143,24 @@ function trayImage(key: string): Electron.NativeImage {
   return icon.isEmpty() ? nativeImage.createFromPath(getTrayIconPath(`${key}-256x256.png`)) : icon
 }
 
-// Which tray PNG is currently on the icon, so a repaint that wouldn't change it
-// can be skipped. Every setImage is a visible repaint of the panel item, and
-// nativeTheme fires 'updated' three times per theme toggle (measured on Cinnamon,
-// all three carrying the same value) — painting each one is what made the icon
-// blink before settling. Guarding on the filename collapses the burst to the one
-// repaint that actually changes something, with no delay added.
+// Which tray PNG we last ASKED the panel to show, so a repaint that wouldn't
+// change it can be skipped. Every setImage is a visible repaint of the panel
+// item, and nativeTheme fires 'updated' three times per theme toggle (measured
+// on Cinnamon, all three carrying the same value) — painting each one is what
+// made the icon blink before settling. Guarding on the filename collapses the
+// burst to the one repaint that actually changes something, with no delay added.
+//
+// It records INTENT, not what the panel actually displays, and setImage reports
+// nothing — so the guard alone makes a dropped repaint permanent: one attempt
+// per transition and never a retry. Live on the AppImage 2026-09-14, a connected
+// V2Ray tunnel sat under the amber "connecting" dot indefinitely while the
+// tooltip, the menu and the window all said Connected (those are separate D-Bus
+// properties, so only the image was lost). The AppImage is where it shows because
+// AppRun puts $APPDIR/usr/lib ahead of the system and electron-builder stages the
+// dead GTK2-era libappindicator.so.1 there, so it binds that instead of the
+// host's libayatana-appindicator3; the deb, same panel, repaints correctly.
+// Hence `force` below: connection state changes a handful of times a session and
+// every one matters, while the theme burst is three events that must collapse.
 let trayIconKey = ''
 
 function createTrayIcon(): void {
@@ -169,8 +181,11 @@ function createTrayIcon(): void {
   nativeTheme.on('updated', () => refreshTray(getConnectionInfo()))
 }
 
-/** Rebuild the tray icon, tooltip + context menu to reflect the current connection state. */
-function refreshTray(info: ConnectionInfo): void {
+/**
+ * Rebuild the tray icon, tooltip + context menu to reflect the current connection
+ * state. `force` repaints even when the filename is unchanged — see trayIconKey.
+ */
+function refreshTray(info: ConnectionInfo, force = false): void {
   if (!tray) return
   const connected = info.state === 'connected'
   const connecting = info.state === 'connecting'
@@ -178,7 +193,7 @@ function refreshTray(info: ConnectionInfo): void {
   const status = connected ? `Connected${where}` : connecting ? `Connecting…${where}` : 'Disconnected'
 
   const iconKey = trayIconKeyFor(info.state)
-  if (iconKey !== trayIconKey) {
+  if (force || iconKey !== trayIconKey) {
     tray.setImage(trayImage(iconKey))
     trayIconKey = iconKey
   }
@@ -473,9 +488,13 @@ app.whenReady().then(() => {
   probeTrayHost()
   createWindow()
   createTrayIcon()
-  // Keep the tray tooltip + menu in sync with connect/disconnect (incl. from the
-  // renderer, auto-reconnect, or the tray itself).
-  onConnectionStateChanged(refreshTray)
+  // Keep the tray icon, tooltip + menu in sync with connect/disconnect (incl. from
+  // the renderer, auto-reconnect, or the tray itself). Forced: these are the few
+  // repaints a session that must not be skipped, and the connect path publishes
+  // 'connected' twice on purpose — once when the interface appears, once from
+  // notifyTraySettled after assertTunnelCarriesTraffic (up to ~36s later) — so
+  // forcing turns the second push back into the free retry it was meant to be.
+  onConnectionStateChanged((info) => refreshTray(info, true))
 
   // Background prefetch so the Plans tab feels instant on first open.
   // Safely returns cached data if VPN is already active.

@@ -10,10 +10,6 @@ const INSTALL_COMMANDS: Record<string, { label: string; command: string }[]> = {
   v2ray: [
     { label: 'Official script', command: 'bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)' },
   ],
-  tun2socks: [
-    { label: 'Debian/Ubuntu', command: 'sudo apt install tun2socks' },
-    { label: 'Arch (AUR)', command: 'yay -S tun2socks-bin' },
-  ],
 }
 
 interface Props {
@@ -43,7 +39,7 @@ export default function BinarySetup({ onDismiss }: Props) {
 
   if (!status) return null
 
-  const allOk = status.wireguard && status.v2ray && status.tun2socks
+  const allOk = status.wireguard && status.v2ray
   if (allOk) return null
 
   return (
@@ -64,7 +60,6 @@ export default function BinarySetup({ onDismiss }: Props) {
           {([
             ['wireguard', 'WireGuard (wg-quick)', status.wireguard],
             ['v2ray', 'V2Ray', status.v2ray],
-            ['tun2socks', 'tun2socks', status.tun2socks],
           ] as const).map(([key, label, ok]) => (
             <div key={key} className={`border px-4 py-3 space-y-2 rounded-md ${ok ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle'}`}>
               <div className="flex items-center justify-between">

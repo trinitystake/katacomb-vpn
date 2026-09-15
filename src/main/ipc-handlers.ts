@@ -3598,12 +3598,15 @@ export function registerIpcHandlers(): void {
     return runAutoRpcSelectionReport()
   })
 
-  // Binary check — checks bundled binaries first, then system PATH
+  // Binary check — checks bundled binaries first, then system PATH. tun2socks is
+  // deliberately NOT here: the engine is compiled into the privileged helper, so
+  // there is no tun2socks executable to find and no package that would be used if
+  // one were installed. Probing for it reported a permanent "Missing" on a healthy
+  // install (seen on the 1.9.0 deb) and pointed users at an irrelevant apt package.
   handle(IPC.BINARY_CHECK, async () => {
     return {
       wireguard: binaryExists('wg-quick'),
       v2ray: isBinaryAvailable('v2ray'),
-      tun2socks: isBinaryAvailable('tun2socks'),
     }
   })
 

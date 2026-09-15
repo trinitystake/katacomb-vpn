@@ -536,7 +536,6 @@ export interface RpcAutoSelectReport {
 export interface BinaryStatus {
   wireguard: boolean
   v2ray: boolean
-  tun2socks: boolean
 }
 
 export interface NodeProbeResult {

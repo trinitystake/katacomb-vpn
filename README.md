@@ -11,7 +11,7 @@ from independent node operators with a wallet you hold the keys to.
 
 Electron 41 + React 18 + TypeScript. **Linux x86_64 only.**
 
-> **Status:** release (1.9.0). Connecting spends real funds. See
+> **Status:** release (1.9.1). Connecting spends real funds. See
 > [Money](#money-this-app-spends-real-funds).
 
 ---
@@ -137,7 +137,7 @@ with `gpg --armor --detach-sign dist/SHA256SUMS`.
 ### .deb (recommended)
 
 ```bash
-sudo apt install ./dist/katacomb-vpn_1.9.0_amd64.deb
+sudo apt install ./dist/katacomb-vpn_1.9.1_amd64.deb
 ```
 
 Pulls in Electron's GUI libraries (GTK, NSS, libsecret and friends) plus
@@ -161,8 +161,8 @@ than falling back to weak encryption, so a missing keyring is visible, not silen
 ### AppImage
 
 ```bash
-chmod +x dist/katacomb-vpn-1.9.0.AppImage
-./dist/katacomb-vpn-1.9.0.AppImage
+chmod +x dist/katacomb-vpn-1.9.1.AppImage
+./dist/katacomb-vpn-1.9.1.AppImage
 ```
 
 No daemon here, so each privileged operation goes through `pkexec` (one prompt, cached
@@ -176,7 +176,7 @@ with `sudo apt install libfuse2t64` (24.04+) or `libfuse2` (22.04), or skip FUSE
 entirely:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./katacomb-vpn-1.9.0.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./katacomb-vpn-1.9.1.AppImage
 ```
 
 which unpacks to a temp directory and runs from there (verified working, no mount).

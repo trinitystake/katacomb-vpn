@@ -1557,6 +1557,23 @@ This codebase follows Karpathy-style discipline. Apply these in order of precede
 ### Packaging
 
 `electron-builder.yml` targets Linux only (AppImage + deb). Bundled binaries live in
+**The `v2ray` binary CANNOT be replaced by `xray`, so both ship.** Tested, not
+assumed, because the reasoning that they could is seductive: xray-core IS a
+v2ray-core fork, it DOES read the same JSON config, and multihop already runs
+v2ray-shaped configs on the xray binary. `scripts/verify-xray-v2ray-parity.sh`
+generates the real configs (the SDK's V2Ray shapes for all 81
+transport x proxy x security combinations, then the app's own transform chain) and
+runs both binaries' config validators over them. Against Xray 26.3.27: **v2ray
+accepts 162/162, xray accepts 0**. Two blockers have no config-level workaround:
+`allowInsecure` has been **removed** (migrated to `pinnedPeerCertSha256`, and there is
+no certificate pin for a plain V2Ray node to migrate to — see the node-trust
+invariant, nothing on chain authenticates a node's certificate), and the
+`http`/`quic`/`domainsocket`/`gun` transports are gone. Two more are rewritable and
+are listed only so nobody re-derives them: the SDK's global `transport` block, and
+`routing.balancers` with `leastping`, which needs an observatory in xray. Re-run the
+script after any xray bump; if it ever prints PARITY, the change is
+`resolveV2RayBinary()` plus the pin in `binary-integrity.ts`.
+
 `resources/linux/bin/`, beside their `LICENSE.*` texts, and reach the package through the
 ONE `extraResources` entry for `resources/linux/` (copyDir preserves the `bin/` and
 `privileged/` subfolders). That entry excludes `packaging/` on purpose: fpm embeds a

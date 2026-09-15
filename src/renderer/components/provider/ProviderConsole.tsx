@@ -15,6 +15,7 @@ import Spinner from '../Spinner'
 import ProviderDetailsFields from './ProviderDetailsFields'
 import ProviderIdentityCard from './ProviderIdentityCard'
 import ProviderPlans from './ProviderPlans'
+import type { NodeActionState } from './PlanNodesManager'
 
 /**
  * The Provider tab.
@@ -40,7 +41,11 @@ export default function ProviderConsole({
   loading,
   error,
   refresh,
-}: ProviderState) {
+  nodeAction,
+}: ProviderState & {
+  /** Owned by App so a Link or Unlink survives this tab being switched away from. */
+  nodeAction: NodeActionState
+}) {
   const { status: connStatus } = useConnection()
   const { state: rpcState } = useRpcHealth()
   const tunnelUp = connStatus.state === 'connected' || connStatus.state === 'reconnecting'
@@ -139,6 +144,7 @@ export default function ProviderConsole({
         economics={economics}
         onChanged={refresh}
         onLinkedNodesCounted={setConfirmedLinkedNodes}
+        nodeAction={nodeAction}
       />
     </div>
   )

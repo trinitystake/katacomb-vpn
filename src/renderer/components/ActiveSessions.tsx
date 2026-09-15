@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useConnection } from '../hooks/useConnection'
 import { usePlansContext } from '../contexts/PlansContext'
 import { formatBytes as formatPlanBytes, formatDuration as formatPlanDuration } from '../utils/format'
@@ -15,6 +15,16 @@ interface Props {
   loading: boolean
   refreshing: boolean
   refresh: () => Promise<void>
+  /**
+   * The session an End or Reconnect is currently running for, and any error the
+   * last one left. Both are owned by App, not by this component: the tab is
+   * rendered conditionally, so switching away unmounts us mid-transaction (see
+   * the comment at the declaration).
+   */
+  busy: string | null
+  setBusy: (id: string | null) => void
+  error: string | null
+  setError: (message: string | null) => void
 }
 
 function formatBytes(bytes: string): string {
@@ -73,9 +83,16 @@ interface SessionUsage {
   seconds: number
 }
 
-export default function ActiveSessions({ sessions, loading, refreshing, refresh }: Props) {
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+export default function ActiveSessions({
+  sessions,
+  loading,
+  refreshing,
+  refresh,
+  busy,
+  setBusy,
+  error,
+  setError,
+}: Props) {
   const { status, refresh: refreshConnection } = useConnection()
   const { overview: { allocations } } = usePlansContext()
   const reconnect = useReconnect()

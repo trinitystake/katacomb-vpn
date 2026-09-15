@@ -11,6 +11,23 @@ import { RENEWAL_POLICY_OPTIONS, renewalPolicyLabel } from '../../../shared/rene
 import LeaseManageModal from './LeaseManageModal'
 
 /**
+ * Link and Unlink run as on-chain transactions from in-place buttons, with no
+ * overlay over the tab bar — so unlike the lease modals below, the user can switch
+ * tabs while one is in flight, and that unmounts this whole subtree (the Provider
+ * tab is rendered conditionally in App). The marker and the error therefore belong
+ * to App, not here: without that the buttons came back live while the tx was still
+ * being broadcast, and a second Link would collide with the first on the account
+ * sequence number, while the failure of the first had nowhere left to render.
+ */
+export interface NodeActionState {
+  /** The node an on-chain Link or Unlink is currently running for. */
+  busyAddress: string | null
+  setBusyAddress: (address: string | null) => void
+  error: string | null
+  setError: (message: string | null) => void
+}
+
+/**
  * Nodes serving one plan.
  *
  * Attaching a node is two on-chain steps, not one: the hub's HandleMsgLinkNode
@@ -20,7 +37,7 @@ import LeaseManageModal from './LeaseManageModal'
  * that is leased but not linked gets its own group with a Link button, which is
  * also what the user comes back to if the app is closed between the two.
  */
-export default function PlanNodesManager({ plan, leases, price, economics, providerActive, readOnly, onChanged }: {
+export default function PlanNodesManager({ plan, leases, price, economics, providerActive, readOnly, onChanged, nodeAction }: {
   plan: MyPlan
   leases: LeaseSummary[]
   price: TokenPrice | null
@@ -31,6 +48,8 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
   readOnly: boolean
   /** Resolves once the chain has been re-read, so a caller can hold its busy state until then. */
   onChanged: () => Promise<void>
+  /** Owned by App so a Link or Unlink survives a tab switch. See NodeActionState. */
+  nodeAction: NodeActionState
 }) {
   const { allNodes, loading: nodesLoading, error: nodesError } = useNodesContext()
   const [linked, setLinked] = useState<string[] | null>(null)
@@ -39,8 +58,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
   // (PlanDetailPane) draws the same line.
   const [linkedUnknown, setLinkedUnknown] = useState(false)
   const [managingLease, setManagingLease] = useState<LeaseSummary | null>(null)
-  const [busyAddress, setBusyAddress] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const { busyAddress, setBusyAddress, error, setError } = nodeAction
   const [leasingNode, setLeasingNode] = useState<SentNode | null>(null)
   const { requestConfirm, confirmDialog } = useConfirm()
 
@@ -88,7 +106,7 @@ export default function PlanNodesManager({ plan, leases, price, economics, provi
     } finally {
       setBusyAddress(null)
     }
-  }, [refreshAll])
+  }, [refreshAll, setBusyAddress, setError])
 
   async function handleUnlink(address: string) {
     if (!(await requestConfirm({

@@ -5,7 +5,7 @@ import { isTestPlan } from '../../../shared/test-plan'
 import { displayConnectError } from '../../utils/connect-errors'
 import { useConfirm, type ConfirmOptions } from '../ConfirmModal'
 import Spinner from '../Spinner'
-import PlanNodesManager from './PlanNodesManager'
+import PlanNodesManager, { type NodeActionState } from './PlanNodesManager'
 import { STATUS_ACTIVE, formatUdvpnAmount, formatUsd } from '../../utils/provider-format'
 
 function formatSize(bytes: string): string {
@@ -64,6 +64,8 @@ interface Props {
    * the counters could not be read for every plan — never a guessed zero.
    */
   onLinkedNodesCounted: (count: number | null) => void
+  /** Threaded to PlanNodesManager, which cannot own it. See NodeActionState. */
+  nodeAction: NodeActionState
 }
 
 export default function ProviderPlans({
@@ -75,6 +77,7 @@ export default function ProviderPlans({
   economics,
   onChanged,
   onLinkedNodesCounted,
+  nodeAction,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
@@ -242,6 +245,7 @@ export default function ProviderPlans({
             providerActive={providerActive}
             readOnly={readOnly}
             onChanged={handleChanged}
+            nodeAction={nodeAction}
           />
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2 px-8 text-center">

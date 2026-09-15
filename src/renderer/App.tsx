@@ -218,6 +218,22 @@ function AppInner() {
     if (wallet.address) setAddingWallet(false)
   }, [wallet.address])
   const sessionsState = useSessions()
+  // Ending or reconnecting a session is an on-chain transaction, and it outlives a
+  // tab switch — but the Sessions tab does not: it is rendered conditionally below,
+  // so switching away UNMOUNTS ActiveSessions and destroyed the in-flight marker
+  // with it. The row came back with no spinner and both buttons live while the
+  // cancel was still being broadcast, a second End would collide with the first on
+  // the account sequence number, and a failure had nowhere left to render (React
+  // drops a setState on an unmounted component silently, so the error pane never
+  // fired). Owning both here keeps them alive across the switch.
+  const [sessionBusy, setSessionBusy] = useState<string | null>(null)
+  const [sessionError, setSessionError] = useState<string | null>(null)
+  // Same story one tab over: the Provider console's Link and Unlink are on-chain
+  // transactions driven from in-place buttons, and the tab unmounts the whole
+  // console under them. (Its lease dialogs need no equivalent: they are fixed
+  // overlays, so the tab bar cannot be reached while one is running.)
+  const [nodeActionBusy, setNodeActionBusy] = useState<string | null>(null)
+  const [nodeActionError, setNodeActionError] = useState<string | null>(null)
   // Live sessions only. An ended one is still listed while it settles on chain, but
   // the badge means "this needs you", and a settling row does not.
   const sessionCount = sessionsState.sessions.filter((s) => s.status === 'active').length
@@ -406,9 +422,23 @@ function AppInner() {
             loading={sessionsState.loading}
             refreshing={sessionsState.refreshing}
             refresh={sessionsState.refresh}
+            busy={sessionBusy}
+            setBusy={setSessionBusy}
+            error={sessionError}
+            setError={setSessionError}
           />
         )}
-        {mainTab === 'provider' && <ProviderConsole {...providerState} />}
+        {mainTab === 'provider' && (
+          <ProviderConsole
+            {...providerState}
+            nodeAction={{
+              busyAddress: nodeActionBusy,
+              setBusyAddress: setNodeActionBusy,
+              error: nodeActionError,
+              setError: setNodeActionError,
+            }}
+          />
+        )}
       </main>
 
       <StatusBar onShowAbout={() => setShowAbout(true)} />

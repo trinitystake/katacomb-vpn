@@ -5,7 +5,6 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { app } from 'electron'
 import { is } from '@electron-toolkit/utils'
-import type { Wireguard, V2Ray } from '@sentinel-official/sentinel-js-sdk'
 import {
   assertSafeWireguardConfig,
   assertSafeAmneziaWgConfig,
@@ -605,74 +604,9 @@ export function detectExistingConnection(): void {
   }
 }
 
-export function connectV2Ray(v2ray: V2Ray, dohResolverIp?: string | null, opts?: { proxyOnly?: boolean }): void {
-  const bin = resolveV2RayBinary()
-  if (bin === 'v2ray' && !binaryExists('v2ray')) {
-    throw new Error('v2ray binary not found. The bundled binary is missing and no system v2ray is installed.')
-  }
-
-  // Use SDK to write config, then spawn ourselves (SDK hardcodes V5 CLI syntax)
-  const configFile = v2ray.writeConfig()
-  // Pin the node endpoint to an IP (so v2ray never re-resolves it through the
-  // tunnel and deadlocks) and turn on v2ray's diagnostic logging (the SDK
-  // silences it). Then re-validate: node-supplied config must reject log
-  // file-paths / non-loopback inbounds before spawn.
-  const cfg = pinV2RayNodeAddresses(
-    withV2RayDiagnosticLog(JSON.parse(readFileSync(configFile, 'utf-8'))),
-    resolveHostToIPv4,
-  )
-  assertSafeV2RayConfig(cfg)
-  // After validating the node-supplied config, inject our DoH block (trusted,
-  // derived only from the allow-listed resolver IP) so OS DNS is re-resolved over
-  // HTTPS inside v2ray and tunnelled to the node — the node never sees the query.
-  const finalCfg = dohResolverIp ? withV2RayDoH(cfg, dohResolverIp) : cfg
-  writeFileSync(configFile, JSON.stringify(finalCfg, null, 2), { mode: 0o600 })
-  const child = spawnV2Ray(configFile)
-
-  activeChild = child
-  activeProtocol = 'v2ray'
-  activeMode = opts?.proxyOnly ? 'proxy' : 'tunnel'
-  activeConfigFile = configFile
-}
-
 /** Bring up tun2socks after V2Ray is confirmed running — called from IPC handler */
 export async function bringUpV2RayTunnel(): Promise<void> {
   await bringUpTun()
-}
-
-export async function connectWireGuard(wg: Wireguard): Promise<void> {
-  if (!binaryExists('wg-quick')) {
-    throw new Error(
-      'wg-quick not found in PATH. Install wireguard-tools: sudo apt install wireguard-tools'
-    )
-  }
-
-  await ensureSntl0Down()
-
-  // Use buildConfigString and write to our own sntl0.conf instead of SDK's wgsent0.conf
-  // This ensures we always use the sntl0 interface name, compatible with the helper script
-  const built = wg.buildConfigString()
-  if (!built) {
-    throw new Error('Failed to build WireGuard config')
-  }
-
-  // Nodes advertise their endpoint as a hostname (on-chain remoteAddrs), which
-  // leaves the kill switch with nothing to whitelist. Pin it while normal DNS
-  // still works — before the guard, so what we validate is what we write.
-  const configString = pinWireguardEndpoint(built, resolveHostToIPv4)
-
-  // Node operators are untrusted: reject any config carrying script-executing
-  // directives (PostUp/PreUp/…) before wg-quick runs it as root.
-  assertSafeWireguardConfig(configString)
-
-  const configFile = join(SECURE_TMPDIR, `${WG_IFACE}.conf`)
-  writeFileSync(configFile, configString, { mode: 0o600 })
-
-  await bringUpWireGuard(configFile)
-
-  activeProtocol = 'wireguard'
-  activeMode = 'tunnel'
-  activeConfigFile = configFile
 }
 
 export async function connectWireGuardFromConfig(raw: string): Promise<void> {

@@ -1,7 +1,8 @@
 import { DirectSecp256k1HdWallet } from '@cosmjs/proto-signing'
 import { stringToPath } from '@cosmjs/crypto'
 import Long from 'long'
-import { SentinelClient, privKeyFromMnemonic } from '@sentinel-official/sentinel-js-sdk'
+import { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
+import { derivePrivKey } from './chain-keys'
 import { Session as NodeSession } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/node/v3/session'
 import { Session as SubSession } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/subscription/v3/session'
 import { generateMnemonic } from '@scure/bip39'
@@ -75,10 +76,10 @@ export async function importWallet(mnemonic: string, name?: string, accountIndex
     hdPaths: [cosmosHdPath(accountIndex)],
   })
   const [account] = await wallet.getAccounts()
-  // The hdPath is not optional here: privKeyFromMnemonic defaults to account 0,
-  // which for any other account index would sign node handshakes with a key that
-  // doesn't match the address the session was bought with.
-  const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath: cosmosHdPath(accountIndex) })
+  // derivePrivKey REQUIRES the path, unlike the SDK helper it replaced, which
+  // defaulted to account 0 — for any other account index that silently signed node
+  // handshakes with a key that did not match the address the session was bought with.
+  const privKey = await derivePrivKey(wallet.mnemonic, cosmosHdPath(accountIndex))
 
   const walletName = name || `Wallet ${listWallets().length + 1}`
   const entry = addWalletEntry(walletName, account.address, wallet.mnemonic, { accountIndex })
@@ -108,7 +109,7 @@ export async function restoreWallet(): Promise<string | null> {
       hdPaths: [hdPath],
     })
     const [account] = await wallet.getAccounts()
-    const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath })
+    const privKey = await derivePrivKey(wallet.mnemonic, hdPath)
 
     state.wallet = wallet
     state.address = account.address
@@ -141,7 +142,7 @@ export async function switchWallet(walletId: string): Promise<string | null> {
       hdPaths: [hdPath],
     })
     const [account] = await wallet.getAccounts()
-    const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath })
+    const privKey = await derivePrivKey(wallet.mnemonic, hdPath)
 
     state.wallet = wallet
     state.address = account.address
@@ -260,7 +261,7 @@ export async function loadWalletCredentials(walletId: string): Promise<WalletCre
     hdPaths: [hdPath],
   })
   const [account] = await wallet.getAccounts()
-  const privKey = await privKeyFromMnemonic({ mnemonic: wallet.mnemonic, hdPath })
+  const privKey = await derivePrivKey(wallet.mnemonic, hdPath)
   return { wallet, address: account.address, privKey }
 }
 

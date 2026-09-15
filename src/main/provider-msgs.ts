@@ -13,7 +13,7 @@
 //    dist/protobuf/sentinel/lease/v1/ but there is no `modules/lease`, and
 //    `SentinelRegistry` omits the type URLs. A lease is not optional — the hub's
 //    HandleMsgLinkNode rejects unless `HasAnyLeaseForNodeByProvider(...)` — so we
-//    supply the encode objects and extend the registry (PROVIDER_REGISTRY).
+//    supply the encode objects and extend the registry (CHAIN_REGISTRY).
 //
 // Field shapes and validation mirror sentinelhub v12 (x/plan/types/v3/msg.go,
 // x/lease/types/v1/msg.go, types/v1/price.go) so an invalid input fails here
@@ -81,7 +81,18 @@ export const MsgUpdatePlanDetailsTypeUrl = '/sentinel.plan.v3.MsgUpdatePlanDetai
  * REPLACES the default rather than merging with it — hence spreading
  * `SentinelRegistry` back in here.
  */
-export const PROVIDER_REGISTRY = new Registry([
+/**
+ * THE registry, for every signing client the app builds.
+ *
+ * There used to be two: this one (provider-console) and a bare
+ * `new Registry(SentinelRegistry)` in chain-clients. The SDK's list omits the
+ * whole x/lease module and MsgUpdatePlanDetails, so a client built from it could
+ * not encode those messages — it worked only because lease and plan-details
+ * traffic happened to go through the console. Anything moved onto the connect
+ * flow's client would have failed at encode time, at the point of spending money.
+ * One registry, so that cannot happen.
+ */
+export const CHAIN_REGISTRY = new Registry([
   ...SentinelRegistry,
   [MsgStartLeaseTypeUrl, MsgStartLeaseRequest as unknown as GeneratedType],
   [MsgEndLeaseTypeUrl, MsgEndLeaseRequest as unknown as GeneratedType],

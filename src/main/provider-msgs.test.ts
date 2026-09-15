@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import Long from 'long'
 import { planCreate, SentinelRegistry } from '@sentinel-official/sentinel-js-sdk'
 import {
-  PROVIDER_REGISTRY,
+  CHAIN_REGISTRY,
   MsgStartLeaseTypeUrl,
   MsgUpdatePlanDetailsTypeUrl,
   assertValidLeaseHours,
@@ -92,8 +92,8 @@ test('assertValidPlanInput allows a free plan but rejects a negative price', () 
 
 test('buildCreatePlanMsg survives a registry encode/decode round-trip with bytes and duration intact', () => {
   const msg = buildCreatePlanMsg(PROV, { gigabytes: 250, days: 30, priceUdvpn: 25_000_000, private: false })
-  const bin = PROVIDER_REGISTRY.encode(msg)
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: bin })
+  const bin = CHAIN_REGISTRY.encode(msg)
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: bin })
 
   assert.equal(back.from, PROV)
   assert.equal(back.bytes, '250000000000')
@@ -134,7 +134,7 @@ test('the extended registry can encode a lease message the SDK registry does not
   })
   assert.equal(msg.typeUrl, MsgStartLeaseTypeUrl)
 
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.from, PROV)
   assert.equal(back.nodeAddress, NODE)
   assert.equal(back.hours.toString(), '24')
@@ -144,7 +144,7 @@ test('the extended registry can encode a lease message the SDK registry does not
 
 test('buildEndLeaseMsg round-trips its uint64 id', () => {
   const msg = buildEndLeaseMsg(PROV, '18446744073709551615')
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.id.toString(), '18446744073709551615')
 })
 
@@ -188,14 +188,14 @@ test('provider registration is the one message signed as the account, not the pr
   const msg = buildRegisterProviderMsg(ACC, { name: 'n', identity: '', website: '', description: '' })
   assert.equal((msg.value as { from: string }).from, ACC)
 
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.from, ACC)
   assert.equal(back.name, 'n')
 })
 
 test('link/unlink carry the plan id as uint64 and the node address verbatim', () => {
   const msg = buildLinkNodeMsg(PROV, '42', NODE)
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.id.toString(), '42')
   assert.equal(back.nodeAddress, NODE)
   assert.equal(back.from, PROV)
@@ -215,7 +215,7 @@ test('buildUpdatePlanDetailsMsg round-trips through the extended registry', () =
   const msg = buildUpdatePlanDetailsMsg(PROV, '36', true)
   assert.equal(msg.typeUrl, MsgUpdatePlanDetailsTypeUrl)
 
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.from, PROV)
   assert.equal(back.id.toString(), '36')
   assert.equal(back.private, true)
@@ -223,7 +223,7 @@ test('buildUpdatePlanDetailsMsg round-trips through the extended registry', () =
 
 test('buildUpdatePlanDetailsMsg carries private=false rather than dropping the field', () => {
   const msg = buildUpdatePlanDetailsMsg(PROV, '36', false)
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.private, false)
 })
 
@@ -231,7 +231,7 @@ test('buildUpdatePlanDetailsMsg carries private=false rather than dropping the f
 
 test('buildUpdateLeaseMsg round-trips through the extended registry', () => {
   const msg = buildUpdateLeaseMsg(PROV, '7', 7)
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.from, PROV)
   assert.equal(back.id.toString(), '7')
   assert.equal(back.renewalPricePolicy, 7)
@@ -239,7 +239,7 @@ test('buildUpdateLeaseMsg round-trips through the extended registry', () => {
 
 test('buildRenewLeaseMsg carries hours as signed int64 and the price as MaxPrice', () => {
   const msg = buildRenewLeaseMsg({ provAddress: PROV, leaseId: '7', hours: 720, hourlyQuoteValue: '1000' })
-  const back = PROVIDER_REGISTRY.decode({ typeUrl: msg.typeUrl, value: PROVIDER_REGISTRY.encode(msg) })
+  const back = CHAIN_REGISTRY.decode({ typeUrl: msg.typeUrl, value: CHAIN_REGISTRY.encode(msg) })
   assert.equal(back.from, PROV)
   assert.equal(back.id.toString(), '7')
   assert.equal(back.hours.toString(), '720')

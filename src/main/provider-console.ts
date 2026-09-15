@@ -42,7 +42,7 @@ import { assertTxSucceeded, broadcastOrTimeout, isChainNotFound } from './tx-uti
 import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
 import { openChainQuery, resolveRpcBase, TX_POLL_INTERVAL_MS, type ChainQuery } from './chain-clients'
 import {
-  PROVIDER_REGISTRY,
+  CHAIN_REGISTRY,
   buildCreatePlanMsg,
   buildEndLeaseMsg,
   buildLinkNodeMsg,
@@ -559,9 +559,9 @@ async function broadcast(params: {
       SigningSentinelClient.connectWithSigner(base, params.wallet, {
         gasPrice: GAS_PRICE,
         // Replaces the SDK default (connectWithSigner merges shallowly), which is why
-        // PROVIDER_REGISTRY spreads SentinelRegistry back in — without this the lease
+        // CHAIN_REGISTRY spreads SentinelRegistry back in — without this the lease
         // type URLs are unknown and encoding throws.
-        registry: PROVIDER_REGISTRY,
+        registry: CHAIN_REGISTRY,
         broadcastPollIntervalMs: TX_POLL_INTERVAL_MS,
       }),
       RPC_CONNECT_TIMEOUT_MS,

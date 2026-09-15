@@ -6,16 +6,14 @@ import {
   SentinelClient,
   nodeStartSession,
   sessionCancel,
-  searchEvent,
   NodeEventCreateSession,
   handshake as sdkHandshake,
-  Wireguard,
-  V2Ray,
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow, app, net, safeStorage } from 'electron'
 import { IPC } from '../shared/ipc-channels'
 import { readFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { randomUUID } from 'crypto'
+import { createServer } from 'node:net'
 import type https from 'node:https'
 import { join } from 'path'
 import { getRpcEndpoint, isSecureStorageAvailable, loadSettings } from './settings'
@@ -28,6 +26,10 @@ import { buildMultihopConfig, type HopSpec } from './multihop-config'
 import { buildHandshakeBody, postHandshake } from './node-handshake'
 import { buildHysteria2Config } from './hysteria-config'
 import { buildAmneziaWgConfig } from './amneziawg-config'
+import { buildWireguardConfig } from './wireguard-config'
+import { buildV2RayConfig } from './v2ray-config'
+import { generateWireguardKeypair, generateProxyUuid, uuidToBytes } from './chain-keys'
+import { searchEvent } from './chain-events'
 import { buildOpenVpnConfig } from './openvpn-config'
 import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
 import { resolveRpcBase, TX_POLL_INTERVAL_MS } from './chain-clients'
@@ -473,6 +475,25 @@ function parseHandshakeData(result: { data?: unknown }): any {
   }
 }
 
+/**
+ * An ephemeral local port the OS says is free, for v2ray's stats API inbound.
+ * Replaces the SDK's find-free-ports dependency with the same trick: bind to 0,
+ * read what the kernel assigned, release it. Inherently racy — something else can
+ * take the port between release and v2ray's bind — which was equally true of the
+ * dependency, and the inbound is a local diagnostic, not the tunnel.
+ */
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.once('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address()
+      const port = typeof addr === 'object' && addr !== null ? addr.port : 0
+      srv.close(() => (port ? resolve(port) : reject(new Error('could not find a free port'))))
+    })
+  })
+}
+
 export async function performHandshake(params: {
   sessionId: string
   nodeAddress: string
@@ -484,8 +505,6 @@ export async function performHandshake(params: {
 }): Promise<{
   protocol: string
   configString: string
-  wgInstance: Wireguard | null
-  v2rayInstance: V2Ray | null
   v2raySummary?: string
 }> {
   const { sessionId, nodeAddress, nodeType, remoteUrl, privKey, nodeMoniker, nodeCountry } = params
@@ -495,7 +514,7 @@ export async function performHandshake(params: {
 
   if (nodeType === 1) {
     // WireGuard
-    const wg = new Wireguard()
+    const wg = generateWireguardKeypair()
     const result = await withTimeout(
       sdkHandshake(sid, { public_key: wg.publicKey }, privKey, remoteUrl),
       HANDSHAKE_TIMEOUT_MS,
@@ -503,9 +522,7 @@ export async function performHandshake(params: {
     )
 
     const handshakeData = parseHandshakeData(result)
-    await wg.parseConfig(handshakeData, result.addrs)
-
-    const configString = wg.buildConfigString() || ''
+    const configString = buildWireguardConfig(handshakeData, result.addrs, wg.privateKey)
 
     // Persist config for reconnection
     saveSessionConfig({
@@ -517,24 +534,25 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'wireguard', configString, wgInstance: wg, v2rayInstance: null }
+    return { protocol: 'wireguard', configString }
   } else if (nodeType === 4) {
     // XRAY (VLESS + Reality). The SDK can't build Reality configs (its V2Ray parser
     // has no flow/reality_* support), so we generate the xray JSON ourselves from the
     // node's handshake metadata (see xray-config.ts). VLESS peer material is a UUID —
-    // the same handshake V2Ray uses — so we reuse an SDK V2Ray instance purely to
-    // generate + send the uuid. buildXRayConfig rejects a node with no encrypted
-    // (Reality/TLS) VLESS entry, so an all-cleartext node fails into the refund path.
-    const keygen = new V2Ray()
+    // the same handshake V2Ray uses — so we mint one and send it. xray's peer field
+    // is v2fly `uuid.UUID`, so it takes the 16-byte array form (see uuidToBytes).
+    // buildXRayConfig rejects a node with no encrypted (Reality/TLS) VLESS entry,
+    // so an all-cleartext node fails into the refund path.
+    const xrayUuid = generateProxyUuid()
     const result = await withTimeout(
-      sdkHandshake(sid, { uuid: keygen.getKey() }, privKey, remoteUrl),
+      sdkHandshake(sid, { uuid: uuidToBytes(xrayUuid) }, privKey, remoteUrl),
       HANDSHAKE_TIMEOUT_MS,
       'node handshake',
     )
 
     const handshakeData = parseHandshakeData(result)
     const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
-    const config = buildXRayConfig(metadata, result.addrs, keygen.uuid)
+    const config = buildXRayConfig(metadata, result.addrs, xrayUuid)
     const configString = JSON.stringify(config, null, 2)
 
     saveSessionConfig({
@@ -546,7 +564,7 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'xray', configString, wgInstance: null, v2rayInstance: null }
+    return { protocol: 'xray', configString }
   } else if (nodeType === 6) {
     // Hysteria2 (QUIC). The bundled JS SDK has no Hysteria2 class either, so — like
     // xray — we build the client config ourselves from the node's handshake metadata
@@ -580,15 +598,14 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'hysteria2', configString, wgInstance: null, v2rayInstance: null }
+    return { protocol: 'hysteria2', configString }
   } else if (nodeType === 5) {
     // AmneziaWG — same handshake payload as WireGuard (a base64 Curve25519 public
-    // key); the SDK Wireguard class is used ONLY for keygen, the way the xray
-    // branch uses a V2Ray instance only for its uuid. The SDK cannot emit the AWG
-    // obfuscation keys (Jc/S/H/I), so amneziawg-config.ts builds the INI instead.
-    // Any builder throw (bad metadata from an adversarial node) propagates into
-    // establishSessionOrRefund's refund path.
-    const wg = new Wireguard()
+    // key). Only the keypair is needed here, the way the xray branch needs only a
+    // uuid. Nothing off-the-shelf emits the AWG obfuscation keys (Jc/S/H/I), so
+    // amneziawg-config.ts builds the INI instead. Any builder throw (bad metadata
+    // from an adversarial node) propagates into establishSessionOrRefund's refund path.
+    const wg = generateWireguardKeypair()
     const result = await withTimeout(
       sdkHandshake(sid, { public_key: wg.publicKey }, privKey, remoteUrl),
       HANDSHAKE_TIMEOUT_MS,
@@ -609,7 +626,7 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'amneziawg', configString, wgInstance: null, v2rayInstance: null }
+    return { protocol: 'amneziawg', configString }
   } else if (nodeType === 3) {
     // OpenVPN. The bundled JS SDK has no OpenVPN class, so openvpn-config.ts builds
     // the client .ovpn from the handshake response.
@@ -638,12 +655,13 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'openvpn', configString, wgInstance: null, v2rayInstance: null }
+    return { protocol: 'openvpn', configString }
   } else {
-    // V2Ray
-    const v2ray = new V2Ray()
+    // V2Ray. The peer field is v2fly `uuid.UUID`, so the node gets the 16-byte
+    // array form (see uuidToBytes); the config carries the same uuid as a string.
+    const v2rayUuid = generateProxyUuid()
     const result = await withTimeout(
-      sdkHandshake(sid, { uuid: v2ray.getKey() }, privKey, remoteUrl),
+      sdkHandshake(sid, { uuid: uuidToBytes(v2rayUuid) }, privKey, remoteUrl),
       HANDSHAKE_TIMEOUT_MS,
       'node handshake',
     )
@@ -652,9 +670,9 @@ export async function performHandshake(params: {
 
     // Encryption policy: reject a node that offers ONLY cleartext (VLess-none)
     // inbounds; otherwise drop any VLess-none inbound and keep the encrypted
-    // ones. The SDK's parseConfig builds its leastping balancer over whatever
-    // metadata remains, so filtering here is the single enforcement point — and
-    // it runs before any config is written/persisted or the tunnel is brought up.
+    // ones. buildV2RayConfig balances over whatever metadata it is given, so
+    // filtering here is the single enforcement point — and it runs before any
+    // config is persisted or the tunnel is brought up.
     let v2raySummary: string | undefined
     if (Array.isArray(handshakeData.metadata)) {
       if (isAllCleartext(handshakeData.metadata)) {
@@ -664,22 +682,14 @@ export async function performHandshake(params: {
       v2raySummary = v2raySecurityBadge(handshakeData.metadata)
     }
 
-    await v2ray.parseConfig(handshakeData, result.addrs)
-
-    const configFile = v2ray.writeConfig()
-
-    // Read the config file content so we can persist it for reconnection
-    // (the temp file path won't survive app restarts)
-    let configString = ''
-    if (configFile && existsSync(configFile)) {
-      configString = readFileSync(configFile, 'utf-8')
-      // Drop the SDK's temp config once we've read it — it holds the V2Ray UUID and
-      // the tunnel is spawned from a freshly written config later, not this file (L5).
-      try { unlinkSync(configFile) } catch { /* best-effort */ }
-    }
-    if (!configString) {
-      throw new Error('V2Ray handshake succeeded but failed to read config file')
-    }
+    // Built in memory. The SDK's class wrote this to a temp file under os.tmpdir()
+    // at default permissions, read it straight back and unlinked it — with the
+    // session uuid in it the whole time.
+    const configString = JSON.stringify(
+      buildV2RayConfig(handshakeData, result.addrs, v2rayUuid, await findFreePort()),
+      null,
+      4,
+    )
 
     // Persist config for reconnection
     saveSessionConfig({
@@ -691,7 +701,7 @@ export async function performHandshake(params: {
       nodeCountry,
     })
 
-    return { protocol: 'v2ray', configString, wgInstance: null, v2rayInstance: v2ray, v2raySummary }
+    return { protocol: 'v2ray', configString, v2raySummary }
   }
 }
 
@@ -784,8 +794,8 @@ async function handshakeChainHop(
   agent?: https.Agent,
 ): Promise<HopSpec> {
   try {
-    const keygen = new V2Ray()
-    const peerRequest = { uuid: keygen.getKey() }
+    const hopUuid = generateProxyUuid()
+    const peerRequest = { uuid: uuidToBytes(hopUuid) }
     const result = await withTimeout(
       agent
         ? postHandshake(
@@ -812,7 +822,7 @@ async function handshakeChainHop(
       protocol: hop.nodeType === 4 ? 'xray' : 'v2ray',
       metadata,
       addrs: Array.isArray(result.addrs) ? result.addrs : [],
-      uuid: keygen.uuid,
+      uuid: hopUuid,
     }
   } catch (err) {
     // Everything in here is attributable to ONE node, so say which before it reaches

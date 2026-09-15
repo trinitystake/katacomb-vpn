@@ -6,8 +6,9 @@ import {
   type ProtobufRpcClient,
   type SigningStargateClientOptions,
 } from '@cosmjs/stargate'
-import { Registry, type OfflineSigner } from '@cosmjs/proto-signing'
-import { SentinelClient, SigningSentinelClient, SentinelRegistry } from '@sentinel-official/sentinel-js-sdk'
+import type { OfflineSigner } from '@cosmjs/proto-signing'
+import { SentinelClient, SigningSentinelClient } from '@sentinel-official/sentinel-js-sdk'
+import { CHAIN_REGISTRY } from './provider-msgs'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
 import { GAS_PRICE_STR } from '../shared/chain-constants'
@@ -136,9 +137,10 @@ export async function openChainFlow(wallet: OfflineSigner): Promise<ChainFlow> {
   return {
     query: new FlowQueryClient(tmClient),
     signing: new FlowSigningClient(tmClient, wallet, {
-      // The static factory injects this registry itself; constructing directly
-      // skips that, and without it every sentinel msg fails to encode.
-      registry: new Registry(SentinelRegistry),
+      // The static factory injects a registry itself; constructing directly skips
+      // that, and without it every sentinel msg fails to encode. CHAIN_REGISTRY is
+      // the app-wide one: the SDK own list omits x/lease and MsgUpdatePlanDetails.
+      registry: CHAIN_REGISTRY,
       gasPrice: GAS_PRICE,
       broadcastPollIntervalMs: TX_POLL_INTERVAL_MS,
     }),

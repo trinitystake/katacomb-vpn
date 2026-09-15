@@ -22,9 +22,20 @@ jobs:
       # The privileged helper is a Go module (daemon/). The toolchain is pinned by
       # its go.mod; scripts/build-daemon.sh refuses any other version, so what CI
       # builds is what the maintainer builds.
+      #
+      # Read the `toolchain` line, NOT go-version-file. go-version-file resolves the
+      # `go` DIRECTIVE (go 1.27) to the newest patch of that minor, which is not the
+      # pin: the day Go 1.27.1 shipped, CI installed it, build-daemon.sh correctly
+      # refused it, and the v1.9.0 run failed on a tree that builds fine. Deriving the
+      # version from the same line the script asserts against is what stops the two
+      # from drifting again.
+      - name: Read the pinned Go toolchain
+        id: gotoolchain
+        run: echo "version=$(sed -n 's/^toolchain go//p' daemon/go.mod)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v5
         with:
-          go-version-file: daemon/go.mod
+          go-version: ${{ steps.gotoolchain.outputs.version }}
           cache-dependency-path: daemon/go.sum
 
       - name: Typecheck

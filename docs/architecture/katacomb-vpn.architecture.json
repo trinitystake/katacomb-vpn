@@ -1,0 +1,471 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Katacomb VPN runtime architecture",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1370,
+      530
+    ],
+    "views": [
+      {
+        "id": "connect-path",
+        "label": "Connect path",
+        "focus": [
+          "renderer",
+          "preload",
+          "ipc",
+          "vpn",
+          "helper",
+          "tunnel"
+        ],
+        "note": "How a click in the UI becomes a root created tunnel interface."
+      },
+      {
+        "id": "money-path",
+        "label": "Paying for a session",
+        "focus": [
+          "ipc",
+          "chain",
+          "wallet",
+          "rpc"
+        ],
+        "note": "The wallet signs, one CometBFT connection carries the transaction."
+      },
+      {
+        "id": "untrusted-node",
+        "label": "Untrusted node data",
+        "focus": [
+          "node",
+          "chain",
+          "vpn",
+          "guard",
+          "helper"
+        ],
+        "note": "Node handshake data reaches root, so config-guard sits between them."
+      }
+    ],
+    "repository": {
+      "url": "git@github-trinitystake:trinitystake/katacomb-vpn.git",
+      "revision": "bc64ddec5fa484195e9f587b8e829bac5aa263ed",
+      "link_mode": "local-only"
+    }
+  },
+  "components": [
+    {
+      "id": "rpc",
+      "type": "external",
+      "label": "Sentinel RPC",
+      "sublabel": "rpc.sentinel.co",
+      "pos": [
+        250,
+        95
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "sentinelhub-2"
+    },
+    {
+      "id": "chain",
+      "type": "backend",
+      "label": "Chain Service",
+      "sublabel": "chain-service.ts",
+      "pos": [
+        460,
+        95
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/main/chain-service.ts"
+        }
+      ]
+    },
+    {
+      "id": "wallet",
+      "type": "security",
+      "label": "Wallet",
+      "sublabel": "BIP-39 keys",
+      "pos": [
+        670,
+        95
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "safeStorage",
+      "sources": [
+        {
+          "path": "src/main/wallet.ts"
+        }
+      ]
+    },
+    {
+      "id": "renderer",
+      "type": "frontend",
+      "label": "Renderer",
+      "sublabel": "React, sandboxed",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/renderer/App.tsx"
+        }
+      ]
+    },
+    {
+      "id": "preload",
+      "type": "security",
+      "label": "Preload Bridge",
+      "sublabel": "contextBridge",
+      "pos": [
+        250,
+        250
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "window.api",
+      "sources": [
+        {
+          "path": "src/preload/index.ts"
+        }
+      ]
+    },
+    {
+      "id": "ipc",
+      "type": "backend",
+      "label": "IPC Handlers",
+      "sublabel": "ipc-handlers.ts",
+      "pos": [
+        460,
+        250
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "connection lock",
+      "sources": [
+        {
+          "path": "src/main/ipc-handlers.ts"
+        }
+      ]
+    },
+    {
+      "id": "vpn",
+      "type": "backend",
+      "label": "VPN Manager",
+      "sublabel": "tunnel lifecycle",
+      "pos": [
+        670,
+        250
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/main/vpn-manager.ts"
+        },
+        {
+          "path": "src/main/privileged.ts",
+          "label": "routes to daemon or pkexec"
+        }
+      ]
+    },
+    {
+      "id": "helper",
+      "type": "security",
+      "label": "Privileged Helper",
+      "sublabel": "Go, runs as root",
+      "pos": [
+        930,
+        250
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "daemon or pkexec",
+      "sources": [
+        {
+          "path": "daemon/main.go",
+          "label": "five entry modes"
+        },
+        {
+          "path": "daemon/internal/ops/tun.go",
+          "label": "one verb"
+        }
+      ]
+    },
+    {
+      "id": "guard",
+      "type": "security",
+      "label": "config-guard",
+      "sublabel": "allow-list checks",
+      "pos": [
+        670,
+        400
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "mirrored root side",
+      "sources": [
+        {
+          "path": "src/main/config-guard.ts",
+          "label": "app side"
+        },
+        {
+          "path": "daemon/internal/guard/guard.go",
+          "label": "root side"
+        }
+      ]
+    },
+    {
+      "id": "aggregator",
+      "type": "external",
+      "label": "Node Directory",
+      "sublabel": "api.sentnodes.com",
+      "pos": [
+        250,
+        400
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "not chain data"
+    },
+    {
+      "id": "tunnel",
+      "type": "cloud",
+      "label": "Tunnel Interface",
+      "sublabel": "sntl0 / sntl-tun",
+      "pos": [
+        930,
+        400
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "node",
+      "type": "external",
+      "label": "dVPN Node",
+      "sublabel": "operator run exit",
+      "pos": [
+        1150,
+        400
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "untrusted"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Main process, src/main/",
+      "wraps": [
+        "chain",
+        "wallet",
+        "ipc",
+        "vpn",
+        "guard"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "root: katacomb-vpn-helper",
+      "wraps": [
+        "helper",
+        "tunnel"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "ui-to-preload",
+      "from": "renderer",
+      "to": "preload",
+      "label": "window.api invoke",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "preload-to-ipc",
+      "from": "preload",
+      "to": "ipc",
+      "label": "IPC, own frame only",
+      "variant": "security",
+      "labelDy": -26
+    },
+    {
+      "id": "ipc-to-vpn",
+      "from": "ipc",
+      "to": "vpn",
+      "label": "connect / disconnect",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "vpn-to-helper",
+      "from": "vpn",
+      "to": "helper",
+      "label": "one verb per op",
+      "variant": "emphasis",
+      "labelDy": 56
+    },
+    {
+      "id": "helper-to-tunnel",
+      "from": "helper",
+      "to": "tunnel",
+      "label": "creates the interface",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "tunnel-to-node",
+      "from": "tunnel",
+      "to": "node",
+      "label": "encrypted tunnel",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "ipc-to-chain",
+      "from": "ipc",
+      "to": "chain",
+      "label": "buy / cancel session",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "wallet-signs",
+      "from": "wallet",
+      "to": "chain",
+      "label": "signs tx",
+      "variant": "security",
+      "fromSide": "left",
+      "toSide": "right",
+      "labelDy": 56
+    },
+    {
+      "id": "chain-to-rpc",
+      "from": "chain",
+      "to": "rpc",
+      "label": "one CometBFT connection",
+      "fromSide": "left",
+      "toSide": "right",
+      "labelDy": 56
+    },
+    {
+      "id": "ipc-to-directory",
+      "from": "ipc",
+      "to": "aggregator",
+      "label": "node list, 10 pages",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          540,
+          357
+        ],
+        [
+          330,
+          357
+        ]
+      ]
+    },
+    {
+      "id": "vpn-to-guard",
+      "from": "vpn",
+      "to": "guard",
+      "label": "assert allow-lists",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "handshake",
+      "from": "chain",
+      "to": "node",
+      "label": "handshake: TLS verifies nothing",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          540,
+          42
+        ],
+        [
+          1230,
+          42
+        ]
+      ],
+      "labelSegment": 2
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Process separation",
+      "items": [
+        "Sandboxed renderer, no Node integration",
+        "window.api is the only channel into main"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Privilege",
+      "items": [
+        "One Go binary: root daemon or pkexec one shot",
+        "tun2socks and AmneziaWG are linked in, not vendored"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Node trust",
+      "items": [
+        "Node data becomes config that root runs",
+        "config-guard allow-lists it, app side and root side",
+        "The handshake accepts any certificate"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Money",
+      "items": [
+        "A failed handshake refunds the new session",
+        "One connection at a time, enforced in main"
+      ]
+    }
+  ]
+}

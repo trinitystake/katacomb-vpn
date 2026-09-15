@@ -1492,6 +1492,22 @@ The amneziawg and openvpn paths likewise read everything from the handshake resp
 (The only two OpenVPN nodes on the network are v8.3.1 and don't expose it at all; one
 reports `service_type: "openvpn"` at its ROOT path, which is what the preflight needs.)
 
+### Architecture diagram (docs/architecture/)
+
+`docs/architecture/katacomb-vpn.architecture.json` is the typed source for the runtime
+map; the Archify agent skill renders it (install and commands in that directory's
+README, and the rendered HTML is gitignored because it is ~800 KB of vendored template
+rewritten whole on every render). **Update it in the same change that changes the
+architecture** — a main-process module added or removed, a new helper verb or daemon op,
+a new external service, a process or privilege boundary that moves — and re-run
+`deliver`, which refuses to write an artifact that fails its own checks.
+`npm test` runs `scripts/check-architecture-doc.sh`: it re-pins the JSON to HEAD and
+validates, so a pinned module that was renamed or deleted goes red (and it SKIPS,
+without failing, when the skill is not installed, since it is not a repo dependency).
+Nothing mechanical catches a component that quietly stopped meaning what it says, which
+is why this rule exists. It is twelve components on purpose: an orientation map, not an
+index of `src/main/` — detail belongs in this file, not in more boxes.
+
 ## Working Principles (for LLM contributors)
 
 This codebase follows Karpathy-style discipline. Apply these in order of precedence:

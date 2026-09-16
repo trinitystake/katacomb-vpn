@@ -1,61 +1,36 @@
-# Katacomb VPN 1.9.1
+# Katacomb VPN 1.9.2
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-1.9.1 is a fixes release. The headline is a bug that could take down a VPN this app
-did not create: disconnecting Katacomb deleted every WireGuard tunnel on the machine,
-including one belonging to another provider.
+1.9.2 is a small fixes release. The headline is a paid session that could go on being
+spent against a tunnel that had already stopped working, with the app still reporting it
+as connected, for as long as you were not actively using the connection.
 
 ## Highlights
 
-- **Disconnecting no longer takes your other VPN down with it.** If you had a WireGuard
-  tunnel from another provider running, Mullvad or IVPN or one you set up by hand,
-  disconnecting Katacomb deleted it too. It happened as root, with nothing on screen to
-  say so, and the app had already warned you that the other VPN was there. Only our own
-  tunnel is torn down now. The warning about other VPNs stays a warning: it can be wrong
-  about Tailscale, so it has never blocked a connection and still does not.
-- **Ending or reconnecting a session survives switching tabs.** Those are on-chain
-  transactions, and they keep running after you leave the Sessions tab. The screen
-  tracking them did not. Coming back showed the row with no spinner and both buttons
-  live while the first transaction was still being sent, so a second press could collide
-  with it, and any error had nowhere left to appear. The same applied to Link and Unlink
-  in the Provider console.
-- **A dead node no longer stalls the node scan for two minutes.** The scan gave each node
-  eight seconds, but that budget only started once a connection was established. A node
-  that accepts nothing and answers nothing never got that far, so it ran until the
-  operating system gave up, measured at over two minutes. Three of those in a row held up
-  the whole batch.
-- **An out-of-date background service is caught before you pay, not after.** Installing an
-  update does not always restart the privileged service, and an older one may not know how
-  to bring up the protocol you picked. That used to surface as a failure after the session
-  had been bought. The app now asks the service what it can do before the transaction, and
-  says to restart it instead.
-- **IPsec VPNs are now detected.** The check for other active VPNs looked for network
-  interfaces, and IPsec clients, including most corporate ones, do not create one, so
-  they were invisible to it. They are included in the warning now. This one needs the
-  .deb, because reading IPsec state requires the privileged service the AppImage does
-  not install.
-- **Fewer moving parts behind a connection.** The app no longer loads the bundled SDK's
-  connection-management code to generate keys and configuration files. That code could
-  start programs, write temporary files and generate QR codes, none of which a VPN client
-  needs, and the V2Ray path was writing its configuration to a temporary file and reading
-  it straight back, with the session credentials in that file the whole time. The
-  replacements produce byte-for-byte identical output, which is enforced by tests.
+- **A tunnel that has died is now noticed even when you are not using it.** Until now the
+  app could only tell a tunnel was dead by watching traffic leave with nothing coming
+  back. That is solid evidence, but it needs you to be doing something. Leave the
+  connection idle and there is nothing to watch, so a node that had quietly dropped your
+  peer left the app showing Connected, and your paid session being spent, against a tunnel
+  that was carrying nothing. Measured on mainnet, that state lasted hours. The app now
+  asks the kernel when the WireGuard peer last completed a handshake instead. A working
+  peer refreshes that about every two minutes on its own, whether or not you are doing
+  anything, so one that has not refreshed is a fact rather than an inference. The session
+  is disconnected and stays open on chain, and the Sessions tab offers a reconnect. This
+  covers WireGuard connections and needs the background service that the .deb installs.
+  Every other protocol keeps exactly the checks it had before.
+- **The usage time recorded for such a session stops where the tunnel did.** When a
+  connection is ended this way, the time counted against it now runs to the last moment
+  the tunnel was demonstrably alive, not to the moment the app worked out that it was not.
+  The chain meters what the node reports, so counting the dead stretch would have shown
+  you spending time you were never charged for.
 
-## Fixes in 1.9.1
+## Fixes in 1.9.2
 
-- Release notes for 1.9.1
-- Stop using the SDK's connection managers to get key material and configs
-- Stop root deleting other VPNs' tunnels, and bound the bypass route list
-- Pin the daemon protocol to a shared corpus, and make the version probe useful
-- Bound a node probe across the TCP connect, not just socket inactivity
-- Record why the v2ray binary cannot be replaced by xray
-- Keep in-flight transaction state alive across a tab switch
-- Add the architecture diagram and check it in the test run
-- ci: move the actions onto the Node 24 majors
-- ci: install the pinned Go toolchain, not the newest patch of its minor
+<!-- regenerated by release.sh from v1.9.1..HEAD at cut time; leave the heading -->
 
 ## Known limitations
 

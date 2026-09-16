@@ -39,7 +39,7 @@ import {
   parseDecShare,
 } from '../shared/provider-economics'
 import { assertTxSucceeded, broadcastOrTimeout, isChainNotFound } from './tx-utils'
-import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
+import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from './chain-constants'
 import { openChainQuery, resolveRpcBase, TX_POLL_INTERVAL_MS, type ChainQuery } from './chain-clients'
 import {
   CHAIN_REGISTRY,

@@ -11,7 +11,7 @@ import { SentinelClient, SigningSentinelClient } from '@sentinel-official/sentin
 import { CHAIN_REGISTRY } from './provider-msgs'
 import { getRpcEndpoint } from './settings'
 import { withTimeout } from './async-utils'
-import { GAS_PRICE_STR } from '../shared/chain-constants'
+import { GAS_PRICE_STR } from './chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 const RPC_CONNECT_TIMEOUT_MS = 10_000

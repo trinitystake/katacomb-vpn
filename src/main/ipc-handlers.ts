@@ -106,6 +106,8 @@ import {
   isBinaryAvailable,
   protocolRuntimeError,
   getActiveProxyPort,
+  onV2RayUnexpectedExit,
+  reapOrphanedProxyChildren,
 } from './vpn-manager'
 import { runPrivileged, canEscalatePrivileges } from './privileged'
 import { daemonMissingOp, daemonXfrmPolicyCount, daemonWireguardHandshakeAge } from './daemon-client'
@@ -116,7 +118,6 @@ import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } fr
 import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './node-tester'
 import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './multihop-config'
 import { SocksHttpsAgent } from './socks-agent'
-import { onV2RayUnexpectedExit, reapOrphanedProxyChildren } from './vpn-manager'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'
 // Ceiling on the paginated node feed: 200 entries/page, ~10 pages for today's

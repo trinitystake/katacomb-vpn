@@ -17,7 +17,7 @@ import {
 import { BrowserWindow } from 'electron'
 import { openChainFlow, openChainQuery } from './chain-clients'
 import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
-import { TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
+import { TX_TIMEOUT_HEIGHT_OFFSET } from './chain-constants'
 import { IPC } from '../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
 import { getCachedProviders } from './provider-cache'

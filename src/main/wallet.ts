@@ -19,7 +19,7 @@ import {
   isSeedSource,
   clearRetainedSeed,
 } from './settings'
-import { WALLET_PREFIX } from '../shared/chain-constants'
+import { WALLET_PREFIX } from './chain-constants'
 import { formatHdPath } from '../shared/hd-path'
 import { withTimeout } from './async-utils'
 import { resolveRpcBase } from './chain-clients'

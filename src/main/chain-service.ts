@@ -31,7 +31,7 @@ import { buildV2RayConfig } from './v2ray-config'
 import { generateWireguardKeypair, generateProxyUuid, uuidToBytes } from './chain-keys'
 import { searchEvent } from './chain-events'
 import { buildOpenVpnConfig } from './openvpn-config'
-import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../shared/chain-constants'
+import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from './chain-constants'
 import { resolveRpcBase, TX_POLL_INTERVAL_MS } from './chain-clients'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)

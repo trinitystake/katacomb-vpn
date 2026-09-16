@@ -42,8 +42,14 @@ const V2RAY_CONFIG = join(SECURE_TMPDIR, 'v2ray.json')
  * silently weaken the supply-chain guarantee.
  */
 function resolveBundled(name: string): string {
+  // `__dirname` is the BUILD OUTPUT directory (out/main), not this source file's
+  // folder: electron-vite bundles the whole main process into one out/main/index.js.
+  // So this path is relative to out/main and does NOT change when this file moves
+  // within src/main. Do not "correct" it to match this file's depth — doing that
+  // sent it to <repo>/../resources, where nothing exists, and resolveBundled then
+  // fell through to the unverified $PATH binary with the SHA-256 check skipped.
   const bundled = is.dev
-    ? join(__dirname, '../../../resources/linux/bin', name)
+    ? join(__dirname, '../../resources/linux/bin', name)
     : join(process.resourcesPath, 'linux/bin', name)
 
   if (existsSync(bundled)) {

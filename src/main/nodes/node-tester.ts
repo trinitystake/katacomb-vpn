@@ -161,6 +161,12 @@ export async function probeNode(remoteUrl: string, nodeAddress: string): Promise
  * Throws when the node is unreachable or the response isn't the expected shape,
  * so the caller can tell "mismatch" apart from "couldn't ask".
  */
+// Bound the pre-payment protocol check — it blocks the connect button. Lives here
+// rather than with its callers because it times THESE two calls: both the connect
+// preflight and the multihop eligibility grade ask a node's own API and need the
+// same ceiling.
+export const NODE_PROTOCOL_CHECK_TIMEOUT_MS = 10_000
+
 export async function fetchNodeServiceType(remoteUrl: string, agent?: https.Agent): Promise<string | number> {
   const serviceType = (await fetchNodeRoot(remoteUrl, agent)).service_type
   if (serviceType === undefined) throw new Error('Node did not report a service type')

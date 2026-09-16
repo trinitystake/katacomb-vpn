@@ -11,10 +11,8 @@ import {
   getRpcHealth,
   onRpcEndpointChanged,
   onChainPathChanged,
-  probeFeedCandidates,
   reportRpcFailure,
   runAutoRpcSelection,
-  runAutoRpcSelectionReport,
 } from './chain/rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
@@ -42,7 +40,6 @@ import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainE
 import { openChainFlow, openChainQuery } from './chain/chain-clients'
 import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
-import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
 import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, isWireGuardPeerGone, WG_HANDSHAKE_DEAD_SECONDS, WG_HANDSHAKE_STALE_SAMPLES, latestProofOfLifeMs, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './vpn/connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, invalidateAllPlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plans/plan-service'
@@ -102,22 +99,22 @@ import {
   startProvisioningProxy,
   PROVISION_SOCKS_PORT,
   type ProvisioningProxy,
-  binaryExists,
-  isBinaryAvailable,
   protocolRuntimeError,
-  getActiveProxyPort,
   onV2RayUnexpectedExit,
   reapOrphanedProxyChildren,
 } from './vpn/vpn-manager'
 import { runPrivileged, canEscalatePrivileges } from './helper/privileged'
 import { daemonMissingOp, daemonXfrmPolicyCount, daemonWireguardHandshakeAge } from './helper/daemon-client'
 import type { DaemonOp } from './helper/daemon-protocol'
-import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
+import { isAllowedBypassCidr, isAllowedDnsResolver } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './vpn/kill-switch'
 import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './vpn/traffic-stats'
-import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './nodes/node-tester'
+import { probeNode, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata, NODE_PROTOCOL_CHECK_TIMEOUT_MS } from './nodes/node-tester'
 import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './protocols/multihop-config'
 import { SocksHttpsAgent } from './socks-agent'
+import { assertString, assertOptionalString, assertNumber, assertSentAddress, assertIntRange } from './ipc/validate'
+import { fetchFreshSocket } from './net-fetch'
+import { registerDiagnosticsHandlers } from './ipc/diagnostics'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'
 // Ceiling on the paginated node feed: 200 entries/page, ~10 pages for today's
@@ -133,40 +130,9 @@ const RECONNECT_MAX_ATTEMPTS = 5
 // that protects money the user has already spent. Refunds run sequentially, so a
 // two-hop chain can spend up to twice this before giving up.
 const REFUND_TIMEOUT_MS = 30_000
-// Bound the pre-payment protocol check — it blocks the connect button.
-const NODE_PROTOCOL_CHECK_TIMEOUT_MS = 10_000
 // The same check for a chain's EXIT hop, which is asked THROUGH the entry: one more hop
 // each way, and a timeout here strands an entry session that is already bought.
 const NODE_CHECK_VIA_PROXY_TIMEOUT_MS = 25_000
-// A node's advertised inbounds change only when its operator reconfigures it, so a
-// long TTL is safe and keeps the multihop picker from re-probing on every render.
-const CHAIN_ELIGIBILITY_TTL_MS = 10 * 60 * 1000
-// The picker probes in chunks; this bounds one IPC call, not the whole list.
-const CHAIN_ELIGIBILITY_MAX_BATCH = 60
-const CHAIN_ELIGIBILITY_CONCURRENCY = 8
-// Grading through an already-connected local proxy: an extra hop each way, so more
-// than the direct budget. Well under NODE_CHECK_VIA_PROXY_TIMEOUT_MS, though — that
-// one is generous because a timeout there strands a paid entry session, whereas a
-// slow answer here only costs one row in the picker.
-const CHAIN_ELIGIBILITY_VIA_PROXY_TIMEOUT_MS = 15_000
-// Public IP lookups (NETWORK_GET_IP). Short on purpose: icanhazip answers in
-// ~100ms on a working path, and a hung service should fail into the renderer's
-// retry ladder rather than hold the status-bar spinner for 15s.
-const IP_LOOKUP_TIMEOUT_MS = 5_000
-
-/** How a node graded for each end of a chain. `reachable: false` means unknown. */
-interface ChainEligibilityResult {
-  nodeAddress: string
-  checkedAt: number
-  reachable: boolean
-  transports: string[]
-  entry: boolean
-  exit: boolean
-  entrySecurity: 'reality' | 'tls' | null
-  exitSecurity: 'reality' | 'tls' | null
-  error?: string
-}
-const chainEligibilityCache = new Map<string, ChainEligibilityResult>()
 // The kill switch drops any DNS that isn't tunnel-routed, so when it's on we
 // need a resolver reachable through the tunnel. A 'system' resolver is usually a
 // LAN/systemd-resolved address that won't route through the tunnel — fall back to
@@ -984,29 +950,6 @@ const TUNNEL_PROBE_MIN_RX_BYTES = 16 * 1024
 const TUNNEL_PROBE_TIMEOUT_MS = 6000
 const TUNNEL_PROBE_ATTEMPTS = 3
 
-/**
- * GET over a FRESH socket every time (`agent: false` → Connection: close, no
- * pooling). Chromium's pooled keep-alive sockets are a trap across a tunnel
- * transition: a socket opened BEFORE connect routes out the physical NIC, and
- * once the kill switch is armed its packets are silently DROPped — no RST ever
- * arrives, so Chromium cannot detect the corpse and a reused socket just hangs
- * until the caller's abort. Live symptom: the IP display taking ~6s after a
- * Sessions-tab reconnect (stale socket from the disconnect-time lookup, 5s
- * hang, then the 1s retry dialing fresh through the tunnel) while every fresh
- * dial answered in ~100ms. The probes and IP lookups are rare and tiny, so one
- * TLS setup per request costs nothing.
- */
-function fetchFreshSocket(url: string, timeoutMs: number): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const req = httpsGet(url, { agent: false, signal: AbortSignal.timeout(timeoutMs) }, (res) => {
-      let body = ''
-      res.setEncoding('utf8')
-      res.on('data', (chunk: string) => { body += chunk })
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
-    })
-    req.on('error', reject)
-  })
-}
 
 /**
  * Does the tunnel we just built actually carry traffic? An interface existing does
@@ -2489,44 +2432,6 @@ function getNodeMeta(nodeAddress: string): { moniker: string; country: string; t
   return { moniker: node?.moniker || '', country: node?.country || '', type: node?.type ?? 0 }
 }
 
-// --- IPC input validation helpers ---
-
-function assertString(value: unknown, name: string): asserts value is string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`Invalid ${name}: expected non-empty string`)
-  }
-}
-
-/** Like assertString for fields where empty (or absent) is a valid value. */
-function assertOptionalString(value: unknown, name: string): asserts value is string | undefined {
-  if (value !== undefined && typeof value !== 'string') {
-    throw new Error(`Invalid ${name}: expected string`)
-  }
-}
-
-function assertNumber(value: unknown, name: string, min?: number, max?: number): asserts value is number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error(`Invalid ${name}: expected number`)
-  }
-  if (min !== undefined && value < min) throw new Error(`Invalid ${name}: must be >= ${min}`)
-  if (max !== undefined && value > max) throw new Error(`Invalid ${name}: must be <= ${max}`)
-}
-
-function assertSentAddress(value: unknown, name: string): asserts value is string {
-  assertString(value, name)
-  if (!/^sent(node|prov)?1[a-z0-9]{38,}$/.test(value as string)) {
-    throw new Error(`Invalid ${name}: not a valid wallet address`)
-  }
-}
-
-function assertIntRange(value: unknown, name: string, min: number, max: number): asserts value is number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
-    throw new Error(`Invalid ${name}: expected integer`)
-  }
-  if (value < min || value > max) {
-    throw new Error(`Invalid ${name}: must be between ${min} and ${max}`)
-  }
-}
 
 /** Only accept IPC from our own renderer frame (dev server origin or file://). */
 function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
@@ -3666,211 +3571,8 @@ export function registerIpcHandlers(): void {
     return settings.bookmarkedNodes || []
   })
 
-  // Live health of the endpoint currently in use (pushed on change via RPC_HEALTH_UPDATE)
-  handle(IPC.RPC_HEALTH_GET, async () => {
-    return getRpcHealth()
-  })
-
-  // Probe the public endpoint list in parallel — feeds the failover banner and
-  // the Settings list, so neither has to test one endpoint per click.
-  handle(IPC.RPC_PROBE_ALL, async () => {
-    return probeFeedCandidates()
-  })
-
-  // Retest and reselect: one shared probe pass runs the auto-selection and
-  // returns the exact rows it graded, so the list on screen can never disagree
-  // with the decision.
-  handle(IPC.RPC_AUTO_SELECT, async () => {
-    return runAutoRpcSelectionReport()
-  })
-
-  // Binary check — checks bundled binaries first, then system PATH. tun2socks is
-  // deliberately NOT here: the engine is compiled into the privileged helper, so
-  // there is no tun2socks executable to find and no package that would be used if
-  // one were installed. Probing for it reported a permanent "Missing" on a healthy
-  // install (seen on the 1.9.0 deb) and pointed users at an irrelevant apt package.
-  handle(IPC.BINARY_CHECK, async () => {
-    return {
-      wireguard: binaryExists('wg-quick'),
-      v2ray: isBinaryAvailable('v2ray'),
-    }
-  })
-
-  // Node Testing: Single probe
-  handle(IPC.NODE_TEST_PROBE, async (_event, params: { nodeAddress: string; remoteUrl: string }) => {
-    assertString(params.nodeAddress, 'nodeAddress')
-    // A non-empty remoteUrl must be a safe http(s) endpoint (finding M3); empty is
-    // allowed and handled gracefully by probeNode ("No API endpoint").
-    if (typeof params.remoteUrl === 'string' && params.remoteUrl !== '' && !isSafeNodeApiUrl(params.remoteUrl)) {
-      throw new Error('Invalid node probe URL')
-    }
-    return probeNode(params.remoteUrl, params.nodeAddress)
-  })
-
-  // Node Testing: Batch probe
-  handle(IPC.NODE_TEST_BATCH, async (_event, nodes: Array<{ nodeAddress: string; remoteUrl: string }>) => {
-    if (!Array.isArray(nodes) || nodes.length === 0) throw new Error('Invalid nodes array')
-    for (const n of nodes) {
-      assertString(n.nodeAddress, 'nodeAddress')
-      // Same http(s)-only guard as the single probe (finding M3); empty is allowed.
-      if (typeof n.remoteUrl === 'string' && n.remoteUrl !== '' && !isSafeNodeApiUrl(n.remoteUrl)) {
-        throw new Error('Invalid node probe URL')
-      }
-    }
-    startBatch(nodes)
-  })
-
-  // Node Testing: Cancel batch
-  handle(IPC.NODE_TEST_CANCEL, async () => {
-    cancelBatch()
-  })
-
-  // Node Testing: Speed test on active connection
-  handle(IPC.NODE_TEST_SPEED, async () => {
-    if (!isVpnActive()) throw new Error('No active VPN connection')
-    return speedTest()
-  })
-
-  // Node Testing: Get cached results
-  handle(IPC.NODE_TEST_RESULTS, async () => {
-    return getAllCachedResults()
-  })
-
-  // Multihop: grade nodes for each end of a chain, BEFORE anything is paid for.
-  //
-  // The exit hop of a chain must serve plain TCP (only TCP delegates dialing to
-  // xray's detour dialer — see EXIT_TRANSPORTS), and that fact is not in the node
-  // list: the aggregator publishes one transport per node, which reports tcp for 16
-  // nodes network-wide while 138 of 241 healthy v9 nodes actually serve one. So it
-  // has to come from each node's own listing. Cheap and unauthenticated — the same
-  // root-path request the protocol preflight already makes.
-  handle(IPC.NODE_CHAIN_ELIGIBILITY, async (_event, nodes: Array<{
-    nodeAddress: string; remoteUrl: string; nodeType: number
-  }>) => {
-    if (!Array.isArray(nodes) || nodes.length === 0) throw new Error('Invalid nodes array')
-    if (nodes.length > CHAIN_ELIGIBILITY_MAX_BATCH) {
-      throw new Error(`Too many nodes in one batch (max ${CHAIN_ELIGIBILITY_MAX_BATCH})`)
-    }
-    for (const n of nodes) {
-      assertString(n.nodeAddress, 'nodeAddress')
-      if (typeof n.remoteUrl === 'string' && n.remoteUrl !== '' && !isSafeNodeApiUrl(n.remoteUrl)) {
-        throw new Error('Invalid node probe URL')
-      }
-      if (n.nodeType !== 2 && n.nodeType !== 4) {
-        throw new Error('Only V2Ray (2) and XRAY (4) nodes can be chained')
-      }
-    }
-
-    const now = Date.now()
-    const out: ChainEligibilityResult[] = new Array(nodes.length)
-    let index = 0
-    // Grading is unauthenticated and carries no session, but it still tells every node
-    // it asks that this address is shopping for a chain. When a tunnel is already up we
-    // send it through that tunnel rather than off the physical NIC.
-    //
-    // Only proxy mode needs an agent to do it. In tunnel mode the OS has already put
-    // these probes in the tunnel (see getActiveProxyPort), so asking for one there would
-    // route tunnel traffic through a proxy that isn't running. One agent for the batch:
-    // it opens a fresh socket per request (keepAlive false) and is safe to share.
-    const proxyPort = getActiveProxyPort()
-    const proxyAgent = proxyPort === null ? undefined : new SocksHttpsAgent(proxyPort)
-    async function worker(): Promise<void> {
-      while (index < nodes.length) {
-        const slot = index++
-        const node = nodes[slot]
-        // Keyed by node alone, unlike node-tester's rootMemo. There, a direct answer
-        // satisfying a proxied read would skip a request that existed to BE proxied;
-        // here a cache hit means no request at all, which is the better outcome either
-        // way, so the route it was first learned over doesn't matter.
-        const cached = chainEligibilityCache.get(node.nodeAddress)
-        if (cached && now - cached.checkedAt < CHAIN_ELIGIBILITY_TTL_MS) {
-          out[slot] = cached
-          continue
-        }
-        let result: ChainEligibilityResult
-        try {
-          // Same reason preflightConnect wraps its own call: nodeFetch's timeout
-          // covers socket inactivity, not the TCP connect, so a blackholed node
-          // hangs past it. Through the proxy each probe crosses an extra hop, but
-          // no money rides on this one, so it gets a tighter budget than the
-          // purchase-time check.
-          const metadata = await withTimeout(
-            fetchNodeServiceMetadata(node.remoteUrl, proxyAgent),
-            proxyAgent ? CHAIN_ELIGIBILITY_VIA_PROXY_TIMEOUT_MS : NODE_PROTOCOL_CHECK_TIMEOUT_MS,
-            'node inbound listing',
-          )
-          const graded = classifyHopEligibility(
-            node.nodeType === 4 ? 'xray' : 'v2ray',
-            metadata as HopMetadataEntry[],
-          )
-          result = { nodeAddress: node.nodeAddress, checkedAt: Date.now(), reachable: true, ...graded }
-        } catch (err) {
-          // Unreachable and "too old to say" are both reported as unknown rather
-          // than as a refusal: a v8.3.1 node may well work, we just cannot tell
-          // without paying, and the picker says so instead of hiding it.
-          //
-          // A proxied probe that fails lands here too, and deliberately does NOT
-          // retry direct: falling back would leak the address this route exists to
-          // hide, and would do it silently. The row reads as unknown instead.
-          result = {
-            nodeAddress: node.nodeAddress,
-            checkedAt: Date.now(),
-            reachable: false,
-            transports: [],
-            entry: false,
-            exit: false,
-            entrySecurity: null,
-            exitSecurity: null,
-            error: err instanceof Error ? err.message : 'Probe failed',
-          }
-        }
-        chainEligibilityCache.set(node.nodeAddress, result)
-        out[slot] = result
-      }
-    }
-    await Promise.all(
-      Array.from({ length: Math.min(CHAIN_ELIGIBILITY_CONCURRENCY, nodes.length) }, worker),
-    )
-    return out
-  })
-
-  // Network: public IP lookup, two single-purpose modes the renderer stages.
-  // includeGeo=false is the IP itself from icanhazip.com (fast, unmetered) —
-  // rendered immediately, and the thing whose failure means "unreachable".
-  // includeGeo=true is the ipapi.co geo enrichment ONLY: its free tier is
-  // limited per SOURCE IP, and through a tunnel the source is the exit node's
-  // shared address, so 429 is the ordinary case on a busy node (measured live
-  // through a Sydney exit) — the renderer treats it as best-effort decoration
-  // and never blocks the IP on it. Failures return an empty ip rather than
-  // throwing: a dead lookup is what an idle tunnel looks like, not a fault, and
-  // letting the AbortError escape logged a handler stack trace on every poll.
-  handle(IPC.NETWORK_GET_IP, async (_event, includeGeo?: boolean) => {
-    if (includeGeo !== false) {
-      try {
-        const response = await fetchFreshSocket('https://ipapi.co/json/', IP_LOOKUP_TIMEOUT_MS)
-        if (response.status !== 200) throw new Error(`IP lookup failed: ${response.status}`)
-        const json = JSON.parse(response.body) as {
-          ip?: string; country_name?: string; city?: string; asn?: string; org?: string
-        }
-        return {
-          ip: json.ip || '',
-          country: json.country_name || '',
-          city: json.city || '',
-          asn: json.asn || '',
-          org: json.org || '',
-        }
-      } catch {
-        return { ip: '', country: '', city: '', asn: '', org: '' }
-      }
-    }
-    try {
-      const response = await fetchFreshSocket('https://icanhazip.com', IP_LOOKUP_TIMEOUT_MS)
-      if (response.status !== 200) throw new Error(`IP lookup failed: ${response.status}`)
-      return { ip: response.body.trim(), country: '', city: '', asn: '', org: '' }
-    } catch {
-      return { ip: '', country: '', city: '', asn: '', org: '' }
-    }
-  })
+  // RPC health, binary presence, node probing, chain eligibility, public IP.
+  registerDiagnosticsHandlers(handle)
 
   // Plan Discovery
   handle(IPC.PLAN_DISCOVER, async (_event, maxCount: number) => {

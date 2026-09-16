@@ -83,7 +83,7 @@
       ],
       "sources": [
         {
-          "path": "src/main/chain-service.ts"
+          "path": "src/main/chain/chain-service.ts"
         }
       ]
     },
@@ -103,7 +103,7 @@
       "tag": "safeStorage",
       "sources": [
         {
-          "path": "src/main/wallet.ts"
+          "path": "src/main/chain/wallet.ts"
         }
       ]
     },
@@ -181,10 +181,10 @@
       ],
       "sources": [
         {
-          "path": "src/main/vpn-manager.ts"
+          "path": "src/main/vpn/vpn-manager.ts"
         },
         {
-          "path": "src/main/privileged.ts",
+          "path": "src/main/helper/privileged.ts",
           "label": "routes to daemon or pkexec"
         }
       ]

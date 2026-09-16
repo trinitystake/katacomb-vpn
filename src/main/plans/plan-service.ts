@@ -15,14 +15,14 @@ import {
   subscriptionUpdate,
 } from '@sentinel-official/sentinel-js-sdk'
 import { BrowserWindow } from 'electron'
-import { openChainFlow, openChainQuery } from './chain-clients'
-import { assertTxSucceeded, broadcastOrTimeout } from './tx-utils'
-import { TX_TIMEOUT_HEIGHT_OFFSET } from './chain-constants'
-import { IPC } from '../shared/ipc-channels'
+import { openChainFlow, openChainQuery } from '../chain/chain-clients'
+import { assertTxSucceeded, broadcastOrTimeout } from '../chain/tx-utils'
+import { TX_TIMEOUT_HEIGHT_OFFSET } from '../chain/chain-constants'
+import { IPC } from '../../shared/ipc-channels'
 import { setCachedPlans, getCachedPlans, type CachedPlan } from './plan-cache'
-import { getCachedProviders } from './provider-cache'
-import type { ProviderInfo } from './provider-service'
-import { isTestPlan } from '../shared/test-plan'
+import { getCachedProviders } from '../provider/provider-cache'
+import type { ProviderInfo } from '../provider/provider-service'
+import { isTestPlan } from '../../shared/test-plan'
 
 export type EnrichedPlan = CachedPlan & { isTest: boolean }
 

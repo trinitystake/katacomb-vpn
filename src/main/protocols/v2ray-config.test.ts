@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { V2Ray } from '@sentinel-official/sentinel-js-sdk'
 import { buildV2RayConfig } from './v2ray-config.ts'
-import { assertSafeV2RayConfig } from './config-guard.ts'
+import { assertSafeV2RayConfig } from '../config-guard.ts'
 
 // The SDK stays a devDependency so this oracle keeps working. Every combination
 // the SDK can emit is compared key for key and byte for byte: this config is what

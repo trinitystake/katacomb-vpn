@@ -1,6 +1,6 @@
 import { TimeoutError } from '@cosmjs/stargate'
 
-// Inlined rather than imported from '../shared/error-markers': Node's native test
+// Inlined rather than imported from '../../shared/error-markers': Node's native test
 // runner can't resolve extensionless relative imports, so a unit-tested main module
 // can't have them (same constraint that keeps connect-decisions.ts import-free).
 // `tx-utils.test.ts` asserts this stays equal to the exported INSUFFICIENT_FUNDS.

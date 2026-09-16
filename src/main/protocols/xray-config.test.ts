@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildXRayConfig, selectXRayEntry, buildXRayOutbound, normalizeXRayTlsPin, type XRayMetadataEntry } from './xray-config.ts'
 import { normalizeTlsPin } from './multihop-config.ts'
-import { SOCKS_PORT } from '../shared/socks.ts'
+import { SOCKS_PORT } from '../../shared/socks.ts'
 
 // Real service_metadata captured from live xray node I3W0H0R2 (103.181.227.155),
 // version 9.0.0. Entry 0 is the flagship VLESS+Reality+TCP; the rest are other

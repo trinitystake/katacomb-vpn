@@ -1,9 +1,9 @@
 import { app } from 'electron'
 import { existsSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { runPrivileged } from './privileged'
-import { writeFileAtomic } from './fs-utils'
-import { LAN_SHARING_ARG } from './config-guard'
+import { runPrivileged } from '../helper/privileged'
+import { writeFileAtomic } from '../fs-utils'
+import { LAN_SHARING_ARG } from '../config-guard'
 
 // App-owned marker recording that the kill-switch chain may be installed. Reading
 // iptables needs root, so this unprivileged flag is the cheap detector that lets a

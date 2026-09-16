@@ -6,7 +6,7 @@ import {
   isValidTlsPin,
   type HysteriaMetadataEntry,
 } from './hysteria-config.ts'
-import { SOCKS_PORT } from '../shared/socks.ts'
+import { SOCKS_PORT } from '../../shared/socks.ts'
 
 // A well-formed SHA-256 cert fingerprint in the colon-separated hex format the
 // go-sdk emits (hysteria2/metadata.go: tls_pin) and pinSHA256 accepts.

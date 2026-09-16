@@ -1,5 +1,5 @@
 import { BrowserWindow, net } from 'electron'
-import { IPC } from '../shared/ipc-channels'
+import { IPC } from '../../shared/ipc-channels'
 import {
   classifyRpc,
   needsConfirmation,
@@ -7,10 +7,10 @@ import {
   type RpcCandidate,
   type RpcHealth,
   type RpcProbe,
-} from '../shared/rpc-health'
-import { isKillSwitchArmed } from './kill-switch'
-import { getRpcEndpoint, loadSettings, saveSettings } from './settings'
-import { isVpnActive } from './vpn-manager'
+} from '../../shared/rpc-health'
+import { isKillSwitchArmed } from '../vpn/kill-switch'
+import { getRpcEndpoint, loadSettings, saveSettings } from '../settings'
+import { isVpnActive } from '../vpn/vpn-manager'
 
 const PROBE_TIMEOUT_MS = 10_000
 const POLL_INTERVAL_MS = 30_000

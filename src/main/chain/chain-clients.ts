@@ -8,9 +8,9 @@ import {
 } from '@cosmjs/stargate'
 import type { OfflineSigner } from '@cosmjs/proto-signing'
 import { SentinelClient, SigningSentinelClient } from '@sentinel-official/sentinel-js-sdk'
-import { CHAIN_REGISTRY } from './provider-msgs'
-import { getRpcEndpoint } from './settings'
-import { withTimeout } from './async-utils'
+import { CHAIN_REGISTRY } from '../provider/provider-msgs'
+import { getRpcEndpoint } from '../settings'
+import { withTimeout } from '../async-utils'
 import { GAS_PRICE_STR } from './chain-constants'
 
 const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)

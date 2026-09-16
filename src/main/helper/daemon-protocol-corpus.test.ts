@@ -19,7 +19,7 @@ import {
 // daemon/internal/protocol/corpus_test.go and daemon/internal/server/corpus_test.go.
 
 const CORPUS = fileURLToPath(
-  new URL('../../daemon/internal/protocol/testdata/corpus/protocol.json', import.meta.url),
+  new URL('../../../daemon/internal/protocol/testdata/corpus/protocol.json', import.meta.url),
 )
 
 interface Corpus {

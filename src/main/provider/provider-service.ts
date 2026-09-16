@@ -1,8 +1,8 @@
 import { SentinelClient, Status } from '@sentinel-official/sentinel-js-sdk'
 import Long from 'long'
-import { getRpcEndpoint } from './settings'
-import { isVpnActive } from './vpn-manager'
-import { withTimeout } from './async-utils'
+import { getRpcEndpoint } from '../settings'
+import { isVpnActive } from '../vpn/vpn-manager'
+import { withTimeout } from '../async-utils'
 import {
   getCachedProviders,
   isCacheFresh,

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { replaceDnsLines } from './connect-decisions.ts'
+import { replaceDnsLines } from './vpn/connect-decisions.ts'
 
 // The exact config shape a live WireGuard node produced on 2026-08-19, whose
 // first resolver (10.8.0.1) never answered and stalled DNS for ~34s after connect.

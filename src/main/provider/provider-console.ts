@@ -27,20 +27,20 @@ import {
   QueryServiceClientImpl as SubscriptionQueryServiceClientImpl,
   QueryParamsRequest as SubscriptionQueryParamsRequest,
 } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/subscription/v3/querier.js'
-import { getRpcEndpoint } from './settings'
-import { withTimeout } from './async-utils'
-import { withProtobufQuery } from './protobuf-query'
-import { listLeasesForProvider, getLeaseParams, type LeaseInfo } from './lease-query'
+import { getRpcEndpoint } from '../settings'
+import { withTimeout } from '../async-utils'
+import { withProtobufQuery } from '../chain/protobuf-query'
+import { listLeasesForProvider, getLeaseParams, type LeaseInfo } from '../chain/lease-query'
 import {
   computeBurn,
   computeCommitted,
   computeEstimatedRevenue,
   netOfStakingShare,
   parseDecShare,
-} from '../shared/provider-economics'
-import { assertTxSucceeded, broadcastOrTimeout, isChainNotFound } from './tx-utils'
-import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from './chain-constants'
-import { openChainQuery, resolveRpcBase, TX_POLL_INTERVAL_MS, type ChainQuery } from './chain-clients'
+} from '../../shared/provider-economics'
+import { assertTxSucceeded, broadcastOrTimeout, isChainNotFound } from '../chain/tx-utils'
+import { GAS_PRICE_STR, TX_TIMEOUT_HEIGHT_OFFSET } from '../chain/chain-constants'
+import { openChainQuery, resolveRpcBase, TX_POLL_INTERVAL_MS, type ChainQuery } from '../chain/chain-clients'
 import {
   CHAIN_REGISTRY,
   buildCreatePlanMsg,

@@ -15,7 +15,7 @@ import {
   reportRpcFailure,
   runAutoRpcSelection,
   runAutoRpcSelectionReport,
-} from './rpc-monitor'
+} from './chain/rpc-monitor'
 import { writeFileAtomic } from './fs-utils'
 import {
   hasStoredWallet,
@@ -37,16 +37,16 @@ import {
   getPrivKey,
   logout,
   type SessionInfo,
-} from './wallet'
-import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, sendPlanProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain-service'
-import { openChainFlow, openChainQuery } from './chain-clients'
+} from './chain/wallet'
+import { subscribeToNode, performHandshake, handshakeChainEntry, handshakeChainExit, finalizeChain, sendChainHopProgress, sendPlanProgress, chainHopRoleOf, resolveNodeRemoteUrl, loadSessionConfig, listSessionsOwnedByOtherWallets, endSession, V2RayPolicyError } from './chain/chain-service'
+import { openChainFlow, openChainQuery } from './chain/chain-clients'
 import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
 import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, isWireGuardPeerGone, WG_HANDSHAKE_DEAD_SECONDS, WG_HANDSHAKE_STALE_SAMPLES, latestProofOfLifeMs, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './connect-decisions'
-import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, invalidateAllPlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
-import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plan-connect'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, isWireGuardPeerGone, WG_HANDSHAKE_DEAD_SECONDS, WG_HANDSHAKE_STALE_SAMPLES, latestProofOfLifeMs, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './vpn/connect-decisions'
+import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, invalidateAllPlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plans/plan-service'
+import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plans/plan-connect'
 import {
   getProviderDeposit,
   getProviderOverview,
@@ -65,19 +65,19 @@ import {
   startLease,
   endLease,
   type ProviderOverview,
-} from './provider-console'
-import { listLeasesForProvider, getLeaseParams } from './lease-query'
-import { getTokenPrice } from './price-service'
-import { assertValidLeaseHours, leaseDepositNumber, leaseDepositUdvpn, toProviderAddress } from './provider-msgs'
+} from './provider/provider-console'
+import { listLeasesForProvider, getLeaseParams } from './chain/lease-query'
+import { getTokenPrice } from './chain/price-service'
+import { assertValidLeaseHours, leaseDepositNumber, leaseDepositUdvpn, toProviderAddress } from './provider/provider-msgs'
 import { renewalPolicyRefusal } from '../shared/renewal-policy'
 import { assertValidProviderDetails } from '../shared/provider-details'
-import { getProvider, listProviders } from './provider-service'
-import { getCachedProviders } from './provider-cache'
-import { getCachedPlans } from './plan-cache'
+import { getProvider, listProviders } from './provider/provider-service'
+import { getCachedProviders } from './provider/provider-cache'
+import { getCachedPlans } from './plans/plan-cache'
 import { loadSettings, saveSettings, listWallets, deleteWalletEntry, renameWallet, getWalletMnemonic, clearRetainedSeed, setWalletProviderMode, type AppSettings } from './settings'
 import { assignSeedGroups } from '../shared/seed-groups'
-import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes-cache'
-import { normalizeNodes, parseNodesPage, type NodesPage } from './node-normalize'
+import { loadNodesCache, saveNodesCache, type NodesCacheFile } from './nodes/nodes-cache'
+import { normalizeNodes, parseNodesPage, type NodesPage } from './nodes/node-normalize'
 import {
   connectWireGuardFromConfig,
   connectAmneziaWgFromConfig,
@@ -108,15 +108,15 @@ import {
   getActiveProxyPort,
   onV2RayUnexpectedExit,
   reapOrphanedProxyChildren,
-} from './vpn-manager'
-import { runPrivileged, canEscalatePrivileges } from './privileged'
-import { daemonMissingOp, daemonXfrmPolicyCount, daemonWireguardHandshakeAge } from './daemon-client'
-import type { DaemonOp } from './daemon-protocol'
+} from './vpn/vpn-manager'
+import { runPrivileged, canEscalatePrivileges } from './helper/privileged'
+import { daemonMissingOp, daemonXfrmPolicyCount, daemonWireguardHandshakeAge } from './helper/daemon-client'
+import type { DaemonOp } from './helper/daemon-protocol'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
-import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
-import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './traffic-stats'
-import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './node-tester'
-import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './multihop-config'
+import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './vpn/kill-switch'
+import { getTrafficStats, resetTrafficStats, maxUsageBytes, readTunnelBytes } from './vpn/traffic-stats'
+import { probeNode, startBatch, cancelBatch, speedTest, getAllCachedResults, fetchNodeServiceType, fetchNodeServiceMetadata } from './nodes/node-tester'
+import { classifyHopEligibility, buildEntryOnlyConfig, type HopMetadataEntry } from './protocols/multihop-config'
 import { SocksHttpsAgent } from './socks-agent'
 
 const NODES_API = 'https://api.sentnodes.com/v2/nodes'

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Wireguard } from '@sentinel-official/sentinel-js-sdk'
 import { buildWireguardConfig, DEFAULT_WIREGUARD_DNS } from './wireguard-config.ts'
-import { assertSafeWireguardConfig } from './config-guard.ts'
+import { assertSafeWireguardConfig } from '../config-guard.ts'
 
 // The SDK stays a devDependency so this oracle keeps working: our builder must
 // emit exactly what its Wireguard class emitted, or an existing session's tunnel

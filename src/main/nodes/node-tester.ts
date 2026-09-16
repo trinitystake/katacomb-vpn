@@ -1,7 +1,7 @@
 import https from 'node:https'
 import http from 'node:http'
 import { net, BrowserWindow } from 'electron'
-import { IPC } from '../shared/ipc-channels'
+import { IPC } from '../../shared/ipc-channels'
 
 // dVPN nodes use self-signed TLS certificates, so we need a custom agent
 const insecureAgent = new https.Agent({ rejectUnauthorized: false })

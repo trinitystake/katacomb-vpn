@@ -18,10 +18,10 @@ import {
   updateWalletAddress,
   isSeedSource,
   clearRetainedSeed,
-} from './settings'
+} from '../settings'
 import { WALLET_PREFIX } from './chain-constants'
-import { formatHdPath } from '../shared/hd-path'
-import { withTimeout } from './async-utils'
+import { formatHdPath } from '../../shared/hd-path'
+import { withTimeout } from '../async-utils'
 import { resolveRpcBase } from './chain-clients'
 
 // BIP-44 path for Cosmos SDK chains (coin type 118). Varying the account

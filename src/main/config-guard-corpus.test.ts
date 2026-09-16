@@ -21,7 +21,7 @@ import {
 // the README there for the header format. The 76 inline tests in
 // config-guard.test.ts are untouched; this is the cross-implementation pin.
 
-const CORPUS = fileURLToPath(new URL('../../daemon/internal/guard/testdata/corpus/', import.meta.url))
+const CORPUS = fileURLToPath(new URL('../../daemon/internal/guard/testdata/corpus', import.meta.url))
 
 // The Go messages contain the reason word literally; the TypeScript wording
 // predates the corpus and is matched per reason instead.

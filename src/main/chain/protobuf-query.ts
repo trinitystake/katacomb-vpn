@@ -13,8 +13,8 @@
 
 import { QueryClient, createProtobufRpcClient, type ProtobufRpcClient } from '@cosmjs/stargate'
 import { connectComet, type CometClient } from '@cosmjs/tendermint-rpc'
-import { getRpcEndpoint } from './settings'
-import { withTimeout } from './async-utils'
+import { getRpcEndpoint } from '../settings'
+import { withTimeout } from '../async-utils'
 import { resolveRpcBase } from './chain-clients'
 
 const CONNECT_TIMEOUT_MS = 10_000

@@ -15,9 +15,9 @@ import {
   type HopSpec,
   type HopMetadataEntry,
 } from './multihop-config.ts'
-import { classifyV2RayInbound, assertSafeV2RayConfig } from './config-guard.ts'
+import { classifyV2RayInbound, assertSafeV2RayConfig } from '../config-guard.ts'
 import { isUsableXRayReality } from './xray-config.ts'
-import { SOCKS_PORT } from '../shared/socks.ts'
+import { SOCKS_PORT } from '../../shared/socks.ts'
 
 // The proxy/transport/security triples below are real combinations captured from
 // live v9.0.0 nodes on 2026-08-14 (probed at each node's root path). Their

@@ -1,4 +1,4 @@
-import { makeDiskCache } from './disk-cache'
+import { makeDiskCache } from '../disk-cache'
 import type { ProviderInfo } from './provider-service'
 
 const TTL_MS = 60 * 60 * 1000

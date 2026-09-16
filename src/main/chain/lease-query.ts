@@ -15,7 +15,7 @@ import {
   QueryParamsRequest,
 } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/lease/v1/querier.js'
 import type { ProtobufRpcClient } from '@cosmjs/stargate'
-import { withTimeout } from './async-utils'
+import { withTimeout } from '../async-utils'
 import { withProtobufQuery, QUERY_TIMEOUT_MS } from './protobuf-query'
 
 const PAGE_LIMIT = 200

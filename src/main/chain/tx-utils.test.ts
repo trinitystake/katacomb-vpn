@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { TimeoutError } from '@cosmjs/stargate'
-import { INSUFFICIENT_FUNDS } from '../shared/error-markers.ts'
+import { INSUFFICIENT_FUNDS } from '../../shared/error-markers.ts'
 import { FUNDS_MESSAGE, assertTxSucceeded, broadcastOrTimeout, isChainNotFound, isInsufficientFundsFailure, isSessionNotActive } from './tx-utils.ts'
 
 test('the inlined marker prefix has not drifted from the shared one', () => {

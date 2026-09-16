@@ -7,7 +7,7 @@ import {
   type DaemonRequest,
   type DaemonResponse,
 } from './daemon-protocol'
-import { withTimeout } from './async-utils'
+import { withTimeout } from '../async-utils'
 
 /** The daemon is present (deb install). When false, callers use the pkexec fallback. */
 export function isDaemonAvailable(): boolean {

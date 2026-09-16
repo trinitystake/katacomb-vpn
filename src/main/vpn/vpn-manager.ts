@@ -18,16 +18,16 @@ import {
   extractWireguardEndpointHost,
   assertSafeOpenVpnConfig,
   extractOpenVpnRemoteHost,
-} from './config-guard'
+} from '../config-guard'
 import { verifyBinaryIntegrity } from './binary-integrity'
 import { trackProxyChildIn, reapOrphanedProxyChildrenIn } from './proxy-children'
 import { isChildProxyCarryingTraffic } from './connect-decisions'
-import { runPrivileged } from './privileged'
-import { loadSettings } from './settings'
+import { runPrivileged } from '../helper/privileged'
+import { loadSettings } from '../settings'
 import { parseDefaultRoute, v2rayRunArgs, firstIPv4FromGetent } from './vpn-parse'
 import { isDnsProvisionError } from './connect-decisions'
-import { DNS_PROVISION_FAILED } from '../shared/error-markers'
-import { SOCKS_PORT } from '../shared/socks'
+import { DNS_PROVISION_FAILED } from '../../shared/error-markers'
+import { SOCKS_PORT } from '../../shared/socks'
 
 const WG_IFACE = 'sntl0'
 
@@ -43,7 +43,7 @@ const V2RAY_CONFIG = join(SECURE_TMPDIR, 'v2ray.json')
  */
 function resolveBundled(name: string): string {
   const bundled = is.dev
-    ? join(__dirname, '../../resources/linux/bin', name)
+    ? join(__dirname, '../../../resources/linux/bin', name)
     : join(process.resourcesPath, 'linux/bin', name)
 
   if (existsSync(bundled)) {

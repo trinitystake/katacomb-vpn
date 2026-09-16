@@ -22,7 +22,7 @@ let DaemonUnreachableError: new (m: string) => Error
 before(() => {
   const out = join(mkdtempSync(join(tmpdir(), 'daemon-client-test-')), 'daemon-client.cjs')
   buildSync({
-    entryPoints: ['src/main/daemon-client.ts'],
+    entryPoints: ['src/main/helper/daemon-client.ts'],
     bundle: true,
     platform: 'node',
     format: 'cjs',

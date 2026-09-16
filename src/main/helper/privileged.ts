@@ -15,7 +15,7 @@ import { execFile } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
 import { promisify } from 'util'
 import { isDaemonAvailable, daemonRequest, DaemonUnreachableError } from './daemon-client'
-import { LAN_SHARING_ARG } from './config-guard'
+import { LAN_SHARING_ARG } from '../config-guard'
 
 const HELPER_PATH = '/usr/local/bin/katacomb-vpn-helper'
 

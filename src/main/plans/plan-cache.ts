@@ -1,4 +1,4 @@
-import { makeDiskCache } from './disk-cache'
+import { makeDiskCache } from '../disk-cache'
 
 export interface CachedPlan {
   id: string

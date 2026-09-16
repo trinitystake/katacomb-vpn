@@ -10,12 +10,12 @@ import {
   performDisconnect, onConnectionStateChanged, getConnectionInfo, healStrandedKillSwitch,
   healOrphanedTunnel, type ConnectionInfo,
 } from './ipc-handlers'
-import { killAllTunnels, detectExistingConnection } from './vpn-manager'
-import { onChainPathChanged, runAutoRpcSelection, startRpcMonitor, stopRpcMonitor } from './rpc-monitor'
-import { sweepStaleSessionFiles } from './chain-service'
+import { killAllTunnels, detectExistingConnection } from './vpn/vpn-manager'
+import { onChainPathChanged, runAutoRpcSelection, startRpcMonitor, stopRpcMonitor } from './chain/rpc-monitor'
+import { sweepStaleSessionFiles } from './chain/chain-service'
 import { migrateLegacyUserData, dedupeWalletEntries, migrateProviderModeToWallet, migrateRpcMode } from './settings'
-import { listProviders } from './provider-service'
-import { isDaemonAvailable } from './daemon-client'
+import { listProviders } from './provider/provider-service'
+import { isDaemonAvailable } from './helper/daemon-client'
 import { IPC } from '../shared/ipc-channels'
 import { setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net'
 

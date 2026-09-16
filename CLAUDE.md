@@ -228,9 +228,11 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   killing the daemon (any group member could bounce it with `null\n`); the pid-less
   `tun-down` fallback is a `/proc` scan that signals only a process whose executable
   IS this helper, whose argv[1] is `_tun2socks` and whose argv carries `tun://sntl-tun`
-  as a WHOLE entry (never `pkill -f`); **one validation layer for both modes** — the DNS allow-list and
-  the SHA pins apply to the pkexec one-shot too, so an admin-authenticated user cannot
-  make root run an arbitrary binary or point every lookup at their resolver;
+  as a WHOLE entry (never `pkill -f`); **one validation layer for both modes** — the DNS allow-list
+  applies to the pkexec one-shot too, so an admin-authenticated user cannot point every
+  lookup at their resolver (the SHA pins used to sit here as well; they went with the
+  vendored binaries root no longer runs, and `binary-integrity.ts` is now the only pin
+  table, for the user-run cores);
   **one-shot configs are read ONCE**, via `O_NOFOLLOW` + `fstat` (regular file, owned by
   `PKEXEC_UID` when set, ≤ 256 KiB), and the tool is handed the root-owned
   `/run/katacomb-vpn/{sntl0,openvpn}.conf` copy, never the caller's path (the bash
@@ -513,6 +515,37 @@ The connect path spends real on-chain funds, so these are enforced and must hold
     not a fault. It stands down through `standDownSession('stalled')` rather than
     `attemptReconnect` — with auto-reconnect off, that gate returns silently and
     leaves the dead tunnel up, which is the state being detected.
+  - `checkWireGuardHandshake()` on the same loop, **kernel WireGuard ONLY**, closes the
+    hole the bullet above admits to: an idle tunnel whose peer has died produces no
+    traffic, so `isTunnelOneWay` abstains forever and the idle branch keeps advancing
+    `aliveUntilMs = now` against a dead tunnel (the #53670474 shape). The kernel is the
+    witness. Our configs carry `PersistentKeepalive = 15`, so a live peer re-handshakes
+    on its own (`RekeyAfterTime` is 120 s on send, and the keepalive guarantees a send)
+    and the age saws 0 → ~140 s regardless of the user, while a keypair older than
+    `RejectAfterTime` = 180 s is refused for BOTH send and receive — so
+    `WG_HANDSHAKE_DEAD_SECONDS = 180` (`connect-decisions.ts`) is the protocol's own
+    line, not a tuned number; read it out of amneziawg-go's `device/constants.go`
+    before touching it. The daemon's `wireguard_handshake` op does the read (`wg show
+    sntl0 latest-handshakes` needs CAP_NET_ADMIN — verified in a container:
+    `Operation not permitted` as a normal user) through the `Env` seam with no new Go
+    dependency, and it is **daemon-only, never pkexec**: a 15 s poll cannot carry a
+    password prompt, so no daemon means the app keeps only the detectors above.
+    `WG_HANDSHAKE_STALE_SAMPLES` consecutive stale ticks are required, and the count is
+    measured rather than chosen: a returning peer needs the 15 s keepalive to drive a
+    rekey before the age resets, which took 10-20 s, so two samples (15 s apart) sit
+    INSIDE that window — a 90 s blackout that healed cleanly was observed ONE sample
+    short of ending a live session. On detection the floor is pulled back to
+    `latestProofOfLifeMs`, the later of the handshake and the last inbound byte, NOT the
+    handshake alone: that is ~130 s stale on a healthy tunnel and collapsed
+    `durationSeconds` to 0 when the peer died before the first rekey (#61725835, 1.3 MB
+    received, zero seconds recorded). It proves the PEER answers,
+    not that the node forwards, so it ADDS a detector and replaces neither the probe nor
+    `isTunnelOneWay`. AmneziaWG is deliberately NOT covered: its `sntl0` is a `type tun`
+    with no UAPI socket, so the op answers `kernel:false` and the check abstains — that
+    blind spot stays. Known residual, quantified: an unbroken outage that spans the rekey
+    point and is still running when the samples are taken ends a session that would have
+    healed. Past 180 s the keypair is refused, so nothing is flowing at that moment
+    either, and the session stays open on chain with a reconnect offered.
 - **…and a live child proxy is not a tunnel either. Two predicates, two questions.**
   `getConnectionStatus().connected` means *traffic is being carried*;
   `isProxyChildAlive()` means *the spawned core survived startup*. They were one

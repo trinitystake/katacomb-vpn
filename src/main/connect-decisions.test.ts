@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, shouldRetrySessionHandshake, HANDSHAKE_RETRY_MAX_RETRIES, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS } from './connect-decisions.ts'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, backoffDelayMs, serviceTypeToNodeType, isDnsProvisionError, stripDnsLines, replaceDnsLines, evaluateQuota, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, isChildProxyCarryingTraffic, shouldRetrySessionHandshake, HANDSHAKE_RETRY_MAX_RETRIES, ONE_WAY_TX_FLOOR_BYTES, ONE_WAY_SILENCE_MS, isWireGuardPeerGone, WG_HANDSHAKE_DEAD_SECONDS, WG_HANDSHAKE_STALE_SAMPLES, latestProofOfLifeMs } from './connect-decisions.ts'
 
 // --- isChildProxyCarryingTraffic (the spawn-to-tun-up window) ---
 
@@ -453,6 +453,52 @@ test('isTunnelOneWay: the #53647217 shape — a node that never answered the han
   assert.equal(isTunnelOneWay(3119, 3 * 60_000), false)
   // Left up longer, the app's own retries push it past the floor and it trips.
   assert.equal(isTunnelOneWay(80 * 1024, 5 * 60_000), true)
+})
+
+// --- isWireGuardPeerGone ---
+
+test('isWireGuardPeerGone: the line is RejectAfterTime, inclusive', () => {
+  // 180 s is WireGuard's own RejectAfterTime: the kernel refuses a keypair that old
+  // for send AND receive, so a live tunnel carrying anything is always younger. With
+  // PersistentKeepalive = 15 a live peer re-handshakes by ~140 s on its own, and that
+  // gap is the headroom. Do not "tune" this without re-reading the derivation.
+  assert.equal(WG_HANDSHAKE_DEAD_SECONDS, 180)
+  assert.equal(isWireGuardPeerGone(179), false)
+  assert.equal(isWireGuardPeerGone(180), true)
+  assert.equal(isWireGuardPeerGone(10_000), true)
+})
+
+test('isWireGuardPeerGone: a fresh handshake, or no answer, is never a verdict', () => {
+  assert.equal(isWireGuardPeerGone(0), false)
+  assert.equal(isWireGuardPeerGone(140), false)
+  // null is "cannot know": no daemon, an older daemon, or an AmneziaWG sntl0 that
+  // wg(8) cannot read. Uncertainty abstains, the same way daemonMissingOp does.
+  assert.equal(isWireGuardPeerGone(null), false)
+})
+
+test('latestProofOfLifeMs: inbound bytes are proof of life too, not just the handshake', () => {
+  const now = 1_000_000
+  // The live regression (#61725835). The peer died before the first rekey, so the only
+  // handshake that ever completed was the bring-up one. Trusting it alone pulled
+  // aliveUntilMs back to connectedAtMs and wrote durationSeconds: 0 for a tunnel that
+  // had received 1.3 MB. Bytes coming back are the finer, later proof.
+  assert.equal(latestProofOfLifeMs(now - 200_000, now - 40_000), now - 40_000)
+})
+
+test('latestProofOfLifeMs: the handshake wins when nothing has come back lately', () => {
+  const now = 1_000_000
+  // An idle tunnel receives nothing for minutes and is not dead; the rekey is then the
+  // only proof there is, and it must not be dragged back to a stale rx timestamp.
+  assert.equal(latestProofOfLifeMs(now - 10_000, now - 90_000), now - 10_000)
+  assert.equal(latestProofOfLifeMs(now, now), now)
+})
+
+test('WG_HANDSHAKE_STALE_SAMPLES outlasts the measured rekey recovery', () => {
+  // 15_000 is QUOTA_POLL_MS, inlined because this module stays import-free. The span
+  // between the first and last stale sample has to exceed the 20s worst case for a
+  // returning peer to complete a rekey, or a recoverable outage ends a paid session.
+  // Two samples span 15s and were observed ONE sample from firing wrongly.
+  assert.ok((WG_HANDSHAKE_STALE_SAMPLES - 1) * 15_000 > 20_000)
 })
 
 // --- describeNodeApiError ---

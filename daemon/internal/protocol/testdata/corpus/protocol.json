@@ -9,6 +9,7 @@
     "protocol_version",
     "status",
     "xfrm_policies",
+    "wireguard_handshake",
     "wireguard_up",
     "wireguard_down",
     "amneziawg_up",
@@ -26,7 +27,8 @@
   "lockFreeOps": [
     "status",
     "protocol_version",
-    "xfrm_policies"
+    "xfrm_policies",
+    "wireguard_handshake"
   ],
   "_requests": "Framing and parse taxonomy. `outcome` is one of valid | invalidJSON | invalidRequest | blank. The two invalid outcomes get a fixed {\"id\":0,...} reply and the connection STAYS OPEN \u2014 deviation 3 from the bash helper, because any group member could otherwise bounce the daemon with a single `null` line.",
   "requests": [

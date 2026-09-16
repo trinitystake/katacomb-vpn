@@ -44,7 +44,7 @@ import type { SentinelClient } from '@sentinel-official/sentinel-js-sdk'
 import type https from 'node:https'
 import { get as httpsGet } from 'node:https'
 import { withTimeout } from './async-utils'
-import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './connect-decisions'
+import { sessionFailureMessage, chainFailureMessage, refundEachInTurn, decideReconnect, evaluateQuota, serviceTypeToNodeType, stripDnsLines, replaceDnsLines, isTunnelOneWay, isWireGuardPeerGone, WG_HANDSHAKE_DEAD_SECONDS, WG_HANDSHAKE_STALE_SAMPLES, latestProofOfLifeMs, usageAccruesWithoutTunnelInterface, prunableUsageIds, describeNodeApiError, deadTunnelMessage, decideFirewallAction, shouldRetrySessionHandshake, HANDSHAKE_RETRY_DELAY_MS, REFUND_FAILED_TAIL, type QuotaVerdict } from './connect-decisions'
 import { discoverPlans, listCachedPlans, listNodesForPlan, invalidatePlanNodes, invalidateAllPlanNodes, listPlansForNode, subscribeToPlan, startSessionWithExistingSubscription, cancelSubscription, renewSubscription, updateSubscriptionPolicy, getPlanOverview, getCachedPlanNodes, TX_TIMEOUT_MESSAGE as PLAN_TX_TIMEOUT_MESSAGE, type PlanOverview } from './plan-service'
 import { rankPlanCandidates, shouldTryNextCandidate, ladderNextTx, smartConnectFailureSummary, type PlanNodeCandidate, type SmartConnectFailure } from './plan-connect'
 import {
@@ -108,7 +108,7 @@ import {
   getActiveProxyPort,
 } from './vpn-manager'
 import { runPrivileged, canEscalatePrivileges } from './privileged'
-import { daemonMissingOp, daemonXfrmPolicyCount } from './daemon-client'
+import { daemonMissingOp, daemonXfrmPolicyCount, daemonWireguardHandshakeAge } from './daemon-client'
 import type { DaemonOp } from './daemon-protocol'
 import { isAllowedBypassCidr, isAllowedDnsResolver, isSafeNodeApiUrl } from './config-guard'
 import { enableKillSwitch, disableKillSwitch, isKillSwitchArmed } from './kill-switch'
@@ -636,6 +636,8 @@ function startQuotaWatchdog(): void {
       void standDownSession(failure)
       return
     }
+    // Fire-and-forget: it awaits a daemon round trip and stands down on its own.
+    void checkWireGuardHandshake()
     const scored = currentQuotaVerdict()
     if (!scored) return
     const verdict = scored.verdict
@@ -678,12 +680,20 @@ let aliveUntilMs = 0
 // connect's traffic as nothing, dropping the byte floor back to the chain's
 // not-yet-settled figure, which is the collapse lastSessionUsage exists to prevent.
 let aliveBytes = { rx: 0, tx: 0 }
+// Consecutive quota ticks on which the kernel reported the WireGuard peer's last
+// handshake as older than the protocol's own dead line. Several are required, because
+// the stamp is wall-clock and a returning peer needs a rekey to reset it — see
+// WG_HANDSHAKE_STALE_SAMPLES for the measurement that sets the count.
+let staleHandshakeTicks = 0
+// One probe at a time: the interval re-enters, and the probe awaits a socket.
+let handshakeProbeInFlight = false
 
 function resetOneWayTracking(): void {
   lastRxBytes = 0
   lastTxAtRx = 0
   lastRxMovedAtMs = 0
   aliveBytes = { rx: 0, tx: 0 }
+  staleHandshakeTicks = 0
 }
 
 /**
@@ -739,6 +749,59 @@ function checkTunnelStalled(): 'stalled' | 'dropped' | null {
     `${Math.round((now - lastRxMovedAtMs) / 1000)}s. The node has stopped forwarding.`,
   )
   return 'stalled'
+}
+
+/**
+ * The idle half of the dead-tunnel problem, for kernel WireGuard only.
+ *
+ * checkTunnelStalled needs traffic LEAVING to have any evidence, and its comment says
+ * why: silence on both counters is just a user who isn't browsing. So an idle tunnel
+ * whose peer has died is invisible to it, and every tick above sets aliveUntilMs = now
+ * against a tunnel that is gone (the #53670474 shape). The kernel, though, is producing
+ * evidence the whole time: our configs carry PersistentKeepalive = 15, so a live peer
+ * re-handshakes on its own about every 140 s (RekeyAfterTime is 120 s on send, and the
+ * keepalive guarantees a send), and a keypair older than RejectAfterTime = 180 s is
+ * refused for BOTH send and receive. A handshake older than that is not a heuristic,
+ * it is the protocol's own line. Read through the daemon because it needs
+ * CAP_NET_ADMIN; daemon-only, never pkexec, or this would be a password prompt on a
+ * 15 s timer, and null (no daemon, AmneziaWG's userspace sntl0, an older daemon) simply
+ * abstains.
+ *
+ * It proves the PEER answers, not that the node forwards, so assertTunnelCarriesTraffic
+ * and isTunnelOneWay stay exactly as they are: this only adds a detector where they
+ * abstain. Same stand-down path as a stall, for the same reason — attemptReconnect
+ * returns silently with auto-reconnect off, leaving the dead tunnel up.
+ */
+async function checkWireGuardHandshake(): Promise<void> {
+  if (desiredProtocol !== 'wireguard' || handshakeProbeInFlight) return
+  handshakeProbeInFlight = true
+  const myEpoch = connectionEpoch
+  try {
+    const age = await daemonWireguardHandshakeAge()
+    // Disconnected, or a newer lifecycle began, while the probe was in flight: the
+    // answer belongs to a tunnel that is no longer this one.
+    if (connectionEpoch !== myEpoch || isIntentionalDisconnect || reconnectAttempt > 0 || !activeSessionId) return
+    // "Cannot know" resets the count rather than pausing it: a flaky daemon must not
+    // let two stale samples accumulate across a gap it could not vouch for.
+    if (age === null || !isWireGuardPeerGone(age)) {
+      staleHandshakeTicks = 0
+      return
+    }
+    if (++staleHandshakeTicks < WG_HANDSHAKE_STALE_SAMPLES) return
+    // Usage stops accruing at the last proof of life, not now: every idle tick before
+    // this one set aliveUntilMs = now, and left alone that bills the whole dead window
+    // into lastSessionUsage as a permanent floor. The handshake is NOT that proof on its
+    // own — it is up to ~130 s stale on a healthy tunnel, and taking it alone zeroed the
+    // floor outright when the peer died before the first rekey (#61725835).
+    aliveUntilMs = Math.min(aliveUntilMs, latestProofOfLifeMs(Date.now() - age * 1000, lastRxMovedAtMs))
+    console.error(
+      `[vpn] WireGuard peer has not completed a handshake for ${age}s (the protocol ` +
+      `refuses keys older than ${WG_HANDSHAKE_DEAD_SECONDS}s). The node has dropped our peer.`,
+    )
+    void standDownSession('stalled')
+  } finally {
+    handshakeProbeInFlight = false
+  }
 }
 
 /** "10 minutes" / "1.2 GB" — the remaining-quota phrase for the warning notification. */

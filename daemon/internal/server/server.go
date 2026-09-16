@@ -180,12 +180,12 @@ func (s *Server) handle(conn net.Conn) {
 }
 
 // lockedOp reports whether an op changes state and must therefore serialise on
-// the server mutex. Only the two read-only ops are exempt. Named rather than
+// the server mutex. Only the read-only ops are exempt. Named rather than
 // inlined so corpus_test.go can pin it against the shared protocol corpus, which
 // is also what tells the TypeScript side which ops are safe to issue concurrently.
 func lockedOp(op string) bool {
 	switch op {
-	case "status", "protocol_version", "xfrm_policies":
+	case "status", "protocol_version", "xfrm_policies", "wireguard_handshake":
 		return false
 	}
 	return true

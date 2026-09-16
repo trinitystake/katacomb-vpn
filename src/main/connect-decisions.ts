@@ -340,6 +340,56 @@ export function isTunnelOneWay(txSinceLastRx: number, msSinceLastRx: number): bo
 }
 
 /**
+ * A kernel WireGuard peer whose last completed handshake is this old is gone. Not a
+ * tuned number: WireGuard refuses a keypair older than RejectAfterTime (180 s) for
+ * both send and receive, so any tunnel moving any data has a younger handshake than
+ * this. Our configs carry PersistentKeepalive = 15, which guarantees a send and so a
+ * rekey at RekeyAfterTime (120 s): a live peer's age saws between 0 and ~140 s whether
+ * or not the user does anything. That is what makes this the idle-tunnel detector
+ * isTunnelOneWay cannot be. Constants read out of amneziawg-go's device/constants.go.
+ */
+export const WG_HANDSHAKE_DEAD_SECONDS = 180
+
+/**
+ * True when the kernel's last-handshake age says the WireGuard peer is gone. `null`
+ * is "cannot know" (no daemon, an older daemon, or a userspace AmneziaWG sntl0 that
+ * wg(8) cannot read) and is never a verdict, so uncertainty can only ever abstain.
+ */
+export function isWireGuardPeerGone(ageSeconds: number | null): boolean {
+  return ageSeconds !== null && ageSeconds >= WG_HANDSHAKE_DEAD_SECONDS
+}
+
+/**
+ * How many consecutive stale readings stand a session down. Measured, not chosen.
+ *
+ * The stamp is wall-clock and the peer can come back, so a single reading is not
+ * evidence: once the peer is reachable again the 15 s keepalive drives a rekey that
+ * resets the age within 10 to 20 s. The quota loop samples every 15 s, so two samples
+ * span only 15 s, which sits INSIDE that recovery window — a 90 s blackout that healed
+ * cleanly was observed one single sample short of a false stand-down (age 186, then 7).
+ * Three samples span 30 s, past the measured recovery, and cost one extra tick of
+ * detection latency on a tunnel that is already carrying nothing.
+ */
+export const WG_HANDSHAKE_STALE_SAMPLES = 3
+
+/**
+ * The later of the two things that prove a tunnel was still alive: a completed
+ * WireGuard handshake, and the last time bytes actually came back.
+ *
+ * Both are needed, and the handshake alone is the trap. It is authoritative but COARSE:
+ * a healthy tunnel rekeys about every 120 s, so it is routinely 130 s stale (measured).
+ * Using it alone collapses the usage floor to ZERO whenever the peer dies before the
+ * first rekey, because the only handshake that ever completed was the one at bring-up,
+ * which is `connectedAtMs` — so `connectedSecondsAlive()` returns 0. Live on mainnet
+ * session #61725835: 1.3 MB received and `durationSeconds: 0` written to the floor, for
+ * a tunnel that had plainly worked. Inbound bytes are the finer proof and the floor must
+ * not discard them.
+ */
+export function latestProofOfLifeMs(handshakeCompletedAtMs: number, lastRxMovedAtMs: number): number {
+  return Math.max(handshakeCompletedAtMs, lastRxMovedAtMs)
+}
+
+/**
  * Does a session keep accruing usage while NO tunnel interface exists?
  *
  * Only in local-proxy mode, which has no interface by design and is spending the

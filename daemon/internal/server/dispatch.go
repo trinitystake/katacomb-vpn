@@ -44,6 +44,13 @@ func Dispatch(ctx context.Context, req protocol.Request, e *ops.Env) protocol.Re
 		// reading policies needs CAP_NET_ADMIN).
 		return reply(map[string]int{"count": ops.XfrmPolicyCount(ctx, e)})
 
+	case "wireguard_handshake":
+		// Read-only, like status and xfrm_policies: no lock, no state change, no
+		// args (the interface is ours, so there is no untrusted input to guard).
+		// Lets the app tell an idle kernel-WireGuard tunnel from a dead one, which
+		// needs CAP_NET_ADMIN to read. Polled on a 15s timer while connected.
+		return reply(ops.WgHandshake(ctx, e))
+
 	case "wireguard_up":
 		cfg, ok := args.str("configString")
 		if !ok {

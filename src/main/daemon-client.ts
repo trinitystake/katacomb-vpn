@@ -168,3 +168,32 @@ export async function daemonXfrmPolicyCount(): Promise<number | null> {
     return null
   }
 }
+
+/**
+ * Seconds since the kernel WireGuard peer on sntl0 last completed a handshake, or
+ * null when we cannot know. Reading it needs CAP_NET_ADMIN, so the daemon does it.
+ *
+ * Every "cannot know" is null: no daemon, a daemon predating the op (`unknown op`
+ * throws and is caught), a malformed reply, an sntl0 that is not a kernel WireGuard
+ * device (the embedded AmneziaWG device opens no UAPI socket, so wg(8) cannot read
+ * it), or a device no peer has ever handshaked with (reported as -1). Collapsing the
+ * last two into the same null is deliberate: the only consumer is a staleness test,
+ * and "up but never handshaked" would need the interface's uptime to interpret.
+ * Abstaining is the conservative direction.
+ *
+ * Deliberately daemon-ONLY, never the pkexec fallback: this is polled every 15 s
+ * while connected, and a password prompt on a timer is not an option. No daemon
+ * means null, and the app keeps the detectors it already has.
+ */
+export async function daemonWireguardHandshakeAge(): Promise<number | null> {
+  if (!isDaemonAvailable()) return null
+  try {
+    const result = await withTimeout(daemonRequest('wireguard_handshake'), 3000, 'daemon handshake probe')
+    const r = (result ?? {}) as { kernel?: unknown; ageSeconds?: unknown }
+    if (r.kernel !== true || typeof r.ageSeconds !== 'number' || r.ageSeconds < 0) return null
+    return r.ageSeconds
+  } catch {
+    // Includes `unknown op` from a daemon predating this op. Same answer: unknown.
+    return null
+  }
+}

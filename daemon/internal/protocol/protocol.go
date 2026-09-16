@@ -28,6 +28,7 @@ var Ops = []string{
 	"protocol_version",
 	"status",
 	"xfrm_policies",
+	"wireguard_handshake",
 	"wireguard_up",
 	"wireguard_down",
 	"amneziawg_up",

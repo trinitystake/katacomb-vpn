@@ -49,6 +49,9 @@ type fakeEnv struct {
 	foreignWg []string
 	// xfrmPolicy is the canned `ip xfrm policy` output. Empty means no IPsec.
 	xfrmPolicy string
+	// wgHandshakes is the canned `wg show sntl0 latest-handshakes` output, served
+	// only while sntl0 is a KERNEL WireGuard link (wgtype).
+	wgHandshakes string
 	// resolvconfStdin is the last payload handed to `resolvconf -a` (RunOpt.Stdin).
 	resolvconfStdin string
 }
@@ -177,6 +180,14 @@ func (f *fakeEnv) run(_ context.Context, argv []string, opt RunOpt) ([]byte, []b
 		}
 		// Fails live: our config is never in /etc/wireguard.
 		return fail("wg-quick: `"+a[len(a)-1]+"' is not a WireGuard interface", 1)
+	case "wg":
+		// `wg show sntl0 latest-handshakes`. A userspace AmneziaWG sntl0 is a
+		// `type tun` link with no UAPI socket, so wg(8) cannot reach it — the same
+		// failure as no interface at all. That is exactly what wgtype models.
+		if !f.hasLink("sntl0") || !f.wgtype {
+			return fail("Unable to access interface: No such device", 1)
+		}
+		return []byte(f.wgHandshakes), nil, nil
 	case "openvpn":
 		var pidFile, logFile string
 		for i := 0; i+1 < len(a); i++ {

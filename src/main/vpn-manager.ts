@@ -59,8 +59,9 @@ function resolveBundled(name: string): string {
   // integrity-checked (unknown provenance); this is a supported path for system
   // v2ray installs (see BinarySetup), but warn so an operator notices if the
   // bundled binary was unexpectedly removed to force this fallback (finding M1).
-  // The root helper (daemon/internal/ops) fails closed instead: it hashes every
-  // binary it is handed against its own copy of these pins.
+  // Root runs no vendored binary at all any more (the tun2socks engine and the
+  // AmneziaWG device are compiled into the helper), so this table is the only pin
+  // table left — binary-integrity.ts says the same.
   console.warn(`[binary] bundled ${name} not found — using unverified system PATH binary`)
   return name
 }

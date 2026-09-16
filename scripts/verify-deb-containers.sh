@@ -73,7 +73,15 @@ sleep 0.5
 check "grep -q \"listening on /run/katacomb-vpn/daemon.sock (protocol v1)\" /tmp/daemon.log" "daemon logs its listening line"
 check "[ \"\$(stat -c %a:%U:%G /run/katacomb-vpn/daemon.sock)\" = 660:root:katacomb-vpn ]" "socket is 0660 root:katacomb-vpn"
 reply="$(printf "{\"id\":1,\"op\":\"protocol_version\"}\n" | socat -t 2 - UNIX-CONNECT:/run/katacomb-vpn/daemon.sock)"
-if [ "$reply" = "{\"id\":1,\"ok\":true,\"result\":{\"version\":1}}" ]; then ok "protocol_version over the socket"; else no "protocol_version reply: $reply"; fi
+# Prefix + suffix, not a byte-exact match: `ops` is ADDITIVE on the wire, so
+# pinning the whole list here guarantees this goes red on every new op and says
+# nothing useful when it does. dispatch_test.go checks the same two ends, and the
+# list itself is pinned by the shared corpus, which is where it belongs. (This
+# assertion was left behind by b96562f, which added `ops` to the reply.)
+case "$reply" in
+  "{\"id\":1,\"ok\":true,\"result\":{\"ops\":[\"protocol_version\","*"\"dns_restore\"],\"version\":1}}") ok "protocol_version over the socket" ;;
+  *) no "protocol_version reply: $reply" ;;
+esac
 reply="$(printf "{\"id\":2,\"op\":\"frob\"}\n" | socat -t 2 - UNIX-CONNECT:/run/katacomb-vpn/daemon.sock)"
 if [ "$reply" = "{\"id\":2,\"ok\":false,\"error\":\"unknown op: frob\"}" ]; then ok "unknown op rejected over the socket"; else no "unknown op reply: $reply"; fi
 kill -TERM $DP; sleep 0.3

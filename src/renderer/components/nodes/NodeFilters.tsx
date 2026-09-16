@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
-import Spinner from './Spinner'
-import type { NodeFilter } from '../types'
-import { PROTOCOL_FILTER_OPTIONS, type ProtocolType } from '../utils/protocols'
-import { formatTimeAgo } from '../utils/format'
-import CountryFlag from './CountryFlag'
+import Spinner from '../Spinner'
+import type { NodeFilter } from '../../types'
+import { PROTOCOL_FILTER_OPTIONS, type ProtocolType } from '../../utils/protocols'
+import { formatTimeAgo } from '../../utils/format'
+import CountryFlag from '../CountryFlag'
 import {
   ActivityIcon,
   CloseIcon,
@@ -15,7 +15,7 @@ import {
   SearchIcon,
   ShieldIcon,
   StarIcon,
-} from './Icons'
+} from '../Icons'
 
 const V2RAY_CONNECTION_OPTIONS = [
   ['vmess', 'VMess'],

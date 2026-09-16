@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { checkMnemonic } from '../../shared/mnemonic'
-import { parseWalletExists } from '../../shared/wallet-errors'
+import { checkMnemonic } from '../../../shared/mnemonic'
+import { parseWalletExists } from '../../../shared/wallet-errors'
 
 interface Props {
   onImport: (mnemonic: string, name?: string) => Promise<void>

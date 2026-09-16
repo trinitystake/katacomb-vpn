@@ -1,8 +1,8 @@
 import { lazy, Suspense, useMemo } from 'react'
-import { useNodes } from '../hooks/useNodes'
-import { useNavigation } from '../contexts/NavigationContext'
+import { useNodes } from '../../hooks/useNodes'
+import { useNavigation } from '../../contexts/NavigationContext'
 import CountrySidebar from './CountrySidebar'
-import Spinner from './Spinner'
+import Spinner from '../Spinner'
 
 // The globe carries the 110m country geometry, which is the bulk of this tab's
 // weight; only load it when the Map tab is opened.

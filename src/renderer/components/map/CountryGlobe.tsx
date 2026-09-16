@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { geoOrthographic, geoPath, geoGraticule10 } from 'd3-geo'
-import geoUrl from '../assets/world-countries-110m.geojson?url'
-import { polyKey, type PolyFeature } from '../utils/country-normalization'
-import { shortestAngleDelta } from '../utils/angles'
-import Spinner from './Spinner'
+import geoUrl from '../../assets/world-countries-110m.geojson?url'
+import { polyKey, type PolyFeature } from '../../utils/country-normalization'
+import { shortestAngleDelta } from '../../utils/angles'
+import Spinner from '../Spinner'
 
 interface Props {
   counts: Map<string, number>

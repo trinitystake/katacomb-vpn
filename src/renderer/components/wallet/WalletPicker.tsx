@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import type { WalletStoreStatus } from '../types'
-import Spinner from './Spinner'
+import type { WalletStoreStatus } from '../../types'
+import Spinner from '../Spinner'
 
 interface Props {
   status: WalletStoreStatus

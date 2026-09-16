@@ -17,7 +17,7 @@ import {
 } from '../../utils/chain-node'
 import { formatP2p } from '../../../shared/funds'
 import { COUNTRY_CODES } from '../../utils/country-codes'
-import NodeFilters from '../NodeFilters'
+import NodeFilters from '../nodes/NodeFilters'
 import CountryFlag from '../CountryFlag'
 import { ChevronIcon, StarIcon } from '../Icons'
 import {
@@ -28,7 +28,7 @@ import {
   PriceCell,
   LatencyCell,
   StatusCell,
-} from '../NodeCells'
+} from '../nodes/NodeCells'
 import ChainReviewModal from './ChainReviewModal'
 import InfoTip from '../InfoTip'
 import Spinner from '../Spinner'

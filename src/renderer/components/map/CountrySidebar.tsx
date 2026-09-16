@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { COUNTRY_CODES } from '../utils/country-codes'
+import { COUNTRY_CODES } from '../../utils/country-codes'
 
 interface Props {
   counts: Map<string, number>

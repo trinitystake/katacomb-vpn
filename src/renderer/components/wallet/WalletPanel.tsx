@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import Spinner from './Spinner'
-import { useBalance } from '../hooks/useBalance'
-import { useNavigation } from '../contexts/NavigationContext'
+import Spinner from '../Spinner'
+import { useBalance } from '../../hooks/useBalance'
+import { useNavigation } from '../../contexts/NavigationContext'
 
 interface Props {
   address: string | null

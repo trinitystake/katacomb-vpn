@@ -1,14 +1,14 @@
 import { useRef, useState, useMemo, useEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useNodes } from '../hooks/useNodes'
-import { useConnection } from '../hooks/useConnection'
-import { useNodeTest } from '../hooks/useNodeTest'
-import { useNavigation } from '../contexts/NavigationContext'
+import { useNodes } from '../../hooks/useNodes'
+import { useConnection } from '../../hooks/useConnection'
+import { useNodeTest } from '../../hooks/useNodeTest'
+import { useNavigation } from '../../contexts/NavigationContext'
 import NodeFilters from './NodeFilters'
-import ConnectionModal from './ConnectionModal'
-import Spinner from './Spinner'
-import CountryFlag from './CountryFlag'
-import { ChevronIcon, StarIcon } from './Icons'
+import ConnectionModal from '../ConnectionModal'
+import Spinner from '../Spinner'
+import CountryFlag from '../CountryFlag'
+import { ChevronIcon, StarIcon } from '../Icons'
 import {
   NODE_COL,
   ROW_HEIGHT,
@@ -18,7 +18,7 @@ import {
   LatencyCell,
   StatusCell,
 } from './NodeCells'
-import type { SentNode } from '../types'
+import type { SentNode } from '../../types'
 
 type SortKey = 'country' | 'moniker' | 'type' | 'priceGb' | 'priceHr' | 'leases' | 'sessions' | 'peers' | 'latency' | 'status'
 

@@ -1,11 +1,11 @@
 import type { MouseEvent } from 'react'
-import type { SentNode, NodeProbeResult } from '../types'
-import CopyButton from './CopyButton'
-import ProtocolIcon from './ProtocolIcon'
-import { ActivityIcon, HomeIcon, LayersIcon, ShieldIcon } from './Icons'
-import { protocolMeta } from '../utils/protocols'
-import { v2rayConnectionBadge, isCleartextConnection } from '../utils/v2ray-connection'
-import { nodeStatusMeta, type NodeState } from '../utils/node-status'
+import type { SentNode, NodeProbeResult } from '../../types'
+import CopyButton from '../CopyButton'
+import ProtocolIcon from '../ProtocolIcon'
+import { ActivityIcon, HomeIcon, LayersIcon, ShieldIcon } from '../Icons'
+import { protocolMeta } from '../../utils/protocols'
+import { v2rayConnectionBadge, isCleartextConnection } from '../../utils/v2ray-connection'
+import { nodeStatusMeta, type NodeState } from '../../utils/node-status'
 
 /**
  * The cells the Nodes and Multi-hop tables share, so the two tables cannot drift:

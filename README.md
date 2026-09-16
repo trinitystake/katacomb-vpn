@@ -104,7 +104,7 @@ superset of what the builder emits. The exit hop additionally has to serve plain
 grpc and websocket bring their own dialer and fail when carried inside another hop.
 
 Bundled binaries live in [resources/linux/bin/](resources/linux/bin/) and are
-SHA-256 pinned in [binary-integrity.ts](src/main/binary-integrity.ts); the app refuses to
+SHA-256 pinned in [binary-integrity.ts](src/main/vpn/binary-integrity.ts); the app refuses to
 spawn one whose hash doesn't match. Root runs no vendored binary at all: the tun2socks
 engine and the AmneziaWG userspace device (`amneziawg-go`, at the commit the Sentinel
 nodes pin) are compiled into the privileged helper.
@@ -311,21 +311,21 @@ Notable modules:
 
 | File | Role |
 |------|------|
-| [wallet.ts](src/main/wallet.ts) | BIP-39 import, key derivation, `safeStorage` encryption |
-| [chain-service.ts](src/main/chain-service.ts) | On-chain sessions, node handshakes per protocol |
-| [vpn-manager.ts](src/main/vpn-manager.ts) | Tunnel lifecycle for all six protocols |
+| [wallet.ts](src/main/chain/wallet.ts) | BIP-39 import, key derivation, `safeStorage` encryption |
+| [chain-service.ts](src/main/chain/chain-service.ts) | On-chain sessions, node handshakes per protocol |
+| [vpn-manager.ts](src/main/vpn/vpn-manager.ts) | Tunnel lifecycle for all six protocols |
 | [config-guard.ts](src/main/config-guard.ts) | Validators for untrusted node data |
 | [daemon/](daemon/) | The privileged helper (Go): root daemon behind the socket, and the `pkexec` one-shot |
-| [privileged.ts](src/main/privileged.ts) | Routes privileged ops to the daemon, else `pkexec` |
+| [privileged.ts](src/main/helper/privileged.ts) | Routes privileged ops to the daemon, else `pkexec` |
 | [ipc-handlers.ts](src/main/ipc-handlers.ts) | Every IPC channel; connect orchestration, refunds, reconnect |
-| [kill-switch.ts](src/main/kill-switch.ts) | iptables kill switch |
-| [provider-console.ts](src/main/provider-console.ts) | Provider side: registration, plans, leases, node links |
+| [kill-switch.ts](src/main/vpn/kill-switch.ts) | iptables kill switch |
+| [provider-console.ts](src/main/provider/provider-console.ts) | Provider side: registration, plans, leases, node links |
 
 Per-protocol config builders are pure, Electron-free and unit-tested:
-[openvpn-config.ts](src/main/openvpn-config.ts),
-[amneziawg-config.ts](src/main/amneziawg-config.ts),
-[xray-config.ts](src/main/xray-config.ts),
-[hysteria-config.ts](src/main/hysteria-config.ts).
+[openvpn-config.ts](src/main/protocols/openvpn-config.ts),
+[amneziawg-config.ts](src/main/protocols/amneziawg-config.ts),
+[xray-config.ts](src/main/protocols/xray-config.ts),
+[hysteria-config.ts](src/main/protocols/hysteria-config.ts).
 
 Privileged surface: [daemon/](daemon/) is the helper's source (one static binary, built
 by `scripts/build-daemon.sh` into [resources/linux/privileged/](resources/linux/privileged/)

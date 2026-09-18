@@ -1,58 +1,52 @@
-# Katacomb VPN 1.9.3
+# Katacomb VPN 1.10.0
 
 A desktop client for the Sentinel decentralized VPN network. Pick a node, pay for a
 session on-chain, and tunnel through WireGuard, AmneziaWG, OpenVPN, V2Ray, XRAY or
 Hysteria2.
 
-1.9.3 is a maintenance release, and an unusually literal one: nothing about how the app
-behaves has changed. It reorganises the source, splits the project's own documentation
-apart, and adds tests. If you are running 1.9.2 and it is working, there is nothing here
-you need.
+1.10.0 is a feature release. AmneziaWG connections now use the AmneziaWG 3.1 protocol
+tier when the node offers it, which encrypts the header of every packet and makes the
+traffic harder to fingerprint. Nodes that do not offer it are spoken to exactly as before.
+It also closes a gap where an updated helper could be left unused by an already-running
+daemon.
 
 ## Highlights
 
-Everything in this release is under the hood. The bullets below say what moved and why,
-because the reason a codebase is rearranged is usually the only interesting part.
+- **AmneziaWG connections use the 3.1 tier where a node offers it.** AmneziaWG 3.x
+  encrypts the type field and header of every packet with a key the node hands out, adds
+  random trailers and padding, and randomises timers, so the traffic carries less for deep
+  packet inspection to match on than the 2.0 parameter set. This is a change to the wire
+  format that no node can negotiate in-band, so nodes offer it as a second, opt-in tier.
+  Today that means nodes running dvpnd with the tier switched on. Before an AmneziaWG
+  handshake the app reads the node's public inbound list and asks for the tier if it is
+  listed; a node that lists none, or that cannot be read in time, gets the same request
+  as before and answers with the default tier. Either way the paid session is not at
+  risk. The log line `[session] AmneziaWG tier:` says which tier a session landed on.
+- **Every other node is unaffected.** The AmneziaWG device compiled into the privileged
+  helper moved from `amneziawg-go` 0.2.19 to 3.1.20260828. With the 3.x keys unset, the
+  3.1 engine's send and receive paths are the 2.0 engine's byte for byte, so the default
+  parameter set every node hands out is framed exactly as it was. The container-based
+  handshake test now builds its reference server from the same 3.1 commits dvpnd pins,
+  with only the default parameters set, and passes.
+- **The new parameters are validated like everything else a node sends.** The header
+  protection key, the trailers flag, the MTU and the padding range are checked in the
+  app's config guard and again in the root helper's own guard, and a malformed answer is
+  refused before anything reaches root, with the session refunded. On the 3.1 tier the
+  tunnel MTU comes from the node's answer instead of the path measurement, because the
+  tier's prefixes, trailers and padding take room out of every packet.
+- **The helper is checked on every start, daemon or not.** The check that compares the
+  bundled helper with the installed one used to be skipped whenever the root daemon's
+  socket existed. A newer app on a machine with an older daemon then ran with the old
+  helper: it accepted the app's operations but validated configs against its old
+  allow-lists, and refused a correctly built config as root only after the session was
+  paid for. The check now always runs, and when it replaces the helper it also restarts
+  the daemon's service. On a packaged install the two helpers are identical and nothing
+  is asked. This mostly affects builds from source on a machine that also has the .deb
+  installed, which is how it was found.
 
-- **The main process now has folders.** It had grown to seventy files in a single
-  directory, holding the wallet, the chain client, every protocol's config builder, the
-  tunnel manager and the privileged-helper client side by side with no grouping at all.
-  They are now split by what they are for: `chain/`, `vpn/`, `protocols/`, `nodes/`,
-  `provider/`, `plans/` and `helper/`. The validator that guards node-supplied
-  configuration deliberately stays at the top level, because it is the boundary the whole
-  threat model rests on and burying it would weaken the signal.
-- **The largest file lost a fifth of its bulk, and the largest screen lost half.** The IPC
-  layer had accumulated the connection state machine, the quota watchdog, the reconnect
-  loop and the node feed alongside all 74 of its channels. The provider console and the
-  read-only diagnostics channels have moved into their own modules. The Settings screen's
-  Wallets tab, with its four dialogs, is now its own file. No behaviour changed in either
-  case; the same code runs, from a different place.
-- **The project's documentation was split into a short index and a `docs/` folder.** It
-  had reached 1,838 lines in one file. Every word is preserved, and it is verified: of the
-  1,728 substantive lines in the original, 1,724 appear verbatim in the new files, and the
-  four that differ are file paths corrected for the move above.
-- **Thirty-four new tests**, covering the module that decides how privileged operations
-  reach root, and the checks that validate everything arriving from the interface. Both
-  became testable as a result of the reorganisation.
+## Fixes in 1.10.0
 
-One caution for anyone building from source rather than installing a package: partway
-through this work a path was broken that made `npm run dev` report V2Ray as missing, and
-quietly skipped the integrity check on the bundled proxy binaries. It was found and fixed
-before this release. Packaged builds were never affected, because they resolve those
-binaries by a different route.
-
-## Fixes in 1.9.3
-
-- Release notes for 1.9.3
-- Fix the bundled-binary path broken by the src/main folder move
-- Split the Wallets tab out of Settings.tsx
-- Split CLAUDE.md into a router and docs/, keeping every word
-- Test the two modules the peel made testable
-- Claim the last three renderer component clusters into folders
-- Move the provider console handlers out of ipc-handlers
-- Move the read-only diagnostics handlers out of ipc-handlers
-- Give src/main domain folders instead of 70 flat files
-- Tidy two structural nits found by the structure audit
+<!-- regenerated by release.sh from v1.9.3..HEAD at cut time; leave the heading -->
 
 ## Known limitations
 
@@ -80,7 +74,7 @@ Pop!\_OS, Zorin).
 **Recommended: .deb**
 
 ```bash
-sudo apt install ./katacomb-vpn_1.9.3_amd64.deb
+sudo apt install ./katacomb-vpn_1.10.0_amd64.deb
 ```
 
 Installs a root daemon, so connect and disconnect never prompt for a password. It needs
@@ -89,8 +83,8 @@ one log out and log back in after the first install before that takes effect.
 **Alternative: AppImage**
 
 ```bash
-chmod +x katacomb-vpn-1.9.3.AppImage
-./katacomb-vpn-1.9.3.AppImage
+chmod +x katacomb-vpn-1.10.0.AppImage
+./katacomb-vpn-1.10.0.AppImage
 ```
 
 No install needed. Every privileged operation prompts for a password instead.

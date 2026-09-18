@@ -17,8 +17,9 @@
 #      dropped by rp_filter, and again there is no handshake.
 #
 # The SERVER is the reference implementation: amneziawg-go + amneziawg-tools built
-# from upstream at the exact commits sentinel-dvpnx pins in its own Dockerfile — i.e.
-# the code every Sentinel node runs — brought up by the real awg-quick. (While the
+# from upstream at the AmneziaWG 3.1 commits dvpnd pins in its Dockerfile, with only
+# the default tier's parameters set — which is the wire format every Sentinel node
+# speaks — brought up by the real awg-quick. (While the
 # trio was still vendored in the tree it was mounted instead; since Phase 3 removed
 # it, the server container builds it, ~2 min.) The CLIENT is the freshly built helper's
 # `awg-up <conf> -`. S1-S4/H1-H4 must match on both ends (handshake-affecting);
@@ -35,11 +36,11 @@ HELPER="$REPO/resources/linux/privileged/katacomb-vpn-helper"
 BIN="$REPO/resources/linux/bin"
 [ -x "$HELPER" ] || { echo "no helper at $HELPER — run scripts/build-daemon.sh first" >&2; exit 1; }
 command -v wg >/dev/null 2>&1 || { echo "wg (wireguard-tools) is needed on the host to generate the peer keys" >&2; exit 1; }
-# The reference peer is what sentinel-dvpnx builds and runs (its Dockerfile's
-# AMNEZIAWG_GO_COMMIT / AMNEZIAWG_TOOLS_COMMIT). Mount the vendored trio if the tree
-# still has it, else build both from upstream inside the server container.
-AWG_GO_COMMIT=1cc94272ca8e9e223a5fe76382f5880f09d3c12d
-AWG_TOOLS_COMMIT=61e741780e8465a67a7d7fb6cffe14a8a15d624a
+# The reference peer is what dvpnd builds and runs (its Dockerfile's AWG_GO_COMMIT /
+# AWG_TOOLS_COMMIT, tags v3.1.20260828 and v3.1.20260812). Mount the vendored trio if
+# the tree still has it, else build both from upstream inside the server container.
+AWG_GO_COMMIT=b5928efb6ca19f0153958460c3d141f04abc5c2e
+AWG_TOOLS_COMMIT=ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
 if [ -x "$BIN/awg-quick" ] && [ -x "$BIN/awg" ] && [ -x "$BIN/amneziawg-go" ]; then PEER=vendored; else PEER=upstream; fi
 docker info >/dev/null 2>&1 || { echo "docker is not reachable" >&2; exit 1; }
 
@@ -100,7 +101,7 @@ if [ "$PEER" = vendored ]; then
 else
   # dvpnx's own recipe: both repos at the pinned commits, amneziawg-go CGO-off, awg via make.
   docker run -d --name "$SRV" --privileged --network "$NET" \
-    -v "$WORK/srv:/cfg:ro" golang:1.24-bookworm sleep infinity >/dev/null
+    -v "$WORK/srv:/cfg:ro" golang:1.27-bookworm sleep infinity >/dev/null
   docker exec "$SRV" bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends iproute2 python3 procps build-essential >/dev/null 2>&1' \
     || { echo "server: apt failed" >&2; exit 1; }
   if ! docker exec "$SRV" bash -c "set -e

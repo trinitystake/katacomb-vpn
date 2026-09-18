@@ -38,12 +38,12 @@ func TestAmneziaWgUpNativeSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"ip link delete sntl0",                              // clean slate
-		"katacomb-vpn-helper _amneziawg <sntl0.conf>",       // the embedded device, self-exec'd
+		"ip link delete sntl0",                        // clean slate
+		"katacomb-vpn-helper _amneziawg <sntl0.conf>", // the embedded device, self-exec'd
 		"ip -4 address add 10.8.0.5/32 dev sntl0",
 		"ip -6 address add fd00::5/128 dev sntl0",
-		"ip link set mtu 1420 up dev sntl0",                 // eth0's 1500 - 80; the `up` starts the device
-		"resolvconf -a sntl0 -m 0 -x",                       // an exec, so /resolvconf/i still holds
+		"ip link set mtu 1420 up dev sntl0", // eth0's 1500 - 80; the `up` starts the device
+		"resolvconf -a sntl0 -m 0 -x",       // an exec, so /resolvconf/i still holds
 		"ip -4 rule add not fwmark 51820 table 51820",
 		"ip -4 rule add table main suppress_prefixlength 0",
 		"ip -4 route add 0.0.0.0/0 dev sntl0 table 51820",
@@ -186,10 +186,10 @@ func TestAmneziaWgDownWithoutStateReapsByIdentityOnly(t *testing.T) {
 		}
 	}
 	plant(900, self, "katacomb-vpn-helper", "_amneziawg", "/run/katacomb-vpn/sntl0.conf")              // ours: kill
-	plant(901, filepath.Join(f.root, "usr/sbin/openvpn"), "openvpn", "_amneziawg", "/x")                  // wrong executable
-	plant(902, self, "katacomb-vpn-helper", "daemon")                                                    // our binary, not the sub-mode
-	plant(903, filepath.Join(f.root, "usr/sbin/openvpn"), "bash", "-c", "echo _amneziawg")                // a name match
-	plant(904, self+" (deleted)", "katacomb-vpn-helper", "_amneziawg", "/run/katacomb-vpn/sntl0.conf")   // from before an upgrade
+	plant(901, filepath.Join(f.root, "usr/sbin/openvpn"), "openvpn", "_amneziawg", "/x")               // wrong executable
+	plant(902, self, "katacomb-vpn-helper", "daemon")                                                  // our binary, not the sub-mode
+	plant(903, filepath.Join(f.root, "usr/sbin/openvpn"), "bash", "-c", "echo _amneziawg")             // a name match
+	plant(904, self+" (deleted)", "katacomb-vpn-helper", "_amneziawg", "/run/katacomb-vpn/sntl0.conf") // from before an upgrade
 
 	if err := AmneziaWgDown(ctx, f.Env); err != nil {
 		t.Fatal(err)
@@ -243,5 +243,18 @@ func TestParseAwgDirectives(t *testing.T) {
 	}
 	if _, err := parseAwgDirectives([]byte("[Interface]\nPrivateKey = x\n[Peer]\nEndpoint = 1.2.3.4:1\n")); err == nil {
 		t.Error("a config with no Address must be refused")
+	}
+}
+
+// A config that names its MTU (the 3.1 tier's 1280) gets that, not the path MTU.
+func TestAmneziaWgUpHonoursConfigMTU(t *testing.T) {
+	f := newFake(t)
+	cfg := []byte(strings.Replace(string(cfgAWG), "[Interface]\n", "[Interface]\nMTU = 1280\n", 1))
+	if err := AmneziaWgUp(context.Background(), f.Env, cfg, "-"); err != nil {
+		t.Fatal(err)
+	}
+	cmds := strings.Join(f.takeCmds(), "\n")
+	if !strings.Contains(cmds, "ip link set mtu 1280 up dev sntl0") || strings.Contains(cmds, "mtu 1420") {
+		t.Fatalf("config MTU not honoured:\n%s", cmds)
 	}
 }

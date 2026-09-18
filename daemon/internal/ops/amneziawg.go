@@ -106,10 +106,15 @@ func AmneziaWgUp(ctx context.Context, e *Env, config []byte, binDir string) erro
 			}
 		}
 
-		// MTU = the path MTU to the endpoint minus WireGuard's 80-byte overhead, and
-		// the `up` that starts the device (the userspace device goes UP on the OS link
-		// event, exactly as it does under awg-quick's own `ip link set … up`).
-		mtu := awgMTU(ctx, e, ip, d.endpointIP)
+		// MTU = what the config names (the 3.1 tier says 1280: its prefixes, trailers
+		// and padding take room out of every packet), else the path MTU to the endpoint
+		// minus WireGuard's 80-byte overhead; and the `up` that starts the device (the
+		// userspace device goes UP on the OS link event, exactly as it does under
+		// awg-quick's own `ip link set … up`).
+		mtu := d.mtu
+		if mtu == 0 {
+			mtu = awgMTU(ctx, e, ip, d.endpointIP)
+		}
 		if err := run(ctx, e, RunOpt{}, ip, "link", "set", "mtu", strconv.Itoa(mtu), "up", "dev", wgIface); err != nil {
 			return fail(err)
 		}
@@ -241,6 +246,7 @@ type awgDirectives struct {
 	nameservers  []string
 	searches     []string
 	endpointIP   string
+	mtu          int // 0 when the config names none
 	hasV4Default bool
 	hasV6Default bool
 }
@@ -290,6 +296,9 @@ func parseAwgDirectives(config []byte) (awgDirectives, error) {
 					d.searches = append(d.searches, v)
 				}
 			}
+		case section == "[interface]" && key == "mtu":
+			// guard has already checked the value is digits.
+			d.mtu, _ = strconv.Atoi(value)
 		case section == "[peer]" && key == "endpoint":
 			d.endpointIP = endpointHost(value)
 		case section == "[peer]" && key == "allowedips":

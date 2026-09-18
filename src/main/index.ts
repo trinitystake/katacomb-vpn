@@ -359,7 +359,9 @@ function ensurePolkitSetup(): void {
 
   const dialogMessage = needsInstall
     ? 'Katacomb VPN needs to install a system helper so you don\'t have to enter your password every time you connect or disconnect.\n\nThis is a one-time setup that requires admin authentication.'
-    : 'The VPN helper has been updated and needs to be reinstalled.\n\nThis requires admin authentication.'
+    : isDaemonAvailable()
+      ? 'The VPN helper has been updated: it needs to be reinstalled and its background service restarted.\n\nThis requires admin authentication.'
+      : 'The VPN helper has been updated and needs to be reinstalled.\n\nThis requires admin authentication.'
 
   const result = dialog.showMessageBoxSync({
     type: 'question',
@@ -394,7 +396,11 @@ function ensurePolkitSetup(): void {
     // in through a temp name + mv: a running daemon executes from $3, and `cp`
     // onto a running executable fails with ETXTBSY (the deb's postinstall does
     // the same for the same reason); mv also means a concurrent pkexec never
-    // sees a half-written exec.path.
+    // sees a half-written exec.path. A running daemon keeps the OLD binary until
+    // its unit restarts, so the unit is restarted when there is one (try-restart:
+    // a no-op where no unit exists, AppImage and dev without the deb); the unit
+    // preserves /run/katacomb-vpn across restarts, and at this point in start-up
+    // nothing of ours is connected yet.
     const script = [
       `cp -- "$1" "$3.new"`,
       `chmod 755 "$3.new"`,
@@ -403,6 +409,7 @@ function ensurePolkitSetup(): void {
       `cp -- "$2" "$4"`,
       `chmod 644 "$4"`,
       `chown root:root "$4"`,
+      `(systemctl try-restart katacomb-vpn-daemon.service 2>/dev/null || true)`,
     ].join(' && ')
 
     // Bounded, unlike the rest of this function's blocking. Running before
@@ -451,10 +458,16 @@ app.whenReady().then(() => {
   // Must precede any saveSettings, which would bake the 'auto' default in.
   migrateRpcMode()
   checkSystemDeps()
-  // The root daemon (deb install) handles privileged ops password-free, so the
-  // per-op polkit helper + its install prompt are only needed on the fallback
-  // path (AppImage / dev).
-  if (!isDaemonAvailable()) ensurePolkitSetup()
+  // Always, daemon or not. The root daemon (deb install) handles privileged ops
+  // password-free and the deb's postinstall keeps it current, so on a packaged
+  // install the bundled and installed helper compare equal and nothing is asked.
+  // With a daemon installed but a NEWER helper bundled (a dev rebuild on a machine
+  // that has the deb), the daemon keeps running the old binary: it accepts the ops
+  // the app knows but validates configs with the old allow-lists, so a config the
+  // app builds correctly is refused as root only after the session is paid for
+  // (seen 2026-09-18 with the AmneziaWG 3.1 keys). ensurePolkitSetup reinstalls
+  // the helper and restarts the unit in that case.
+  ensurePolkitSetup()
   detectExistingConnection()
   // A tunnel that outlived the run which created it comes back with no session and
   // nothing supervising it, so close it before anything reports it as connected.

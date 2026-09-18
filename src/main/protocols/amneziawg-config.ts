@@ -40,6 +40,30 @@ export interface AwgMetadataEntry {
   i3?: string
   i4?: string
   i5?: string
+  // The AmneziaWG 3.1 tier, present when the node answered awg_version 3 (a dvpnd
+  // node with the tier on, asked for it): the interface-wide header protection key,
+  // whether every packet carries random trailers, and the tunnel MTU the tier needs.
+  awg_version?: number
+  header_protection_key?: string
+  random_trailers?: boolean
+  mtu?: number
+}
+
+/** The awg_version a client asks for, and a node answers with, for its 3.1 tier. */
+export const AWG_VERSION_3 = 3
+/** The 3.1 tier's smallest junk prefix: the header cipher's nonce rides in it. */
+const AWG3_MIN_PADDING = 12
+/** Our own transport padding range on the 3.1 tier (per side, like Jc). */
+const AWG3_CONTENT_PADDING = '0-32'
+
+/**
+ * Whether a node's public inbound list (`service_metadata` of its root document)
+ * offers the AmneziaWG 3.1 tier: an entry carrying awg_version 3. A node that
+ * never heard of tiers lists none and gets the plain request.
+ */
+export function nodeOffersAwgVersion3(inbounds: unknown): boolean {
+  return Array.isArray(inbounds)
+    && inbounds.some((e) => e !== null && typeof e === 'object' && (e as { awg_version?: unknown }).awg_version === AWG_VERSION_3)
 }
 
 // Local copies (pure modules never runtime-import each other; see config-guard.ts).
@@ -81,8 +105,9 @@ function assertUintInRange(name: string, value: number, max: number): void {
 
 /**
  * Build the full awg-quick INI: the SDK WireGuard config shape (Address /
- * PrivateKey / DNS + full-tunnel peer, no MTU/ListenPort) plus the obfuscation
- * keys. Throws on missing/inconsistent node data so the caller refunds.
+ * PrivateKey / DNS + full-tunnel peer, no ListenPort, and an MTU only on the 3.1
+ * tier) plus the obfuscation keys. Throws on missing/inconsistent node data so the
+ * caller refunds.
  */
 export function buildAmneziaWgConfig(
   metadata: AwgMetadataEntry[],
@@ -137,6 +162,31 @@ export function buildAmneziaWgConfig(
     }
   }
 
+  // The 3.1 tier: everything above plus the header protection key (base64, 32
+  // bytes, interface-wide), the trailers flag we must mirror, and the MTU the tier
+  // needs; its prefixes must leave room for the header cipher's nonce.
+  const tier3 = entry.awg_version === AWG_VERSION_3
+  if (entry.awg_version !== undefined && entry.awg_version !== 2 && !tier3) {
+    throw new Error('AmneziaWG node answered an unknown awg_version')
+  }
+  if (tier3) {
+    if (typeof entry.header_protection_key !== 'string' || !BASE64_KEY.test(entry.header_protection_key)
+        || !isCurve25519Key(entry.header_protection_key)) {
+      throw new Error('AmneziaWG node returned an invalid header protection key')
+    }
+    if (typeof entry.random_trailers !== 'boolean') {
+      throw new Error('AmneziaWG node returned an invalid random_trailers flag')
+    }
+    if (!Number.isInteger(entry.mtu) || (entry.mtu as number) < 1000 || (entry.mtu as number) > 1420) {
+      throw new Error('AmneziaWG node returned an invalid mtu')
+    }
+    for (const name of ['s1', 's2', 's3', 's4'] as const) {
+      if (entry[name] < AWG3_MIN_PADDING) {
+        throw new Error(`AmneziaWG obfuscation param ${name} too small for header protection`)
+      }
+    }
+  }
+
   const jmin = randInt(JMIN_RANGE)
   const jmax = randInt(JMAX_RANGE) // ranges are disjoint, so Jmin < Jmax always holds
 
@@ -160,6 +210,14 @@ export function buildAmneziaWgConfig(
   for (const name of ['i1', 'i2', 'i3', 'i4', 'i5'] as const) {
     const value = entry[name]
     if (value) lines.push(`${name.toUpperCase()} = ${value}`)
+  }
+  if (tier3) {
+    lines.push(
+      `MTU = ${entry.mtu}`,
+      `HeaderProtectionKey = ${entry.header_protection_key}`,
+      `RandomTrailers = ${entry.random_trailers ? 'on' : 'off'}`,
+      `ContentPaddingAddition = ${AWG3_CONTENT_PADDING}`,
+    )
   }
   lines.push(
     '',

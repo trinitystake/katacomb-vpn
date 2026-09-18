@@ -106,7 +106,7 @@ grpc and websocket bring their own dialer and fail when carried inside another h
 Bundled binaries live in [resources/linux/bin/](resources/linux/bin/) and are
 SHA-256 pinned in [binary-integrity.ts](src/main/vpn/binary-integrity.ts); the app refuses to
 spawn one whose hash doesn't match. Root runs no vendored binary at all: the tun2socks
-engine and the AmneziaWG userspace device (`amneziawg-go`, at the commit the Sentinel
+engine and the AmneziaWG userspace device (`amneziawg-go` 3.1, the version the dvpnd
 nodes pin) are compiled into the privileged helper.
 
 ## Install

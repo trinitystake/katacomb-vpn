@@ -62,7 +62,7 @@ from it.
 | Module | Pinned version | License |
 |---|---|---|
 | [xjasonlyu/tun2socks](https://github.com/xjasonlyu/tun2socks) | v2.6.0 | MIT |
-| [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (the AmneziaWG 2.0 device; the commit sentinel-dvpnx pins) | v0.2.19 (`1cc9427`) | MIT |
+| [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) (the AmneziaWG 3.1 device, module path `/v3`; speaks every node's default tier unchanged and dvpnd's 3.1 tier) | v3.1.20260828 (`b5928ef`) | MIT |
 | [gvisor](https://github.com/google/gvisor) (the userspace netstack) | v0.0.0-20250523182742-eede7a881b20 | Apache-2.0 |
 | `golang.org/x/{crypto,net,sys,time}` | see notices | BSD-3-Clause |
 | `go.uber.org/{zap,atomic,multierr}`, `github.com/go-chi/*`, `github.com/google/*`, `github.com/gorilla/*`, `github.com/docker/go-units`, `github.com/ajg/form`, `github.com/go-gost/relay` | see notices | MIT / BSD-3-Clause / Apache-2.0 |

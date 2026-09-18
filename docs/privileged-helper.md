@@ -126,7 +126,12 @@ installs it. Daemon mode by hand: `sudo /usr/local/bin/katacomb-vpn-helper daemo
   `ensurePolkitSetup` compares bundled and installed helper with `Buffer.equals` (it is a
   binary), which only stays quiet across dev rebuilds because `build-daemon.sh` builds
   reproducibly (`-trimpath -buildid=`, no VCS stamp): building the same tree twice gives
-  the same bytes.
+  the same bytes. It runs on every start, daemon or not (it used to be skipped when the
+  daemon socket existed): a dev rebuild on a machine with the deb's daemon otherwise
+  leaves the daemon on the OLD binary, which accepts the app's ops but validates configs
+  with the old allow-lists and refuses as root, after the session is paid for (seen
+  2026-09-18 with the AmneziaWG 3.1 keys). Its pkexec script ends with
+  `systemctl try-restart katacomb-vpn-daemon.service`, a no-op where no unit exists.
 - **`scripts/build-daemon.sh` fails loudly**: it asserts `go version` equals go.mod's
   `toolchain`, runs `go vet` + `go mod verify`, and asserts the output is statically
   linked (`CGO_ENABLED=0`) — because electron-builder only WARNS on a missing

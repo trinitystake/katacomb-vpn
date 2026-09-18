@@ -95,10 +95,10 @@ func TestToUAPIIgnoresAddressAndDNS(t *testing.T) {
 	pub64, _ := testKey(100)
 	base := fullConfig(priv64, pub64)
 	variants := map[string]string{
-		"node list":  base,
-		"replaced":   strings.Replace(base, "DNS = 10.8.0.1,1.0.0.1,1.1.1.1", "DNS = 1.1.1.1", 1),
-		"stripped":   strings.Replace(base, "DNS = 10.8.0.1,1.0.0.1,1.1.1.1\n", "", 1),
-		"two addrs":  strings.Replace(base, "Address = 10.155.181.6/32", "Address = 10.155.181.6/32,fd00::6/128", 1),
+		"node list": base,
+		"replaced":  strings.Replace(base, "DNS = 10.8.0.1,1.0.0.1,1.1.1.1", "DNS = 1.1.1.1", 1),
+		"stripped":  strings.Replace(base, "DNS = 10.8.0.1,1.0.0.1,1.1.1.1\n", "", 1),
+		"two addrs": strings.Replace(base, "Address = 10.155.181.6/32", "Address = 10.155.181.6/32,fd00::6/128", 1),
 	}
 	want, err := ToUAPI([]byte(base))
 	if err != nil {
@@ -249,5 +249,56 @@ func TestToUAPIErrorsCarryLineNumbers(t *testing.T) {
 	_, err := ToUAPI([]byte(cfg))
 	if err == nil || !strings.HasPrefix(err.Error(), "line 10:") {
 		t.Fatalf("want a 'line 10:' error, got %v", err)
+	}
+}
+
+// tierThreeConfig is fullConfig with the 3.1 tier's keys, as the builder emits
+// them for a node that answered awg_version 3.
+func tierThreeConfig(priv, pub, header string) string {
+	return strings.Replace(fullConfig(priv, pub), "I1 = <b 0xdeadbeef><r 16><t>\n",
+		"I1 = <b 0xdeadbeef><r 16><t>\nMTU = 1280\nHeaderProtectionKey = "+header+
+			"\nRandomTrailers = on\nContentPaddingAddition = 0-32\n", 1)
+}
+
+func TestToUAPITierThreeKeys(t *testing.T) {
+	priv64, _ := testKey(1)
+	pub64, _ := testKey(100)
+	header64, headerHex := testKey(200)
+	got, err := ToUAPI([]byte(tierThreeConfig(priv64, pub64, header64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"header_protection_key=" + headerHex + "\n",
+		"random_trailers=true\n",
+		"content_padding_addition=0-32\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in\n%s", want, got)
+		}
+	}
+	// MTU stays with ops, and the key must have become hex.
+	if strings.Contains(got, "mtu") || strings.Contains(got, header64) {
+		t.Fatalf("MTU or base64 key leaked into the UAPI:\n%s", got)
+	}
+	if strings.Index(got, "i1=") > strings.Index(got, "header_protection_key=") {
+		t.Fatalf("device lines must keep the INI's order:\n%s", got)
+	}
+}
+
+func TestToUAPIRejectsMalformedTierThreeValues(t *testing.T) {
+	priv64, _ := testKey(1)
+	pub64, _ := testKey(100)
+	header64, _ := testKey(200)
+	base := tierThreeConfig(priv64, pub64, header64)
+	for name, cfg := range map[string]string{
+		"short header key": strings.Replace(base, header64, base64.StdEncoding.EncodeToString(make([]byte, 31)), 1),
+		"trailers word":    strings.Replace(base, "RandomTrailers = on", "RandomTrailers = maybe", 1),
+		"padding shape":    strings.Replace(base, "ContentPaddingAddition = 0-32", "ContentPaddingAddition = 32-", 1),
+		"padding words":    strings.Replace(base, "ContentPaddingAddition = 0-32", "ContentPaddingAddition = lots", 1),
+	} {
+		if _, err := ToUAPI([]byte(cfg)); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
 	}
 }

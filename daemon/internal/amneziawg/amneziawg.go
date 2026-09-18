@@ -1,7 +1,8 @@
 // Package amneziawg is the hidden `_amneziawg` sub-mode: the AmneziaWG userspace
-// device (github.com/amnezia-vpn/amneziawg-go, at the exact commit sentinel-dvpnx
-// pins — AmneziaWG 2.0, the protocol every Sentinel node speaks) linked into the
-// helper. `awg-up` self-execs `katacomb-vpn-helper _amneziawg <config>` detached, so
+// device (github.com/amnezia-vpn/amneziawg-go/v3, the AmneziaWG 3.1 engine: with
+// the 3.x keys unset it is the 2.0 engine byte for byte on the wire, so it speaks
+// every Sentinel node's default parameter set, and it also speaks the opt-in 3.1
+// tier a dvpnd node offers) linked into the helper. `awg-up` self-execs `katacomb-vpn-helper _amneziawg <config>` detached, so
 // root runs a binary at a real filesystem path (/usr/local/bin) instead of the three
 // vendored executables it used to be handed — which on the AppImage was a bindir on
 // a FUSE mount root cannot read, and left AmneziaWG broken there.
@@ -33,13 +34,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/tun"
+	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
 )
 
 const (
@@ -83,6 +85,12 @@ var deviceKeys = map[string]string{
 	"i3":         "i3",
 	"i4":         "i4",
 	"i5":         "i5",
+	// The AmneziaWG 3.1 tier (dvpnd nodes, on request): the interface-wide header
+	// protection key, whether every packet carries random trailers, and this side's
+	// own transport padding range.
+	"headerprotectionkey":    "header_protection_key",
+	"randomtrailers":         "random_trailers",
+	"contentpaddingaddition": "content_padding_addition",
 }
 
 var skippedInterfaceKeys = map[string]bool{
@@ -90,7 +98,16 @@ var skippedInterfaceKeys = map[string]bool{
 }
 
 // keyValued are the INI keys whose value is a base64 key that becomes hex.
-var keyValued = map[string]bool{"privatekey": true, "publickey": true, "presharedkey": true}
+var keyValued = map[string]bool{"privatekey": true, "publickey": true, "presharedkey": true, "headerprotectionkey": true}
+
+// boolValued are the INI keys whose value is wg-quick's on/off and becomes the
+// UAPI's true/false; rangeValued the ones whose value is the engine's "min-max"
+// (or single value) range, passed through after a shape check.
+var (
+	boolValued  = map[string]bool{"randomtrailers": true}
+	rangeValued = map[string]bool{"contentpaddingaddition": true}
+	reRange     = regexp.MustCompile(`^\d{1,5}(-\d{1,5})?$`)
+)
 
 // numeric are the INI keys whose value must parse as an unsigned decimal. The
 // device enforces its own ranges (device/uapi.go); this only refuses non-numbers
@@ -239,8 +256,9 @@ func ToUAPI(ini []byte) (string, error) {
 }
 
 // translateValue converts one INI value to its UAPI form: base64 keys become hex,
-// numerics are checked to be unsigned decimals and passed through, everything
-// else (endpoints, the I1–I5 signature tag chains) passes through verbatim.
+// numerics are checked to be unsigned decimals and passed through, on/off becomes
+// true/false, ranges are shape-checked, everything else (endpoints, the I1–I5
+// signature tag chains) passes through verbatim.
 func translateValue(key, value string) (string, error) {
 	switch {
 	case keyValued[key]:
@@ -252,6 +270,19 @@ func translateValue(key, value string) (string, error) {
 	case numeric[key]:
 		if _, err := strconv.ParseUint(value, 10, 32); err != nil {
 			return "", errors.New("not an unsigned decimal")
+		}
+		return value, nil
+	case boolValued[key]:
+		switch strings.ToLower(value) {
+		case "on":
+			return "true", nil
+		case "off":
+			return "false", nil
+		}
+		return "", errors.New("not on or off")
+	case rangeValued[key]:
+		if !reRange.MatchString(value) {
+			return "", errors.New("not a range")
 		}
 		return value, nil
 	default:

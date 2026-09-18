@@ -25,7 +25,8 @@ import { buildXRayConfig } from '../protocols/xray-config'
 import { buildMultihopConfig, type HopSpec } from '../protocols/multihop-config'
 import { buildHandshakeBody, postHandshake } from '../protocols/node-handshake'
 import { buildHysteria2Config } from '../protocols/hysteria-config'
-import { buildAmneziaWgConfig } from '../protocols/amneziawg-config'
+import { buildAmneziaWgConfig, nodeOffersAwgVersion3, AWG_VERSION_3 } from '../protocols/amneziawg-config'
+import { fetchNodeServiceMetadata } from '../nodes/node-tester'
 import { buildWireguardConfig } from '../protocols/wireguard-config'
 import { buildV2RayConfig } from '../protocols/v2ray-config'
 import { generateWireguardKeypair, generateProxyUuid, uuidToBytes } from './chain-keys'
@@ -39,6 +40,8 @@ const GAS_PRICE = GasPrice.fromString(GAS_PRICE_STR)
 // to the handshake POST (the SDK's axios call has no timeout), which would wedge
 // the paid connect flow forever — bound the wait so it fails into the refund path.
 const HANDSHAKE_TIMEOUT_MS = 15_000
+// Reading the node's inbound list before an AmneziaWG handshake, to ask for its 3.1 tier.
+const AWG_TIER_LOOKUP_TIMEOUT_MS = 10_000
 // The same wait, for a handshake that crosses the entry hop on its way to the exit (see
 // handshakeChainExit). Failing this one costs a session that is already paid for, so it
 // is deliberately generous about latency we added ourselves.
@@ -606,8 +609,22 @@ export async function performHandshake(params: {
     // amneziawg-config.ts builds the INI instead. Any builder throw (bad metadata
     // from an adversarial node) propagates into establishSessionOrRefund's refund path.
     const wg = generateWireguardKeypair()
+    // Ask for the AmneziaWG 3.1 tier when the node's root document lists one (a
+    // dvpnd node with its [v3] section on). A node that lists none, or that could
+    // not be asked in time, gets the plain request and answers with the default
+    // tier, which every node speaks; the paid session is not at risk either way.
+    let awgVersion: number | undefined
+    try {
+      const inbounds = await withTimeout(fetchNodeServiceMetadata(remoteUrl), AWG_TIER_LOOKUP_TIMEOUT_MS, 'node inbound list')
+      if (nodeOffersAwgVersion3(inbounds)) awgVersion = AWG_VERSION_3
+    } catch (err) {
+      console.warn(`[session] could not read the node's inbound list, asking for the default AmneziaWG tier: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    const peerRequest = awgVersion === undefined
+      ? { public_key: wg.publicKey }
+      : { public_key: wg.publicKey, awg_version: awgVersion }
     const result = await withTimeout(
-      sdkHandshake(sid, { public_key: wg.publicKey }, privKey, remoteUrl),
+      sdkHandshake(sid, peerRequest, privKey, remoteUrl),
       HANDSHAKE_TIMEOUT_MS,
       'node handshake',
     )
@@ -616,6 +633,8 @@ export async function performHandshake(params: {
     const metadata = Array.isArray(handshakeData.metadata) ? handshakeData.metadata : []
     const assignedAddrs = Array.isArray(handshakeData.addrs) ? handshakeData.addrs : []
     const configString = buildAmneziaWgConfig(metadata, result.addrs, assignedAddrs, wg.privateKey)
+    const granted = metadata[0]?.awg_version === AWG_VERSION_3 ? '3.1 (header protection)' : 'default'
+    console.log(`[session] AmneziaWG tier: ${granted}${awgVersion === undefined ? '' : ' (asked for 3)'}`)
 
     saveSessionConfig({
       sessionId,

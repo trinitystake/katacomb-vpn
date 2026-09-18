@@ -438,6 +438,8 @@ const AWG_INTERFACE_KEYS = new Set([
   's1', 's2', 's3', 's4',
   'h1', 'h2', 'h3', 'h4',
   'i1', 'i2', 'i3', 'i4', 'i5',
+  // The AmneziaWG 3.1 tier a dvpnd node offers on request.
+  'headerprotectionkey', 'randomtrailers', 'contentpaddingaddition',
 ])
 const AWG_UINT16_KEYS = new Set(['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4'])
 const AWG_UINT32_KEYS = new Set(['h1', 'h2', 'h3', 'h4'])
@@ -466,6 +468,22 @@ function assertSafeAmneziaWgValue(key: string, value: string): void {
     if (v.length > AWG_I_MAX_LENGTH || !AWG_I_TAGS.test(v)) {
       throw new Error(`AmneziaWG config: "${key}" signature packet is malformed`)
     }
+    return
+  }
+  if (key === 'headerprotectionkey') {
+    // A wrong-length key is only refused by the device at bring-up, after the
+    // session is paid for; refuse it here like the builder does.
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(v) || Buffer.from(v, 'base64').length !== 32) {
+      throw new Error(`AmneziaWG config: "${key}" must be a 32-byte base64 key`)
+    }
+    return
+  }
+  if (key === 'randomtrailers') {
+    if (!/^(on|off)$/.test(v)) throw new Error(`AmneziaWG config: "${key}" must be on or off`)
+    return
+  }
+  if (key === 'contentpaddingaddition') {
+    if (!/^\d{1,5}(-\d{1,5})?$/.test(v)) throw new Error(`AmneziaWG config: "${key}" must be a min-max range`)
     return
   }
   assertSafeWireguardValue(key, value)

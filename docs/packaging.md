@@ -167,7 +167,7 @@ binaries carry their upstream text as `resources/linux/bin/LICENSE.<name>`, and
 `THIRD-PARTY-LICENSES.md` records each one's pinned version/commit. Nothing shipped is
 under GPL-2.0 since Phase 3 replaced the `awg`/`awg-quick`/`amneziawg-go` trio with the
 embedded device. The privileged helper statically LINKS tun2socks v2.6.0 (MIT, despite
-the v1 series having been GPL-3.0) and the AmneziaWG device (`amneziawg-go` v0.2.19, MIT)
+the v1 series having been GPL-3.0) and the AmneziaWG device (`amneziawg-go/v3` v3.1.20260828, MIT)
 and their dependencies (gvisor Apache-2.0, `golang.org/x` BSD-3, …): `scripts/gen-go-notices.sh`
 regenerates `daemon/THIRD-PARTY-NOTICES.md` from `go list -deps` — rerun it after any
 change to `daemon/go.mod` — and it ships beside `THIRD-PARTY-LICENSES.md`. `LICENSE`,

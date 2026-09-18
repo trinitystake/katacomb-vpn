@@ -23,6 +23,7 @@
 package guard
 
 import (
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -105,6 +106,8 @@ var (
 		"s1", "s2", "s3", "s4",
 		"h1", "h2", "h3", "h4",
 		"i1", "i2", "i3", "i4", "i5",
+		// The AmneziaWG 3.1 tier a dvpnd node offers on request.
+		"headerprotectionkey", "randomtrailers", "contentpaddingaddition",
 	)
 	awgUint16Keys = set("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
 	awgUint32Keys = set("h1", "h2", "h3", "h4")
@@ -112,8 +115,11 @@ var (
 	reAwgUint16   = regexp.MustCompile(`^\d{1,5}$`)
 	reAwgUint32   = regexp.MustCompile(`^\d{1,10}$`)
 	// awg signature-packet tag grammar.
-	reAwgITags     = regexp.MustCompile(`^(<b 0x[0-9a-fA-F]+>|<r \d{1,5}>|<rd \d{1,5}>|<rc \d{1,5}>|<t>)+$`)
-	awgIMaxLength  = 4096
+	reAwgITags    = regexp.MustCompile(`^(<b 0x[0-9a-fA-F]+>|<r \d{1,5}>|<rd \d{1,5}>|<rc \d{1,5}>|<t>)+$`)
+	awgIMaxLength = 4096
+	// The 3.1 tier's values: wg-quick's on/off, and the engine's "min-max" range.
+	reAwgOnOff = regexp.MustCompile(`^(on|off)$`)
+	reAwgRange = regexp.MustCompile(`^\d{1,5}(-\d{1,5})?$`)
 )
 
 func awgValueOK(key, value string) bool {
@@ -133,6 +139,18 @@ func awgValueOK(key, value string) bool {
 		return n <= 4294967295
 	case awgIKeys[key]:
 		return len(v) <= awgIMaxLength && reAwgITags.MatchString(v)
+	case key == "headerprotectionkey":
+		// A wrong-length key is only refused by the device at bring-up, after the
+		// session is paid for; refuse it here like the builder does.
+		if !reWgKey.MatchString(v) {
+			return false
+		}
+		raw, err := base64.StdEncoding.DecodeString(v)
+		return err == nil && len(raw) == 32
+	case key == "randomtrailers":
+		return reAwgOnOff.MatchString(v)
+	case key == "contentpaddingaddition":
+		return reAwgRange.MatchString(v)
 	}
 	return wgValueOK(key, value)
 }

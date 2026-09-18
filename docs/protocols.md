@@ -101,17 +101,34 @@ SOCKS5 listener (`isChildProxy()` narrows v2ray+xray+hysteria2 together). What d
   copyleft obligation went with the trio. Deliberate deviations: no anti-spoof nft
   firewall (the tun2socks path never had one; validated by a real handshake), IPv6
   routing best-effort, the kernel `amneziawg` module never tried.
-- **The `amneziawg-go` pin tracks `sentinel-dvpnx`'s `AMNEZIAWG_GO_COMMIT`, never
-  upstream latest** (today `1cc9427` = `v0.2.19` = **AmneziaWG 2.0**, the protocol every
-  node speaks; verify against dvpnx's `Dockerfile` before any bump). AmneziaWG 3.x
-  (`v3.0.0`+, upstream HEAD `v3.1.x`) is a **wire-protocol break** — `header_protection_key`
-  replaces the static H1–H4, plus random trailers/padding and randomized timers — so a
-  3.x client cannot handshake with a 2.0 node; a network move is node-led (go-sdk
-  `ServerMetadata` → dvpnx pin → our `amneziawg-config.ts` → the guard corpus →
-  `ToUAPI` → `go.mod`). The Go module proxy lists phantom `v1.0.x` tags that are not in
-  the repo; ignore them.
+- **The `amneziawg-go` pin is the 3.1 engine** (`github.com/amnezia-vpn/amneziawg-go/v3`
+  at `v3.1.20260828`; the module path gained `/v3` with the 3.x line). It is safe against
+  every node on the network: with the 3.x keys unset the 3.1 engine's send and receive
+  paths are the 2.0 engine's byte for byte, so the default parameter set every node
+  hands out (single-value H1–H4, S1/S2 prefixes, optional I1–I5) is framed exactly as
+  before. The 3.x mechanisms — a `header_protection_key` that encrypts the type field
+  and header of every packet (H1–H4 stay, encrypted), random trailers, content padding,
+  randomised timers — are a **wire-protocol break** that no node negotiates in-band, so
+  a node can only offer them as a second, opt-in tier. dvpnd nodes do (see below); the
+  network's other node software has no such tier, and its nodes get the plain request.
+  The Go module proxy lists phantom `v1.0.x` tags that are not in the repo; ignore them.
+- **The AmneziaWG 3.1 tier (dvpnd nodes).** Such a node lists two blank inbounds in its
+  root document's `service_metadata`, `awg_version: 2` and `awg_version: 3`.
+  `performHandshake` reads that list (`fetchNodeServiceMetadata`, 10 s, failure = plain
+  request) and, when 3 is offered, sends `{public_key, awg_version: 3}`. The node then
+  answers from its 3.1 interface: the usual entry (its own port and key, `s1..s4` all ≥
+  12) plus `awg_version: 3`, `header_protection_key` (base64, 32 bytes),
+  `random_trailers` (we mirror it) and `mtu` (1280). `buildAmneziaWgConfig` validates
+  those (throw → refund, like everything else) and emits `MTU`, `HeaderProtectionKey`,
+  `RandomTrailers = on|off` and our own `ContentPaddingAddition = 0-32`; the guard
+  allow-lists exactly those four (`v3-tier.conf` and three rejects in the corpus),
+  `ToUAPI` turns the key into hex, on/off into true/false and passes the range through,
+  and ops honours the config's `MTU` over the path-MTU computation. Junk packets stay
+  ours, headers stay single integers (the tier does not use ranges). The contract is
+  the AmneziaWG section of dvpnd's `docs/protocols.md`; the log line `[session]
+  AmneziaWG tier: …` says which tier a session landed on.
 - **`scripts/verify-awg-handshake.sh` is the acceptance test**: two containers, the
-  server built from the dvpnx-pinned upstream commits under the real `awg-quick`, the
+  server built from the 3.1 upstream commits dvpnd pins under the real `awg-quick`, the
   client our helper's `awg-up`; ICMP+HTTP through the tunnel proves the translation and
   the routing (28 checks, with and without DNS). A wrong `ToUAPI` shows up there as "no
   handshake" and nowhere else. `amneziawg_ops_test.go` pins the native command sequence

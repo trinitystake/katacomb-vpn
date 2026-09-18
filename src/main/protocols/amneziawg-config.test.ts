@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildAmneziaWgConfig, type AwgMetadataEntry } from './amneziawg-config.ts'
+import { buildAmneziaWgConfig, nodeOffersAwgVersion3, type AwgMetadataEntry } from './amneziawg-config.ts'
 
 // Field names/shapes follow sentinel-go-sdk amneziawg/metadata.go: the node sends
 // port + public_key (like plain WireGuard) plus the obfuscation params s1..s4 /
@@ -149,4 +149,60 @@ test('buildAmneziaWgConfig rejects signature packets outside the tag grammar', (
     () => buildAmneziaWgConfig([{ ...META, i2: '<b 0xff>\nPostUp = /bin/sh' }], ADDRS, ASSIGNED, PRIVKEY),
     /signature packet/,
   )
+})
+
+// The 3.1 tier entry a dvpnd node answers with when asked for awg_version 3: the
+// default keys plus the header protection key, the trailers flag and the MTU.
+const META3: AwgMetadataEntry = {
+  ...META,
+  port: 8443,
+  s1: 45,
+  s2: 70,
+  s3: 24,
+  s4: 16,
+  awg_version: 3,
+  header_protection_key: Buffer.from('header protection key header key').toString('base64'),
+  random_trailers: true,
+  mtu: 1280,
+}
+
+test('buildAmneziaWgConfig emits the 3.1 tier keys for an awg_version 3 entry', () => {
+  const cfg = parseIni(buildAmneziaWgConfig([META3], ADDRS, ASSIGNED, PRIVKEY))
+  assert.equal(cfg.interface.MTU, '1280')
+  assert.equal(cfg.interface.HeaderProtectionKey, META3.header_protection_key)
+  assert.equal(cfg.interface.RandomTrailers, 'on')
+  assert.equal(cfg.interface.ContentPaddingAddition, '0-32')
+  assert.equal(cfg.interface.S3, '24')
+  assert.equal(cfg.peer.Endpoint, '203.0.113.10:8443')
+})
+
+test('buildAmneziaWgConfig leaves the default tier exactly as before', () => {
+  for (const entry of [META, { ...META, awg_version: 2 }]) {
+    const cfg = parseIni(buildAmneziaWgConfig([entry], ADDRS, ASSIGNED, PRIVKEY))
+    for (const key of ['MTU', 'HeaderProtectionKey', 'RandomTrailers', 'ContentPaddingAddition']) {
+      assert.equal(cfg.interface[key], undefined, `${key} must not appear on the default tier`)
+    }
+  }
+})
+
+test('buildAmneziaWgConfig rejects a malformed 3.1 tier entry', () => {
+  const short = Buffer.alloc(31).toString('base64')
+  const build = (entry: AwgMetadataEntry) => () => buildAmneziaWgConfig([entry], ADDRS, ASSIGNED, PRIVKEY)
+  assert.throws(build({ ...META3, header_protection_key: short }), /header protection key/)
+  assert.throws(build({ ...META3, header_protection_key: undefined }), /header protection key/)
+  assert.throws(build({ ...META3, random_trailers: 'on' as unknown as boolean }), /random_trailers/)
+  assert.throws(build({ ...META3, mtu: 9000 }), /invalid mtu/)
+  assert.throws(build({ ...META3, mtu: undefined }), /invalid mtu/)
+  assert.throws(build({ ...META3, s4: 8 }), /too small for header protection/)
+  assert.throws(build({ ...META, awg_version: 4 }), /unknown awg_version/)
+})
+
+test('nodeOffersAwgVersion3 reads the root document inbound list', () => {
+  const blank = { port: 0, public_key: null, s1: 0, s2: 0, s3: 0, s4: 0, h1: 0, h2: 0, h3: 0, h4: 0 }
+  assert.equal(nodeOffersAwgVersion3([{ ...blank, awg_version: 2 }, { ...blank, awg_version: 3 }]), true)
+  assert.equal(nodeOffersAwgVersion3([{ ...blank, awg_version: 2 }]), false)
+  assert.equal(nodeOffersAwgVersion3([blank]), false)
+  assert.equal(nodeOffersAwgVersion3([]), false)
+  assert.equal(nodeOffersAwgVersion3(undefined), false)
+  assert.equal(nodeOffersAwgVersion3('nope'), false)
 })
